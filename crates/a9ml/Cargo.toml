@@ -1,0 +1,12 @@
+[package]
+name = "a9ml"
+description = "A-Train 9 mod loader — authoring & diagnostics CLI"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+a9-formats = { path = "../a9-formats" }
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+flate2 = "1"

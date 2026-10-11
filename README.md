@@ -4,10 +4,11 @@ A mod loader for A-Train 9 v5 — a Rust workspace. Everything a mod declares
 executes at boot, inside the game process, through a `version.dll` proxy:
 installing a mod is copying its folder; the game directory stays vanilla.
 
-**Status: M0 — Rust parity port of the C reference proxy.** The general
-engine (build-id gate, mod manifests, runtime overlay) lands with M2/M3. The
-architecture plan lives in the research corpus:
-`projects/mod-loader/PLAN.md` (A-Train 9 Decompilation folder).
+**Status: M1 — format library with proofs.** The `version.dll` proxy parity
+port (M0) is live in the game install; the general engine (build-id gate, mod
+manifests, runtime overlay) lands with M2/M3. The architecture plan lives in
+the research corpus: `projects/mod-loader/PLAN.md` (A-Train 9 Decompilation
+folder).
 
 ## Supported builds
 
@@ -23,7 +24,10 @@ for simple mods.
 ## Layout
 
 ```
+crates/a9-formats  every data-format codec: pack cipher, LZSS, family-A/B
+                   containers, i.dat, csvp, savegame members
 crates/a9-loader   the cdylib product (lib name "version" -> version.dll)
+crates/a9ml        authoring & diagnostics CLI (verify, inspect)
 harness/           wine A/B harness: fake-game host, compares this port with
                    the C reference across all six ini modes
 ```
@@ -79,14 +83,23 @@ list file in a filter mode installs the hook with an **empty** allow list.
 ## Test
 
 ```
-cargo test                      # pure-logic unit tests (ini/forms/bitmap)
-harness/run.sh [game-exe-path]  # full A/B against the C reference under
+cargo test                      # unit tests (codecs, containers, i.dat, savegame)
+harness/run.sh [game-exe-path]  # loader A/B against the C reference under
                                 # wine: all six modes, real FORM list + real
                                 # filter lists; exits nonzero on any mismatch
+a9ml verify [--data-dir DIR] [--oracle DIR] [--expect-rebuild KEYS]
+a9ml inspect <pack>             # decode + describe one pack
 ```
 
-The harness is also the M0 acceptance evidence: mode `model` must keep the
-same set of forms in both the C and the Rust proxy.
+`a9ml verify` proves the format library against real game data: every pack
+in each `--data-dir` is decrypted (MD5 integrity check), decoded, structurally
+validated (container walks must consume exactly), re-encoded and round-tripped;
+with `--oracle` (a dir holding the C reference tools `a9enc`/`a9dec`) it also
+byte-differs the LZSS encoder/decoder against the C reference; with
+`--expect-rebuild` it requires named packs to re-materialize byte-identically.
+The harness is the M0 acceptance evidence; `a9ml verify` is the M1 one
+(the live repacked packs `me3`, `mtcutp0`, `mtentr0`, `csvp` re-materialize
+byte-identically through the library).
 
 ## AI usage disclosure
 

@@ -1,0 +1,11 @@
+[package]
+name = "a9-formats"
+description = "A-Train 9 v5 data-format codecs: pack crypto, LZSS, family-A/B containers, i.dat, csvp, savegame members"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+flate2 = "1"
+md-5 = "0.10"
+thiserror = "2"

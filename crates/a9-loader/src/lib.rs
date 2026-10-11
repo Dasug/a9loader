@@ -18,8 +18,10 @@
 
 #![allow(non_snake_case)]
 
-mod forms; // pure: FORM list / allow-list parsing + bitmap (host-testable)
-mod ini; // pure: atrain9_proxy.ini [patch] mode reader (host-testable)
+// pure, host-testable; pub because the M2 engine consumes them from both
+// targets and the host lib build has no other callers (avoids dead-code noise)
+pub mod forms;
+pub mod ini;
 
 #[cfg(target_os = "windows")]
 mod compat; // DllMain glue: mode dispatch (parity with version_proxy.c)
