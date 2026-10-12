@@ -7,6 +7,7 @@ license.workspace = true
 
 [dependencies]
 a9-formats = { path = "../a9-formats" }
+a9-mod = { path = "../a9-mod" }
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 flate2 = "1"

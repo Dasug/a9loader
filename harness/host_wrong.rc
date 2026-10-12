@@ -1,0 +1,21 @@
+// host_wrong.rc — the WRONG-build host: FILEVERSION 5,0,0,9999 must make the
+// engine refuse all memory effects with a loud log line (vanilla boot).
+1 VERSIONINFO
+FILEVERSION 5,0,0,9999
+PRODUCTVERSION 5,0,0,9999
+FILEOS 0x40004
+FILETYPE 0x1
+BEGIN
+  BLOCK "StringFileInfo"
+  BEGIN
+    BLOCK "040904B0"
+    BEGIN
+      VALUE "FileDescription", "a9loader M2 harness host (wrong build)"
+      VALUE "FileVersion", "5.00.9999"
+    END
+  END
+  BLOCK "VarFileInfo"
+  BEGIN
+    VALUE "Translation", 0x409, 1200
+  END
+END

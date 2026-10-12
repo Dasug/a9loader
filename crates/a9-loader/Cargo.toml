@@ -1,9 +1,13 @@
 [package]
 name = "a9-loader"
-description = "A-Train 9 v5 mod loader — the version.dll proxy product (M0: parity port of the C reference)"
+description = "A-Train 9 v5 mod loader — the version.dll proxy product"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+
+[dependencies]
+a9-mod = { path = "../a9-mod" }
+toml = "0.9"
 
 [lib]
 # lib name "version" so the cdylib artifact is version.dll — the proxy file name

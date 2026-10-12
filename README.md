@@ -4,11 +4,12 @@ A mod loader for A-Train 9 v5 — a Rust workspace. Everything a mod declares
 executes at boot, inside the game process, through a `version.dll` proxy:
 installing a mod is copying its folder; the game directory stays vanilla.
 
-**Status: M1 — format library with proofs.** The `version.dll` proxy parity
-port (M0) is live in the game install; the general engine (build-id gate, mod
-manifests, runtime overlay) lands with M2/M3. The architecture plan lives in
-the research corpus: `projects/mod-loader/PLAN.md` (A-Train 9 Decompilation
-folder).
+**Status: M2 — the general loader engine.** Mods are data (`mod.toml`
+manifests in `mods/`); the engine gates on the running build's identity,
+resolves dependencies/conflicts, and applies expect-verified, journaled
+effects at boot. The runtime overlay (`[[pack]]`/`[[csv]]` content mods)
+lands with M3. The architecture plan lives in the research corpus:
+`projects/mod-loader/PLAN.md` (A-Train 9 Decompilation folder).
 
 ## Supported builds
 
@@ -26,10 +27,11 @@ for simple mods.
 ```
 crates/a9-formats  every data-format codec: pack cipher, LZSS, family-A/B
                    containers, i.dat, csvp, savegame members
+crates/a9-mod      the mod model: manifest schema, dependency resolution,
+                   build identity, anchor address book, loader config
 crates/a9-loader   the cdylib product (lib name "version" -> version.dll)
-crates/a9ml        authoring & diagnostics CLI (verify, inspect)
-harness/           wine A/B harness: fake-game host, compares this port with
-                   the C reference across all six ini modes
+crates/a9ml        authoring & diagnostics CLI (verify, inspect, list, doctor)
+harness/           wine harness: the full M2 engine scenarios (m2.sh)
 ```
 
 ## Build
@@ -60,46 +62,62 @@ cargo build --release --target x86_64-pc-windows-gnu
 
 - `version.dll` (replaces the C reference proxy — the C original stays in the
   corpus `projects/dll-proxy/`)
-- `atrain9_proxy.ini` + `atrain9_filter*.txt` — unchanged from the C proxy
-  (M0 is behaviorally identical)
 - launch via Steam launch options: `WINEDLLOVERRIDES="version=n,b" %command%`
-- the loader logs to `a9loader.log` next to the exe
+- the loader logs to `mods/a9loader.log`
 
-## Modes (`atrain9_proxy.ini`, `[patch]` `mode = …`)
+The old C proxy's `atrain9_proxy.ini` is not read at all (that support was
+dropped before anything shipped) — a filter is a mod like any other: copy
+`atrain9_filter_model.txt` into a mod folder and point `[[hook]] list` at it.
 
-| mode | effect |
-|---|---|
-| `filter` (default) | keep the forms listed in `atrain9_filter.txt` |
-| `model` | keep the forms in `atrain9_filter_model.txt` |
-| `modeltex` | keep the forms in `atrain9_filter_modeltex.txt` |
-| `nop` | keep every valid form (all 417) |
-| `table113` | legacy diagnostic: whitelist entry 6 = FORM_113 |
-| `none` | pure proxy, no patch |
+## Mods (`mods/<id>/mod.toml`)
 
-Semantics are identical to the C reference (see the corpus
-`projects/dll-proxy/README.md`), including the sharp edges: a missing/empty
-list file in a filter mode installs the hook with an **empty** allow list.
+A mod is a folder in `mods/` with a `mod.toml`; installing = copying the
+folder, removing = deleting it. Required fields: `id`, `name`, `version`,
+`author`. Optional: `game_builds` (exact build ids gating memory effects),
+`priority`, `supplies`/`requires`/`conflicts` (every mod implicitly supplies
+its own id; conflicts are symmetric; lower priority loses unless
+`allow_conflicts = true`).
+
+```toml
+id = "trainnames"
+name = "Train names"
+version = "1.0.0"
+author = "you"
+
+[[hook]]
+target = "train_list_filter"     # named anchor (per-build address book)
+handler = "train_list"            # built-in handler registry
+mode = "allow"                   # or "deny" (drop the listed forms)
+list = "atrain9_filter_model.txt"# inside the mod folder
+```
+
+`[[patch]]` writes raw bytes (`data` hex) at an anchor + offset, gated on
+`expect` original bytes (raw `rva` targets are a diagnostic escape hatch and
+require their own `expect`). Every anchored write verifies the address
+book's recorded original bytes first — a game update refuses loudly instead
+of corrupting memory. The loader (`a9loader.toml`, next to the exe) can
+change `mods_dir`, disable mods, override priorities/`order`, and allow
+conflicts. `a9ml list --game <dir>` shows the offline resolution; `a9ml
+doctor --game <dir>` adds the build identity and the log tail.
 
 ## Test
 
 ```
-cargo test                      # unit tests (codecs, containers, i.dat, savegame)
-harness/run.sh [game-exe-path]  # loader A/B against the C reference under
-                                # wine: all six modes, real FORM list + real
-                                # filter lists; exits nonzero on any mismatch
+cargo test                      # unit tests (codecs, mod model, engine logic)
+harness/m2.sh [game-exe-path]   # full M2 engine scenarios under wine: manifest
+                                # mods, deny, wrong-build gate, overlap,
+                                # requires/conflicts, patches, game_builds
+                                # gate, broken lists; exits nonzero on failure
 a9ml verify [--data-dir DIR] [--oracle DIR] [--expect-rebuild KEYS]
 a9ml inspect <pack>             # decode + describe one pack
+a9ml list --game DIR            # offline mod resolution for a game dir
+a9ml doctor --game DIR          # + build identity, gates, loader log tail
 ```
 
-`a9ml verify` proves the format library against real game data: every pack
-in each `--data-dir` is decrypted (MD5 integrity check), decoded, structurally
-validated (container walks must consume exactly), re-encoded and round-tripped;
-with `--oracle` (a dir holding the C reference tools `a9enc`/`a9dec`) it also
-byte-differs the LZSS encoder/decoder against the C reference; with
-`--expect-rebuild` it requires named packs to re-materialize byte-identically.
-The harness is the M0 acceptance evidence; `a9ml verify` is the M1 one
-(the live repacked packs `me3`, `mtcutp0`, `mtentr0`, `csvp` re-materialize
-byte-identically through the library).
+`a9ml verify` proves the format library against real game data (the M1
+acceptance: the live repacked packs re-materialize byte-identically);
+`harness/m2.sh` is the M2 engine acceptance (the kept counts it asserts are
+the C reference's documented numbers — the M0 parity baseline).
 
 ## AI usage disclosure
 

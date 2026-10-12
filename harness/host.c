@@ -23,6 +23,15 @@
 #define RVA_TABLE  0x6FC1C0u
 #define RVA_FORMS  0x6FC430u
 
+/* the ORIGINAL bytes the M2 engine's address book records at its anchors —
+ * the engine verifies these before any write, so the fake pages must carry
+ * them (from the international Steam exe, file offset 0x1a07b0 / 0x6fb5c0) */
+static const unsigned char g_filter_orig[16] = {
+    0x48,0x89,0x5c,0x24,0x08,0x48,0x89,0x74,0x24,0x18,0x48,0x89,0x7c,0x24,0x20,0x48
+};
+static const unsigned char g_table_e0[4] = { 0x5f,0x00,0x00,0x00 }; /* whitelist entry 0 */
+static const unsigned char g_table_e6[4] = { 0xbb,0x00,0x00,0x00 }; /* whitelist entry 6 (table113 target) */
+
 typedef void *(*fn_t)(void *, DWORD *, DWORD *, void *);
 
 static BYTE *g_base;
@@ -50,6 +59,11 @@ int main(int argc, char **argv) {
         return 3;
     }
     memset((BYTE *)g_base + 0x1A1000, 0xCC, 0x1000);
+    /* the filter entry carries the real original prologue (expect-verified) */
+    memcpy((BYTE *)g_base + RVA_FILTER, g_filter_orig, sizeof(g_filter_orig));
+    /* the whitelist table carries its real original entries where recorded */
+    memcpy((BYTE *)g_base + RVA_TABLE, g_table_e0, sizeof(g_table_e0));
+    memcpy((BYTE *)g_base + RVA_TABLE + 24, g_table_e6, sizeof(g_table_e6));
 
     /* real FORM list bytes -> the mapped region (NUL-terminated UTF-16) */
     FILE *f = fopen(argv[1], "rb");
@@ -85,7 +99,7 @@ int main(int argc, char **argv) {
 
     if (!strcmp(mode, "none")) {
         BYTE *fnb = g_base + RVA_FILTER;
-        int unchanged = fnb[0] == 0xCC && fnb[15] == 0xCC;
+        int unchanged = memcmp(fnb, g_filter_orig, sizeof(g_filter_orig)) == 0;
         printf("mode=none: filter bytes %s\n", unchanged ? "unchanged (PASS)" : "PATCHED (FAIL)");
         return 0;
     }

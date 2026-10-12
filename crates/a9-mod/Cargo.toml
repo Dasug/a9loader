@@ -1,0 +1,12 @@
+[package]
+name = "a9-mod"
+description = "A-Train 9 mod model: manifest schema, dependency resolution, build identity, anchor address book, loader config"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+semver = { version = "1", features = ["serde"] }
+toml = "0.9"
+thiserror = "2"

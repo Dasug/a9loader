@@ -1,0 +1,26 @@
+# a9loader build address book — one entry per supported game build.
+# Anchors are named; mod manifests reference anchor names, never raw RVAs
+# (a raw rva target is the diagnostic escape hatch and must carry its own
+# `expect` bytes). `expect` values are the ORIGINAL bytes at the anchor,
+# verified in the mapped image before any write — a game update that shifts
+# code fails loudly instead of corrupting memory. These per-anchor checks
+# are the in-image build fingerprint; the build id itself comes from the
+# exe file's VERSIONINFO (parsed from bytes, never via the version.dll APIs
+# our proxy forwards).
+#
+# Provenance: international Steam ATrain9v5.exe, FILEVERSION 5,0,0,5634
+# (build id "5.00.5634"), extracted 2026-10-15 from the live install.
+# RVAs are in-image; file offsets noted in comments (.text/.rdata map
+# file = rva - 0xC00; per-section mapping via the PE section table).
+
+[build."5.00.5634".anchors.train_list_filter]
+rva = 0x1A13B0              # FUN_1401a13b0 (file 0x1a07b0)
+expect = "48,89,5c,24,08,48,89,74,24,18,48,89,7c,24,20,48"
+
+[build."5.00.5634".anchors.train_list_whitelist]
+rva = 0x6FC1C0              # 97-entry u32 table (file 0x6fb5c0)
+expect = "5f,00,00,00"        # entry 0 fingerprint
+
+[build."5.00.5634".anchors.form_list]
+rva = 0x6FC430              # UTF-16 comma-separated FORM names (file 0x6fb830)
+expect = "46,00,4f,00,52,00,4d,00,5f,00,32,00,30,00,31,00"        # head fingerprint
