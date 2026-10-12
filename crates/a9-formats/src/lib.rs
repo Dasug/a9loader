@@ -23,6 +23,7 @@
 //! `a9ml verify` is the machine that proves all of this against real packs.
 
 pub mod add;
+pub mod overlay;
 pub mod container;
 pub mod crypt;
 pub mod idat;

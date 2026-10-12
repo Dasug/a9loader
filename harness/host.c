@@ -16,12 +16,31 @@
  *   wine host.exe <form_list.bin> <mode>
  */
 #include <windows.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 
 #define RVA_FILTER 0x1A13B0u
 #define RVA_TABLE  0x6FC1C0u
 #define RVA_FORMS  0x6FC430u
+#define RVA_CFILE  0x41D40Cu   /* MFC CFile::Open — the M3 overlay hook point */
+
+/* M4 fetch-probe anchors (the four runtime fetch hooks the probe pins) */
+#define RVA_PACK 0x306E20u   /* FUN_140306e20 CPackFileBuffer::fetch */
+#define RVA_TEX  0x3010D0u   /* FUN_1403010d0 texture_fetch_miss_path */
+#define RVA_CCOM 0x2EC0E0u   /* FUN_1402ec0e0 CCommonShader::fetch */
+#define RVA_CACHE 0x3089B0u  /* FUN_1403089b0 global fetch-cache get */
+
+/* M4 inject-mode anchors (builds.toml famb_runner_call + the per-build
+ * constants the injector stub pins for build 5.00.5634) */
+#define RVA_INJ_SITE 0x3F0259u   /* the famb loader's pool-runner call (E8) */
+#define RVA_FAKE_RUNNER 0x504C0u /* the runner the E8 named = FUN_1400504c0 */
+#define RVA_POOL 0xF02470u       /* pool object {rows ptr, count, chunk arr} */
+#define RVA_POOL_ROWS 0xF02700u  /* the fake rows array (0x148 stride) */
+#define RVA_POOL_CHUNK 0xF02660u /* the chunk-size array (u32[8]) */
+#define RVA_POOL_CAP 0xD65DF0u   /* DAT_140d65df0 worker-row capacity */
+#define RVA_WSOUT 0x4F86088u     /* DAT_144f86088 workspace out ptr */
+#define RVA_OUTBUF 0x4F87000u    /* the fake decoded family-B stream */
 
 /* the ORIGINAL bytes the M2 engine's address book records at its anchors —
  * the engine verifies these before any write, so the fake pages must carry
@@ -31,6 +50,223 @@ static const unsigned char g_filter_orig[16] = {
 };
 static const unsigned char g_table_e0[4] = { 0x5f,0x00,0x00,0x00 }; /* whitelist entry 0 */
 static const unsigned char g_table_e6[4] = { 0xbb,0x00,0x00,0x00 }; /* whitelist entry 6 (table113 target) */
+
+/* the CFile::Open prologue (the address book's cfile_open expect bytes) —
+ * push rbx/rbp/rsi/rdi/r14/r15; sub rsp,0x288 (pure stack setup, no
+ * rip-relative instructions, so a [prologue][jmp entry+16] trampoline works) */
+static const unsigned char g_cfile_orig[16] = {
+    0x40,0x53,0x55,0x56,0x57,0x41,0x56,0x41,0x57,0x48,0x81,0xec,0x88,0x02,0x00,0x00
+};
+
+/* the M4 fetch-probe prologue RECORDS (the address book's expect bytes;
+ * machine-verified boundaries — each ends at an instruction boundary
+ * >= 16 so the 16-byte hook write fits and the trampoline re-enters
+ * cleanly) */
+static const unsigned char g_pack_orig[22] = {
+    0x40,0x55,0x53,0x56,0x57,0x41,0x56,0x48,0x8d,0xac,0x24,0x00,0xf8,0xff,0xff,
+    0x48,0x81,0xec,0x00,0x09,0x00,0x00
+};  /* pushes rbp,rbx,rsi,rdi,r14; lea rbp,[rsp-0x800]; sub rsp,0x900 */
+static const unsigned char g_tex_orig[19] = {
+    0x40,0x55,0x53,0x56,0x57,0x41,0x54,0x41,0x56,0x41,0x57,0x48,0x8d,0xac,0x24,
+    0x20,0xe0,0xff,0xff
+};  /* pushes rbp,rbx,rsi,rdi,r12,r14,r15; lea rbp,[rsp-0x1fe0] */
+static const unsigned char g_ccom_orig[20] = {
+    0x40,0x55,0x53,0x56,0x41,0x54,0x41,0x55,0x41,0x56,0x41,0x57,0x48,0x8d,0xac,
+    0x24,0x50,0xe8,0xff,0xff
+};  /* pushes rbp,rbx,rsi,r12,r13,r14,r15; lea rbp,[rsp-0x17b0] */
+static const unsigned char g_cache_orig[16] = {
+    0x48,0x8b,0xc4,0x57,0x41,0x54,0x41,0x55,0x41,0x56,0x41,0x57,0x48,0x83,0xec,0x40
+};  /* mov rax,rsp; pushes rdi,r12..r15; sub rsp,0x40 */
+
+/* the famb pool-runner call bytes the M4 inject address book records —
+ * E8 rel32 (the original call target = RVA_FAKE_RUNNER; RVA-relative, so
+ * the same bytes also aim the fake host's E8 at ITS image + 0x504c0) plus
+ * the two bytes that follow: `85 db` test ebx,ebx at site+5 (READ-ONLY
+ * fingerprint — the splice rewrites only the E8's 5 bytes) and a `74 00 C3`
+ * continuation so a plain call of the site entry returns cleanly */
+static const unsigned char g_famb_orig[7] = { 0xE8,0x62,0x02,0xC6,0xFF,0x85,0xDB };
+
+/* the fake original's body: entered via the 16-byte prologue above (from the
+ * mapped page or through the loader's trampoline), this thunk undoes the
+ * prologue's stack adjustment and tail-jumps into a plain C body — the RET
+ * of the body then returns to the original caller either way. */
+/* the asm thunk's symbol — defined by the __asm__ block below */
+extern void cfile_undo_thunk(void);
+
+__asm__(
+    ".globl cfile_undo_thunk\n"
+    "cfile_undo_thunk:\n"
+    "addq $0x288, %rsp\n"
+    "popq %r15\n"
+    "popq %r14\n"
+    "popq %rdi\n"
+    "popq %rsi\n"
+    "popq %rbp\n"
+    "popq %rbx\n"
+    "jmp cfile_open_body\n");
+
+/* non-static + used: referenced only from the asm thunk, so the compiler
+ * must not inline or eliminate it */
+__attribute__((used, noinline)) int cfile_open_body(void *cfile, const wchar_t *path, unsigned flags, void *perr)
+{
+    HANDLE h;
+    (void)flags; (void)perr;
+    /* the path the open used — THE redirect evidence for the harness */
+    printf("cfile_open_body: path=%ls\n", path);
+    h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL,
+                    OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h != INVALID_HANDLE_VALUE) {
+        *(uint64_t *)((char *)cfile + 8) = (uint64_t)h;
+        *(int *)((char *)cfile + 0x10) = 1;
+        return 1;
+    }
+    *(uint64_t *)((char *)cfile + 8) = (uint64_t)-1;
+    *(int *)((char *)cfile + 0x10) = 0;
+    return 0;
+}
+
+typedef int (*cfile_open_fn)(void *, const wchar_t *, unsigned, void *);
+
+/* ---- M4 fetch-probe fakes: for each anchor the fake page ends with an
+ * undo thunk (cancels the record's stack effects and pops the pushed
+ * registers) then the plain C body. Page-base-only content: the loader's
+ * trampoline re-enters at entry + record_len where the E9 lands in the
+ * undo thunk — same mechanics as the cfile fake above. The chkstk amounts
+ * are hard constants in the records (mov eax,0x20e0 / 0x18b0) and __chkstk
+ * returns its input in rax untouched, so the undo amounts are exact. */
+extern void pack_undo_thunk(void);
+extern void tex_undo_thunk(void);
+extern void ccom_undo_thunk(void);
+extern void cache_undo_thunk(void);
+
+__asm__(
+    ".globl pack_undo_thunk\n"
+    "pack_undo_thunk:\n"
+    "addq $0x900, %rsp\n"
+    "popq %r14\n"
+    "popq %rdi\n"
+    "popq %rsi\n"
+    "popq %rbx\n"
+    "popq %rbp\n"
+    "jmp pack_fetch_body\n"
+    ".globl tex_undo_thunk\n"
+    "tex_undo_thunk:\n"
+    "addq $0x20e0, %rsp\n"
+    "popq %r15\n"
+    "popq %r14\n"
+    "popq %r12\n"
+    "popq %rdi\n"
+    "popq %rsi\n"
+    "popq %rbx\n"
+    "popq %rbp\n"
+    "jmp tex_fetch_body\n"
+    ".globl ccom_undo_thunk\n"
+    "ccom_undo_thunk:\n"
+    "addq $0x18b0, %rsp\n"
+    "popq %r15\n"
+    "popq %r14\n"
+    "popq %r13\n"
+    "popq %r12\n"
+    "popq %rsi\n"
+    "popq %rbx\n"
+    "popq %rbp\n"
+    "jmp ccom_fetch_body\n"
+    ".globl cache_undo_thunk\n"
+    "cache_undo_thunk:\n"
+    "addq $0x40, %rsp\n"
+    "popq %r15\n"
+    "popq %r14\n"
+    "popq %r13\n"
+    "popq %r12\n"
+    "popq %rdi\n"
+    "jmp cache_get_body\n");
+
+__attribute__((used, noinline)) void *pack_fetch_body(void *pack, void *dest, const void *name_obj)
+{
+    (void)pack; (void)dest; (void)name_obj;
+    printf("pack_fetch_body: called\n");
+    return 0;
+}
+
+__attribute__((used, noinline)) void *tex_fetch_body(void *ctx, const wchar_t *src, const wchar_t *refname, unsigned mode)
+{
+    (void)ctx; (void)src; (void)refname; (void)mode;
+    printf("tex_fetch_body: called\n");
+    return 0;
+}
+
+__attribute__((used, noinline)) void *ccom_fetch_body(void *mgr, unsigned long long a2, const wchar_t *refname, unsigned long long a4, void **buf_out, unsigned *size_out)
+{
+    (void)mgr; (void)a2; (void)a4; (void)refname;
+    /* fulfill the out-arg contract the cache-hit path would */
+    if (buf_out) *buf_out = 0;
+    if (size_out) *size_out = 0;
+    printf("ccom_fetch_body: called\n");
+    return 0;
+}
+
+__attribute__((used, noinline)) void *cache_get_body(void *cache, const wchar_t *name)
+{
+    (void)cache; (void)name;
+    printf("cache_get_body: called\n");
+    return 0;
+}
+
+/* ---- M4 inject fakes: the pool-runner stand-in (the spliced E8's target)
+ * reports the pool state the injector rebuilt, and an asm thunk calls the
+ * spliced site under caller-register discipline (a live EBX sentinel that
+ * the loader's own `test ebx,ebx` at site+5 makes load-bearing in-game). */
+extern uintptr_t inject_ebx_call(uintptr_t site, uintptr_t pool);
+
+/* calls `site` with the loader's argument shape (rcx = pool, as the game's
+ * `lea rcx,[pool]` sets before the E8) and the loader's stack alignment —
+ * reached with RSP 16-aligned so the site's own push lands the stub at the
+ * standard called alignment. Returns the site's rax untouched. */
+extern uintptr_t inject_call_site(uintptr_t site, uintptr_t pool);
+
+__asm__(
+    ".globl inject_call_site\n"
+    "inject_call_site:\n"
+    "movq %rcx, %r10\n"
+    "movq %rdx, %rcx\n"
+    "callq *%r10\n"
+    "retq\n");
+
+__attribute__((used, noinline)) uintptr_t fake_runner_body(void *pool)
+{
+    unsigned long count = *(unsigned int *)((char *)pool + 8);
+    void **rows = *(void ***)pool;
+    printf("inject runner: count=%lu\n", count);
+    for (unsigned long i = 0; i < count && i < 8; i++) {
+        unsigned char *r = (unsigned char *)rows + i * 0x148;
+        printf("  row%lu: start=%lu entries=%lu mode=0x%02x array=%p\n",
+               i,
+               (unsigned long)*(unsigned int *)(r + 0x13c),
+               (unsigned long)*(unsigned int *)(r + 0x140),
+               *(unsigned char *)(r + 0x41),
+               *(void **)(r + 0x38));
+    }
+    return 0x4711;
+}
+
+/* calls `site` with the loader's argument shape (rcx = pool), an EBX
+ * sentinel (the loader's own `test ebx,ebx` at site+5 makes it
+ * load-bearing in-game), and the loader's stack alignment; returns EBX
+ * after the call (rax is clobbered by design here — the rax-forward check
+ * runs from the plain path) */
+__asm__(
+    ".globl inject_ebx_call\n"
+    "inject_ebx_call:\n"
+    "pushq %rbx\n"
+    "subq $0x28, %rsp\n"
+    "movq %rcx, %r10\n"
+    "movq %rdx, %rcx\n"
+    "movl $0x1337, %ebx\n"
+    "callq *%r10\n"
+    "movl %ebx, %eax\n"
+    "addq $0x28, %rsp\n"
+    "popq %rbx\n"
+    "retq\n");
 
 typedef void *(*fn_t)(void *, DWORD *, DWORD *, void *);
 
@@ -47,6 +283,7 @@ int main(int argc, char **argv) {
         printf("usage: host <form_list.bin> <mode>\n");
         return 2;
     }
+    setvbuf(stdout, NULL, _IONBF, 0); /* crash-surviving evidence output */
     const char *mode = argv[2];
     g_base = (BYTE *)GetModuleHandleW(NULL);
 
@@ -64,6 +301,148 @@ int main(int argc, char **argv) {
     /* the whitelist table carries its real original entries where recorded */
     memcpy((BYTE *)g_base + RVA_TABLE, g_table_e0, sizeof(g_table_e0));
     memcpy((BYTE *)g_base + RVA_TABLE + 24, g_table_e6, sizeof(g_table_e6));
+
+    /* the fake CFile::Open at RVA_CFILE: the 16-byte original prologue
+     * (expect-verified by the loader's address book) + a tail jump into the
+     * undo thunk; the E9 rel32 is patched after mapping (fixed page) */
+    if (!map_fixed((UINT_PTR)g_base + 0x41D000, 0x1000, PAGE_EXECUTE_READWRITE)) {
+        printf("SKIP: could not map cfile page at RVA 0x41D000\n");
+        return 3;
+    }
+    memset((BYTE *)g_base + 0x41D000, 0xCC, 0x1000);
+    memcpy((BYTE *)g_base + RVA_CFILE, g_cfile_orig, sizeof(g_cfile_orig));
+    {
+        BYTE *e9 = (BYTE *)g_base + RVA_CFILE + 16;
+        intptr_t rel = (intptr_t)&cfile_undo_thunk - (intptr_t)(e9 + 5);
+        e9[0] = 0xE9;
+        memcpy((BYTE *)e9 + 1, &rel, 4);
+    }
+
+    /* the four M4 fetch-probe fake pages (same mechanics as the cfile fake,
+     * each with its own undo thunk — constexpr amounts above). VirtualAlloc
+     * honors the base hint only at the 64K allocation granularity, so the
+     * pages are aligned: pack/tex/cache anchors share the 0x300000 page,
+     * the ccommon anchor sits in its own 0x2e0000 page. Mapping failure is
+     * a hard error only for the probe mode; m2/m3 scenarios run without. */
+    int probe_ok = 1;
+    {
+        struct { UINT_PTR page; UINT_PTR span; const char *label; } prooms[] = {
+            { 0x2E0000, 0x10000, "0x2e0000" },
+            { 0x300000, 0x10000, "0x300000" },
+        };
+        for (unsigned i = 0; i < sizeof(prooms) / sizeof(prooms[0]); i++) {
+            void *got = map_fixed((UINT_PTR)g_base + prooms[i].page, prooms[i].span,
+                                  PAGE_EXECUTE_READWRITE);
+            if (!got) {
+                printf("WARN: could not map probe page at RVA %s err=%lu\n",
+                       prooms[i].label, (unsigned long)GetLastError());
+                probe_ok = 0;
+                continue;
+            }
+            memset((BYTE *)g_base + prooms[i].page, 0xCC, prooms[i].span);
+        }
+        struct { UINT_PTR rva; unsigned char *orig; size_t len; void *thunk; const char *label; } pfakes[] = {
+            { RVA_PACK,  (unsigned char *)g_pack_orig,  sizeof(g_pack_orig),  (void *)&pack_undo_thunk,  "pack_fetch 0x306e20" },
+            { RVA_TEX,   (unsigned char *)g_tex_orig,   sizeof(g_tex_orig),   (void *)&tex_undo_thunk,   "texture_fetch 0x3010d0" },
+            { RVA_CCOM,  (unsigned char *)g_ccom_orig,  sizeof(g_ccom_orig),  (void *)&ccom_undo_thunk,  "ccommon_fetch 0x2ec0e0" },
+            { RVA_CACHE, (unsigned char *)g_cache_orig, sizeof(g_cache_orig), (void *)&cache_undo_thunk, "fetch_cache_get 0x3089b0" },
+        };
+        for (unsigned i = 0; i < sizeof(pfakes) / sizeof(pfakes[0]); i++) {
+            memcpy((BYTE *)g_base + pfakes[i].rva, pfakes[i].orig, pfakes[i].len);
+            BYTE *tail = (BYTE *)g_base + pfakes[i].rva + pfakes[i].len;
+            /* the two chkstk anchors end their record BEFORE the alloca —
+             * complete the stack setup (mov eax,N; sub rsp,rax; the game's
+             * own __chkstk is not mapped, the amount lives in the record)
+             * so the undo thunk's add rsp matches. The trampoline back-jump
+             * lands at entry + record_len — exactly here — keeping the
+             * loader-side and fake-side paths equivalent. */
+            if (pfakes[i].rva == RVA_TEX || pfakes[i].rva == RVA_CCOM) {
+                tail[0] = 0xB8;
+                *(unsigned int *)(tail + 1) = (pfakes[i].rva == RVA_TEX) ? 0x20e0u : 0x18b0u;
+                tail[5] = 0x48; tail[6] = 0x2B; tail[7] = 0xE0; /* sub rsp,rax */
+                tail += 8;
+            }
+            intptr_t rel = (intptr_t)pfakes[i].thunk - (intptr_t)(tail + 5);
+            tail[0] = 0xE9;
+            memcpy((BYTE *)tail + 1, &rel, 4);
+            printf("fake: %s mapped\n", pfakes[i].label);
+        }
+    }
+
+    /* ---- the M4 inject fake pages. The site page carries the address
+     * book's famb_runner_call bytes (E8 + the read-only test ebx,ebx pair +
+     * a ret) — the split's rel32 is RVA-relative so the same bytes aim the
+     * fake host's call at ITS image + 0x504c0 (the fake runner). Data pages
+     * hold the pool object/rows, the worker-capacity global and the shared
+     * workspace + decoded stream the injector reads. Mapping is
+     * unconditional; only the "inject" host mode touches them below. */
+    {
+        int inj_ok = 1;
+        struct { UINT_PTR page; UINT_PTR span; DWORD prot; } irooms[] = {
+            { 0x3F0000, 0x10000, PAGE_EXECUTE_READWRITE }, /* the spliced site */
+            { 0x50000,  0x10000, PAGE_EXECUTE_READWRITE }, /* the fake runner */
+            { 0xF02000, 0x4000,  PAGE_READWRITE },         /* pool + rows */
+            { 0xD65000, 0x1000,  PAGE_READWRITE },         /* capacity global */
+            { 0x4F86000, 0x2000, PAGE_READWRITE },         /* workspace + stream */
+            { 0x59A000, 0x2000, PAGE_EXECUTE_READWRITE },  /* the relay cave (0x59a071) */
+        };
+        for (unsigned i = 0; i < sizeof(irooms) / sizeof(irooms[0]); i++) {
+            if (!map_fixed((UINT_PTR)g_base + irooms[i].page, irooms[i].span,
+                           irooms[i].prot)) {
+                printf("WARN: could not map inject page at RVA 0x%lX err=%lu\n",
+                       (unsigned long)irooms[i].page, (unsigned long)GetLastError());
+                inj_ok = 0;
+                continue;
+            }
+            memset((BYTE *)g_base + irooms[i].page, 0xCC, irooms[i].span);
+        }
+        if (inj_ok) {
+            /* the famb call site: book bytes + a clean continuation */
+            memcpy((BYTE *)g_base + RVA_INJ_SITE, g_famb_orig, sizeof(g_famb_orig));
+            ((BYTE *)g_base + RVA_INJ_SITE)[7] = 0x74;
+            ((BYTE *)g_base + RVA_INJ_SITE)[8] = 0x00; /* je +0 (falls through) */
+            ((BYTE *)g_base + RVA_INJ_SITE)[9] = 0xC3; /* ret */
+            /* the fake runner: movabs rax,<body>; jmp rax */
+            {
+                BYTE *shim = (BYTE *)g_base + RVA_FAKE_RUNNER;
+                intptr_t target = (intptr_t)&fake_runner_body;
+                shim[0] = 0x48; shim[1] = 0xB8;
+                memcpy(shim + 2, &target, 8);
+                shim[10] = 0xFF; shim[11] = 0xE0;
+            }
+            /* the worker-row capacity the injector reads */
+            *(unsigned int *)((BYTE *)g_base + RVA_POOL_CAP) = 8;
+            /* the fake decoded family-B stream:
+             * [u32 count]{0x200 name|w|h|stored|payload}* (the layout the
+             * loader's rsp+0x60 pointer arithmetic walks) */
+            {
+                static const wchar_t *names[2] = { L"zero.dds", L"one.dds" };
+                static const unsigned ws[2] = { 4, 8 }, hs[2] = { 4, 8 },
+                    st[2] = { 8, 4 };
+                BYTE *out = (BYTE *)g_base + RVA_OUTBUF;
+                unsigned count = 2;
+                *(unsigned int *)out = count;
+                /* entry(i) = out + 4 + Σ_{k<i}(0x20c + st[k]) — the loader's
+                 * own running arithmetic, which the injector walk mirrors */
+                unsigned run = 4;
+                for (unsigned i = 0; i < count; i++) {
+                    BYTE *e = out + run;
+                    memset(e, 0, 0x200);
+                    for (unsigned j = 0; names[i][j]; j++) {
+                        *(wchar_t *)(e + j * 2) = names[i][j];
+                    }
+                    *(unsigned int *)(e + 0x200) = ws[i];
+                    *(unsigned int *)(e + 0x204) = hs[i];
+                    *(unsigned int *)(e + 0x208) = st[i];
+                    run += 0x20c + st[i];
+                }
+                printf("fake: workspace stream at RVA_OUTBUF: %u entries\n", count);
+            }
+            /* the hook only consults the workspace pointer */
+            *(void **)((BYTE *)g_base + RVA_WSOUT) = (void *)((BYTE *)g_base + RVA_OUTBUF);
+            printf("fake: inject pages mapped\n");
+        }
+    }
 
     /* real FORM list bytes -> the mapped region (NUL-terminated UTF-16) */
     FILE *f = fopen(argv[1], "rb");
@@ -101,6 +480,130 @@ int main(int argc, char **argv) {
         BYTE *fnb = g_base + RVA_FILTER;
         int unchanged = memcmp(fnb, g_filter_orig, sizeof(g_filter_orig)) == 0;
         printf("mode=none: filter bytes %s\n", unchanged ? "unchanged (PASS)" : "PATCHED (FAIL)");
+        return 0;
+    }
+    if (!strcmp(mode, "overlaypack") || !strcmp(mode, "overlaycsv")) {
+        /* the M3 game: open the pack through the (possibly hooked) CFile::Open
+         * at RVA_CFILE, read it whole through the returned handle, and report
+         * WHICH path the open used + its size — the redirect evidence; the
+         * content is verified offline by the harness script via a9ml */
+        const wchar_t *path = !strcmp(mode, "overlaypack")
+            ? L"data\\mtfake.bin" : L"data\\csvp.bin";
+        unsigned char cfile[0x28];
+        cfile_open_fn cfo = (cfile_open_fn)(g_base + RVA_CFILE);
+        int r;
+        HANDLE h;
+        DWORD lo, hi, rd = 0;
+        BYTE *buf;
+        memset(cfile, 0, sizeof(cfile));
+        r = cfo(cfile, path, 0, 0);
+        if (!r) {
+            printf("overlay %s: open FAILED (ret=0)\n", mode);
+            return 0;
+        }
+        h = *(HANDLE *)(cfile + 8);
+        lo = GetFileSize(h, &hi);
+        buf = (BYTE *)malloc(lo ? lo : 1);
+        if (!ReadFile(h, buf, lo, &rd, NULL) || rd != lo) {
+            printf("overlay %s: short read (%lu of %lu)\n", mode,
+                   (unsigned long)rd, (unsigned long)lo);
+            CloseHandle(h);
+            free(buf);
+            return 0;
+        }
+        CloseHandle(h);
+        free(buf);
+        printf("overlay %s: %lu bytes, handle-read ok\n", mode, (unsigned long)lo);
+        return 0;
+    }
+    if (!strcmp(mode, "probe")) {
+        if (!probe_ok) {
+            printf("FAIL: probe anchor pages could not be mapped\n");
+            return 1;
+        }
+        /* the M4 evidence call: run every fetch-probe anchor through its
+         * (possibly hooked) entry once — the loader's probe logs the four
+         * lines when installed; without the probe these run the fakes */
+        static const wchar_t composed_key[] = L"train\\113\\_d_113.dds";
+        static const wchar_t mesh_src[] = L"train\\113\\_t_113_a.x";
+        static const wchar_t mesh_ref[] = L"./_d_113.dds";
+        /* the wstring-OBJECT shape FUN_140306e20's r8 expects ([r8] = data) */
+        static const void *name_obj[2];
+        static void *dest[64];
+        void *bo = NULL;
+        unsigned so = 0;
+        name_obj[0] = (const void *)composed_key;
+        typedef void *(*pack_fn)(void *, void *, const void *);
+        typedef void *(*tex_fn)(void *, const wchar_t *, const wchar_t *, unsigned);
+        typedef void *(*ccom_fn)(void *, unsigned long long, const void *,
+                                 unsigned long long, void **, unsigned *);
+        typedef void *(*cache_fn)(void *, const wchar_t *);
+        printf("host: PACK call about to run\n");
+        printf("host: pack fetch ret=%p\n", ((pack_fn)(g_base + RVA_PACK))(NULL, dest, name_obj));
+        printf("host: TEX call about to run\n");
+        ((tex_fn)(g_base + RVA_TEX))(NULL, mesh_src, mesh_ref, 7);
+        printf("host: CCOM call about to run\n");
+        ((ccom_fn)(g_base + RVA_CCOM))(NULL, 0, name_obj, 0, &bo, &so);
+        printf("host: CACHE call about to run\n");
+        ((cache_fn)(g_base + RVA_CACHE))(NULL, composed_key);
+        printf("probe host: four fetch calls done\n");
+        return 0;
+    }
+    if (!strcmp(mode, "inject")) {
+        /* the M4 inject scenario host path: (1) open the pack through the
+         * (possibly hooked) CFile::Open — the injector's capture seam fires
+         * INSIDE that open for planned packs; (2) fill the fake pool the
+         * way the vanilla loader's refill leaves it at the call site;
+         * (3) call the (possibly spliced) site entry — plain C first (rax
+         * forwarded = the fake runner's 0x4711), then under the EBX-sentinel
+         * thunk (call discipline). */
+        static const wchar_t packpath[] = L"data\\mtfake.bin";
+        unsigned char cfile[0x28];
+        cfile_open_fn cfo = (cfile_open_fn)(g_base + RVA_CFILE);
+        memset(cfile, 0, sizeof(cfile));
+        int opened = cfo(cfile, packpath, 0, 0);
+        printf("inject host: cfile_open(\"%ls\") -> %d\n", packpath, opened);
+
+        /* the vanilla refill's result: pool object + three filled rows */
+        BYTE *pool = (BYTE *)g_base + RVA_POOL;
+        *(void **)pool = (void *)((BYTE *)g_base + RVA_POOL_ROWS);
+        *(unsigned int *)(pool + 8) = 3;
+        *(void **)(pool + 0x10) = (void *)((BYTE *)g_base + RVA_POOL_CHUNK);
+        memset((BYTE *)g_base + RVA_POOL_ROWS, 0, 8 * 0x148);
+        /* the shared vanilla pointer array every row's +0x38 points at
+         * (the loader keeps it on its own stack in-game); two entries, at the
+         * stream's cumulative bases */
+        BYTE *van_arr = (BYTE *)g_base + RVA_POOL_ROWS + 8 * 0x148;
+        *(void **)van_arr = (void *)((BYTE *)g_base + RVA_OUTBUF + 4);
+        *(void **)(van_arr + 8) =
+            (void *)((BYTE *)g_base + RVA_OUTBUF + 4 + 0x20c + 8);
+        for (unsigned i = 0; i < 3; i++) {
+            BYTE *r = (BYTE *)g_base + RVA_POOL_ROWS + i * 0x148;
+            *(unsigned int *)(r + 0x13c) = i;
+            *(unsigned int *)(r + 0x140) = 1;
+            *(uintptr_t *)(r + 0x30) = 0x00D1CEB0DE110ULL; /* delegate marker */
+            *(void **)(r + 0x38) = van_arr;
+            r[0x40] = 0;
+            r[0x41] = 0x5A; /* the loader's mode byte */
+        }
+
+        /* plain call: the stub returns to site+5 (the pushed E8-continuation),
+         * which exits through its `ret` back into this call frame; rax = the
+         * runner's forwarded result */
+        uintptr_t rax = inject_call_site((uintptr_t)(g_base + RVA_INJ_SITE),
+                                         (uintptr_t)pool);
+        printf("inject host: runner rax forwarded = %#llx %s\n",
+               (unsigned long long)rax,
+               rax == 0x4711 ? "(PASS)" : "(FAIL — expected 0x4711)");
+
+        uintptr_t ebx = inject_ebx_call((uintptr_t)(g_base + RVA_INJ_SITE), (uintptr_t)pool);
+        printf("inject host: ebx sentinel %s (%#lx)\n",
+               ebx == 0x1337 ? "PRESERVED (PASS)" : "CLOBBERED (FAIL)",
+               (unsigned long)ebx);
+        printf("inject host: site continuation bytes %s\n",
+               memcmp((BYTE *)g_base + RVA_INJ_SITE + 5, g_famb_orig + 5, 2) == 0
+                   ? "untouched (PASS)"
+                   : "BROKEN (FAIL)");
         return 0;
     }
     if (!strcmp(mode, "table113")) {

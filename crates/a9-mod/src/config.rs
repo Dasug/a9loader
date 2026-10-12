@@ -28,6 +28,30 @@ impl LogLevel {
     }
 }
 
+/// How `[[pack]]` image effects serve their content (a9loader.toml
+/// `pack_serving`, default "merge"):
+/// - `merge`: the M3 runtime overlay — hooked `CFile::Open` redirects the
+///   pack open to a merged cache file (decode → edit → re-encode, budgeted).
+/// - `inject`: the M4 window-scoped injector — loader-owned memory spliced
+///   into the family-B loader's worker-row pool at its runner call site
+///   (notes/24 R5).csvp `[[csv]]` tables keep the merge overlay in both
+///   modes; `[[file]]` copies are unaffected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum PackServing {
+    Merge,
+    Inject,
+}
+
+impl PackServing {
+    fn parse(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "merge" => Some(Self::Merge),
+            "inject" => Some(Self::Inject),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Config {
     pub log_level: LogLevel,
@@ -36,10 +60,21 @@ pub struct Config {
     pub allow_conflicts: bool,
     pub disabled: Vec<String>,
     pub sequence: Option<Vec<String>>,
+    /// false = the loader-off escape hatch: no scan, no effects, no hooks —
+    /// pure proxy passthrough, fully vanilla boot
+    pub enabled: bool,
     /// per-mod priority overrides (mod id -> priority)
     pub priorities: BTreeMap<String, i64>,
     /// human-visible complaints (unknown keys, bad values)
     pub warnings: Vec<String>,
+    /// M4 diagnostic: hook the four runtime fetch anchors trampoline-only
+    /// and log one line per fetch call (obj / composed key). Diagnostics
+    /// only — no serving behavior changes; fail-open per anchor.
+    pub probe_fetch: bool,
+    /// how [[pack]] image effects serve (see [`PackServing`]); "inject" (the
+    /// default) = the M4 window-scoped famb injector (loader memory, no cache
+    /// file), "merge" = the M3 cache overlay
+    pub pack_serving: PackServing,
 }
 
 impl Default for Config {
@@ -50,8 +85,11 @@ impl Default for Config {
             allow_conflicts: false,
             disabled: Vec::new(),
             sequence: None,
+            enabled: true,
             priorities: BTreeMap::new(),
             warnings: Vec::new(),
+            probe_fetch: false,
+            pack_serving: PackServing::Inject,
         }
     }
 }
@@ -106,6 +144,22 @@ pub fn read(path: &Path) -> Config {
             "allow_conflicts" => match val.as_bool() {
                 Some(b) => cfg.allow_conflicts = b,
                 None => cfg.warnings.push(format!("allow_conflicts must be a bool, got {val:?}")),
+            },
+            "enabled" => match val.as_bool() {
+                Some(b) => cfg.enabled = b,
+                None => cfg.warnings.push(format!("enabled must be a bool, got {val:?}")),
+            },
+            "probe_fetch" => match val.as_bool() {
+                Some(b) => cfg.probe_fetch = b,
+                None => cfg
+                    .warnings
+                    .push(format!("probe_fetch must be a bool, got {val:?}")),
+            },
+            "pack_serving" => match val.as_str().and_then(PackServing::parse) {
+                Some(m) => cfg.pack_serving = m,
+                None => cfg.warnings.push(format!(
+                    "pack_serving must be merge|inject, got {val:?}"
+                )),
             },
             "disabled" => match val.as_array() {
                 Some(a) if a.iter().all(|v| v.is_str()) => {
@@ -171,6 +225,7 @@ log_level = "debug"
 mods_dir = "a9mods"
 allow_conflicts = true
 disabled = ["broken"]
+probe_fetch = false
 
 [order]
 sequence = ["b", "a"]
@@ -187,7 +242,43 @@ jp-liveries = 10
         assert_eq!(cfg.disabled, vec!["broken"]);
         assert_eq!(cfg.sequence.as_deref(), Some(&["b".to_string(), "a".to_string()][..]));
         assert_eq!(cfg.priorities.get("jp-liveries"), Some(&10));
+        assert!(!cfg.probe_fetch);
         assert!(cfg.warnings.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parses_probe_fetch_flag() {
+        let dir = std::env::temp_dir().join("a9ml-cfg-test-probe");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("a9loader.toml");
+        std::fs::write(&path, "probe_fetch = true\n").unwrap();
+        let cfg = read(&path);
+        assert!(cfg.probe_fetch);
+        assert!(cfg.warnings.is_empty());
+        std::fs::write(&path, "probe_fetch = \"yes\"\n").unwrap();
+        let cfg = read(&path);
+        assert!(!cfg.probe_fetch);
+        assert!(cfg.warnings.iter().any(|w| w.contains("probe_fetch")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parses_pack_serving() {
+        let dir = std::env::temp_dir().join("a9ml-cfg-test-serving");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("a9loader.toml");
+        std::fs::write(&path, "pack_serving = \"inject\"\n").unwrap();
+        let cfg = read(&path);
+        assert_eq!(cfg.pack_serving, PackServing::Inject);
+        assert!(cfg.warnings.is_empty());
+        std::fs::write(&path, "pack_serving = \"MERGE\"\n").unwrap();
+        let cfg = read(&path);
+        assert_eq!(cfg.pack_serving, PackServing::Merge);
+        std::fs::write(&path, "pack_serving = \"yes\"\n").unwrap();
+        let cfg = read(&path);
+        assert_eq!(cfg.pack_serving, PackServing::Inject); // default on bad value
+        assert!(cfg.warnings.iter().any(|w| w.contains("pack_serving")));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

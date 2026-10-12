@@ -8,7 +8,7 @@
 //! write, and readability guards for raw-RVA targets (a typo'd rva refuses
 //! loudly instead of crashing the game with an access violation).
 
-use crate::{forms, patch, sys};
+use crate::{forms, log, patch, sys};
 use a9_mod::builds::BuildEntry;
 use a9_mod::hex;
 use a9_mod::manifest::{Hook, ListMode, Patch, TargetRef};
@@ -21,6 +21,11 @@ const FORMS_SCAN_LIMIT: usize = 16384;
 const FORMS_MAX: usize = forms::FORMS_MAX;
 
 static G_ALLOWED: OnceLock<Box<[u8; FORMS_MAX / 8]>> = OnceLock::new();
+/// per-call trace logger for the installed filter (the list windows call it
+/// on every rebuild — the trace shows the INPUT list each time, which is
+/// the observable of "trains disappear after cycling the type filter":
+/// shrinking inputs = rows being invalidated between rebuilds)
+static G_TRACE: OnceLock<log::Logger> = OnceLock::new();
 
 type FilterFn =
     unsafe extern "system" fn(*mut c_void, *mut u32, *mut u32, *mut c_void) -> *mut c_void;
@@ -38,18 +43,43 @@ unsafe extern "system" fn my_filter(
         let allowed = G_ALLOWED.get().map(|b| &**b);
         let mut w = begin;
         let mut p = begin;
+        let mut dropped: Vec<u32> = Vec::new();
         while p != end {
             let id = *p;
+            let mut keep = allowed.is_none(); // no bitmap = keep (nop-ish)
             if let Some(a) = allowed {
                 let i = id as usize;
-                if i < FORMS_MAX && a[i >> 3] & (1u8 << (i & 7)) != 0 {
-                    *w = id;
-                    w = w.add(1);
+                if i < FORMS_MAX {
+                    keep = a[i >> 3] & (1u8 << (i & 7)) != 0;
+                } else {
+                    keep = false;
                 }
+            }
+            if keep {
+                *w = id;
+                w = w.add(1);
+            } else {
+                dropped.push(id);
             }
             p = p.add(1);
         }
         *(out as *mut *mut u32) = w;
+        if let Some(t) = G_TRACE.get() {
+            let n_drop = dropped.len();
+            let sample: Vec<String> =
+                dropped.iter().take(12).map(|d| format!("{d}")).collect();
+            t.line(&format!(
+                "train_list filter: in={} kept={} dropped={}{}",
+                (end as usize - begin as usize) / 4,
+                (w as usize - begin as usize) / 4,
+                n_drop,
+                if n_drop > 0 {
+                    format!(" [{}{}]", sample.join(","), if n_drop > 12 { ",…" } else { "" })
+                } else {
+                    String::new()
+                }
+            ));
+        }
         out
     }
 }
@@ -232,6 +262,10 @@ unsafe fn apply_train_list(
         }
     };
     let _ = G_ALLOWED.set(bitmap);
+    // the per-call trace logger — the mods dir is the mod dir's parent
+    if let Some(mods_dir) = mod_dir.parent() {
+        let _ = G_TRACE.set(log::Logger::new(&mods_dir.join("a9loader.log")));
+    }
     let f: FilterFn = my_filter;
     unsafe {
         verify(

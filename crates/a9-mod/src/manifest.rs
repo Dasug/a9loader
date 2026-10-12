@@ -45,6 +45,19 @@ pub struct Manifest {
     pub patch: Vec<Patch>,
     #[serde(default)]
     pub hook: Vec<Hook>,
+    /// family-B pack entry overlays (me*/mt* packs) — merged in memory at the
+    /// game's open of `data/<pack>.bin` and served via the loader-managed
+    /// cache (M3)
+    #[serde(default)]
+    pub pack: Vec<PackSection>,
+    /// csvp table overlays — whole-table replace-or-add by name (M3)
+    #[serde(default)]
+    pub csv: Vec<CsvSection>,
+    /// genuinely-new files copied into the game tree at boot, before the game
+    /// enumerates, journaled in `<mods_dir>/journal.json` (M3). Never
+    /// overwrites an existing file — that is [[pack]]/[[csv]] territory.
+    #[serde(default)]
+    pub file: Vec<FileSection>,
 }
 
 fn default_priority() -> i64 {
@@ -98,6 +111,51 @@ pub enum TargetRef {
     Anchor(String),
     /// Raw RVA + mandatory expect bytes — diagnostic escape hatch only.
     Raw { rva: u32, expect: String },
+}
+
+// -------------------------------------------------------------- M3 sections
+
+/// `[[pack]]` — entry operations on one family-B pack (`data/<pack>.bin`).
+#[derive(Deserialize, Serialize, Debug, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct PackSection {
+    /// pack name without path/extension, e.g. "mtentr0" (matches the game's
+    /// open of `data\mtentr0.bin`); csvp tables belong in [[csv]]
+    pub pack: String,
+    #[serde(default)]
+    pub entry: Vec<PackEntry>,
+}
+
+/// `[[pack.entry]]` — replace (name exists) or add (name is new).
+#[derive(Deserialize, Serialize, Debug, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct PackEntry {
+    /// entry name as stored in the pack (e.g. "_d_h510_keifu_8000_tr_01.dds")
+    pub name: String,
+    pub width: u32,
+    pub height: u32,
+    /// payload file, relative to the mod dir
+    pub file: String,
+}
+
+/// `[[csv]]` — whole-table replace-or-add in csvp by name (e.g.
+/// "train_form.csv").
+#[derive(Deserialize, Serialize, Debug, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct CsvSection {
+    pub name: String,
+    /// CSV payload file, relative to the mod dir
+    pub file: String,
+}
+
+/// `[[file]]` — a genuinely-new file copied into the game tree at boot.
+#[derive(Deserialize, Serialize, Debug, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct FileSection {
+    /// destination, relative to the game dir (e.g. "data/texture/x.dds")
+    pub dest: String,
+    /// source file, relative to the mod dir
+    pub file: String,
 }
 
 impl TargetRef {
@@ -216,6 +274,109 @@ impl Manifest {
                 }
             }
         }
+        // [[pack]] — family-B entry overlays
+        let mut pack_names = std::collections::BTreeSet::new();
+        for p in &self.pack {
+            if !p
+                .pack
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+                || p.pack.is_empty()
+            {
+                return Err(ModError::Invalid(format!(
+                    "pack name must be a lowercase slug (e.g. \"mtentr0\"), got {:?}",
+                    p.pack
+                )));
+            }
+            if !pack_names.insert(p.pack.clone()) {
+                return Err(ModError::Invalid(format!(
+                    "two [[pack]] sections for pack {:?} — merge their entries into one",
+                    p.pack
+                )));
+            }
+            if p.pack == "csvp" {
+                return Err(ModError::Invalid(
+                    "csvp tables belong in [[csv]] sections, not [[pack]]".into(),
+                ));
+            }
+            if p.entry.is_empty() {
+                return Err(ModError::Invalid(format!(
+                    "[[pack]] {} has no [[pack.entry]]",
+                    p.pack
+                )));
+            }
+            let mut names = std::collections::BTreeSet::new();
+            for e in &p.entry {
+                if e.name.trim().is_empty() || e.name.contains('\0') {
+                    return Err(ModError::Invalid(format!(
+                        "pack {} entry name must be a nonempty plain name, got {:?}",
+                        p.pack, e.name
+                    )));
+                }
+                if !names.insert(e.name.clone()) {
+                    return Err(ModError::Invalid(format!(
+                        "pack {} has two entries named {:?}",
+                        p.pack, e.name
+                    )));
+                }
+                if e.file.trim().is_empty() {
+                    return Err(ModError::Invalid(format!(
+                        "pack {} entry {:?} has no `file`",
+                        p.pack, e.name
+                    )));
+                }
+            }
+        }
+        // [[csv]] — csvp table overlays
+        let mut csv_names = std::collections::BTreeSet::new();
+        for c in &self.csv {
+            if c.name.trim().is_empty() || c.name.contains('\0') {
+                return Err(ModError::Invalid(format!(
+                    "csv table name must be nonempty, got {:?}",
+                    c.name
+                )));
+            }
+            if !csv_names.insert(c.name.clone()) {
+                return Err(ModError::Invalid(format!(
+                    "two [[csv]] sections for table {:?}",
+                    c.name
+                )));
+            }
+            if c.file.trim().is_empty() {
+                return Err(ModError::Invalid(format!(
+                    "csv {:?} has no `file`",
+                    c.name
+                )));
+            }
+        }
+        // [[file]] — boot copies of genuinely-new files
+        let mut dests = std::collections::BTreeSet::new();
+        for f in &self.file {
+            let bad = |why: &str| {
+                ModError::Invalid(format!("file dest {:?} {why}", f.dest))
+            };
+            if f.dest.trim().is_empty() {
+                return Err(ModError::Invalid("[[file]] dest must not be empty".into()));
+            }
+            if f.dest.starts_with('/') || f.dest.starts_with('\\') || f.dest.contains(':') {
+                return Err(bad("must be a relative path inside the game dir"));
+            }
+            if f.dest.split(['/', '\\']).any(|c| c == ".." || c.is_empty() && false) {
+                return Err(bad("must not contain '..'"));
+            }
+            if !dests.insert(f.dest.clone()) {
+                return Err(ModError::Invalid(format!(
+                    "two [[file]] sections write dest {:?}",
+                    f.dest
+                )));
+            }
+            if f.file.trim().is_empty() {
+                return Err(ModError::Invalid(format!(
+                    "file dest {:?} has no source `file`",
+                    f.dest
+                )));
+            }
+        }
         Ok(())
     }
 }
@@ -278,11 +439,57 @@ expect = "bb 00 00 00"
         let bad = GOOD.to_owned() + "\n[[effect]]\nkind = \"x\"\n";
         let err = parse(&bad).unwrap_err().to_string();
         assert!(err.contains("unknown field"), "{err}");
-        // M3/M4 sections are unknown by design right now
-        for section in ["pack", "csv", "file", "native"] {
-            let bad = GOOD.to_owned() + &format!("\n[[{section}]]\n");
-            assert!(parse(&bad).is_err(), "section {section} must be refused");
+        // [native] (mods that ship code) lands post-M4 — unknown field here
+        // (the scan path adds the milestone pointer)
+        let bad = GOOD.to_owned() + "\n[native]\nabi = 1\n";
+        let err = parse(&bad).unwrap_err().to_string();
+        assert!(err.contains("unknown field `native`"), "{err}");
+        // the M3 sections are supported now and must parse
+        let m3 = GOOD.to_owned()
+            + "\n[[pack]]\npack = \"mtentr0\"\n\n[[pack.entry]]\nname = \"_d_x.dds\"\nwidth = 1\nheight = 2\nfile = \"e/x.dds\"\n"
+            + "\n[[csv]]\nname = \"train_form.csv\"\nfile = \"csv/train_form.csv\"\n"
+            + "\n[[file]]\ndest = \"data/texture/x.dds\"\nfile = \"files/x.dds\"\n";
+        let m = parse(&m3).unwrap();
+        m.validate().unwrap();
+        assert_eq!(m.pack.len(), 1);
+        assert_eq!(m.pack[0].entry.len(), 1);
+        assert_eq!(m.pack[0].entry[0].width, 1);
+        assert_eq!(m.csv.len(), 1);
+        assert_eq!(m.file.len(), 1);
+    }
+
+    #[test]
+    fn m3_section_validation_rejects_the_expected_classes() {
+        // csvp as a [[pack]] name
+        let m = parse("\nid=\"x\"\nname=\"X\"\nversion=\"1.0.0\"\nauthor=\"a\"\n[[pack]]\npack=\"csvp\"\n[[pack.entry]]\nname=\"t.csv\"\nwidth=1\nheight=1\nfile=\"f\"\n").unwrap();
+        let e = m.validate().unwrap_err().to_string();
+        assert!(e.contains("[[csv]]"), "{e}");
+        // duplicate pack sections
+        let m = parse("\nid=\"x\"\nname=\"X\"\nversion=\"1.0.0\"\nauthor=\"a\"\n[[pack]]\npack=\"me0\"\n[[pack.entry]]\nname=\"a\"\nwidth=1\nheight=1\nfile=\"f\"\n[[pack]]\npack=\"me0\"\n[[pack.entry]]\nname=\"b\"\nwidth=1\nheight=1\nfile=\"f\"\n").unwrap();
+        let e = m.validate().unwrap_err().to_string();
+        assert!(e.contains("merge their entries"), "{e}");
+        // duplicate entry names in one pack
+        let m = parse("\nid=\"x\"\nname=\"X\"\nversion=\"1.0.0\"\nauthor=\"a\"\n[[pack]]\npack=\"me0\"\n[[pack.entry]]\nname=\"a\"\nwidth=1\nheight=1\nfile=\"f\"\n[[pack.entry]]\nname=\"a\"\nwidth=1\nheight=1\nfile=\"f\"\n").unwrap();
+        let e = m.validate().unwrap_err().to_string();
+        assert!(e.contains("two entries named"), "{e}");
+        // missing file / empty
+        let m = parse("\nid=\"x\"\nname=\"X\"\nversion=\"1.0.0\"\nauthor=\"a\"\n[[pack]]\npack=\"me0\"\n[[pack.entry]]\nname=\"a\"\nwidth=1\nheight=1\nfile=\" \"\n").unwrap();
+        assert!(m.validate().unwrap_err().to_string().contains("no `file`"));
+        // uppercase pack name
+        let m = parse("\nid=\"x\"\nname=\"X\"\nversion=\"1.0.0\"\nauthor=\"a\"\n[[pack]]\npack=\"Me0\"\n[[pack.entry]]\nname=\"a\"\nwidth=1\nheight=1\nfile=\"f\"\n").unwrap();
+        assert!(m.validate().unwrap_err().to_string().contains("slug"));
+        // duplicate csv tables
+        let m = parse("\nid=\"x\"\nname=\"X\"\nversion=\"1.0.0\"\nauthor=\"a\"\n[[csv]]\nname=\"t.csv\"\nfile=\"f\"\n[[csv]]\nname=\"t.csv\"\nfile=\"g\"\n").unwrap();
+        let e = m.validate().unwrap_err().to_string();
+        assert!(e.contains("two [[csv]]"), "{e}");
+        // file dest escaping the game dir (TOML needs \\ for a literal backslash)
+        for dest in ["/abs/x.dds", "C:\\\\x.dds", "data/../../x.dds"] {
+            let m = parse(&format!("\nid=\"x\"\nname=\"X\"\nversion=\"1.0.0\"\nauthor=\"a\"\n[[file]]\ndest=\"{dest}\"\nfile=\"f\"\n")).unwrap();
+            assert!(m.validate().is_err(), "dest {dest} must be refused");
         }
+        // duplicate file dests
+        let m = parse("\nid=\"x\"\nname=\"X\"\nversion=\"1.0.0\"\nauthor=\"a\"\n[[file]]\ndest=\"data/x.dds\"\nfile=\"f\"\n[[file]]\ndest=\"data/x.dds\"\nfile=\"g\"\n").unwrap();
+        assert!(m.validate().unwrap_err().to_string().contains("two [[file]]"));
     }
 
     #[test]

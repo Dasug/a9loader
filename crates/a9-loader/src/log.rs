@@ -72,6 +72,11 @@ impl Logger {
     pub fn line(&self, msg: &str) {
         self.emit("", msg);
     }
+    /// debug-level line (only meaningful when the emitter checks trace flags;
+    /// the overlay gates it on the config's log_level=debug)
+    pub fn debug(&self, msg: &str) {
+        self.emit("DBG:  ", msg);
+    }
     pub fn warn(&self, msg: &str) {
         self.emit("WARN: ", msg);
     }

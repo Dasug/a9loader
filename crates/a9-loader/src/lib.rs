@@ -30,9 +30,15 @@ mod forward; // the 10 forwarded VERSION.dll exports
 #[cfg(target_os = "windows")]
 mod handlers; // effect handlers: train_list, nop, [[patch]] executor
 #[cfg(target_os = "windows")]
+mod injector; // M4: pack_serving = inject — the famb window-scoped splice
+#[cfg(target_os = "windows")]
 mod log; // <mods_dir>/a9loader.log
 #[cfg(target_os = "windows")]
+mod overlay; // M3: the CFile::Open redirect + merge cache
+#[cfg(target_os = "windows")]
 mod patch; // VirtualProtect write helpers + patch recipes
+#[cfg(target_os = "windows")]
+mod probe; // M4: the runtime fetch probe (probe_fetch = true diagnostics)
 #[cfg(target_os = "windows")]
 mod sys; // minimal hand-declared Win32 + readability guards
 
