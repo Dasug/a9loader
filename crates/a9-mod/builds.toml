@@ -21,6 +21,61 @@ expect = "48,89,5c,24,08,48,89,74,24,18,48,89,7c,24,20,48"
 rva = 0x6FC1C0              # 97-entry u32 table (file 0x6fb5c0)
 expect = "5f,00,00,00"        # entry 0 fingerprint
 
+[build."5.00.5634".anchors.cfile_open]
+rva = 0x41D40C              # MFC CFile::Open — the ONE file-open funnel (file 0x41c80c)
+expect = "40,53,55,56,57,41,56,41,57,48,81,ec,88,02,00,00"
+
 [build."5.00.5634".anchors.form_list]
 rva = 0x6FC430              # UTF-16 comma-separated FORM names (file 0x6fb830)
 expect = "46,00,4f,00,52,00,4d,00,5f,00,32,00,30,00,31,00"        # head fingerprint
+
+# ---- M4 runtime fetch probe (notes/24 round 3: the material fetch classes
+# pass ctx opaquely through vtable dispatch, so which pack object serves
+# which composed key is only answerable at runtime; these four anchors are
+# hooked trampoline-only when a9loader.toml sets probe_fetch = true).
+# Expect bytes verbatim from the international Steam build (read from the
+# exe bytes, per-instruction boundaries machine-verified with objdump):
+# each record ends at the first instruction boundary >= 16 (the hook write
+# is 16 bytes and the trampoline re-enters at entry + record length).
+[build."5.00.5634".anchors.pack_fetch]
+rva = 0x306E20              # FUN_140306e20 CPackFileBuffer::fetch (file 0x306220)
+expect = "40,55,53,56,57,41,56,48,8d,ac,24,00,f8,ff,ff,48,81,ec,00,09,00,00"
+# boundary = 22: 5 pushes (7 B) + lea rbp,[rsp-0x800] (8 B) + sub rsp,0x900 (7 B);
+# the quoted 16 bytes would re-enter at the second byte of `sub` (mid-instruction).
+
+[build."5.00.5634".anchors.texture_fetch]
+rva = 0x3010D0              # FUN_1403010d0 texture_fetch_miss_path (file 0x3004d0)
+expect = "40,55,53,56,57,41,54,41,56,41,57,48,8d,ac,24,20,e0,ff,ff"
+# boundary = 19: 7 pushes (11 B) + lea rbp,[rsp-0x1fe0] (8 B); the chkstk alloca
+# (mov eax,0x20e0; call __chkstk; sub rsp,rax) follows, not part of the record.
+
+[build."5.00.5634".anchors.ccommon_fetch]
+rva = 0x2EC0E0              # FUN_1402ec0e0 CCommonShader::fetch (file 0x2eb4e0)
+expect = "40,55,53,56,41,54,41,55,41,56,41,57,48,8d,ac,24,50,e8,ff,ff"
+# boundary = 20: 7 pushes (12 B) + lea rbp,[rsp-0x17b0] (8 B); chkstk 0x18b0 next.
+
+[build."5.00.5634".anchors.fetch_cache_get]
+rva = 0x3089B0              # FUN_1403089b0 global fetch-cache get (file 0x307db0)
+expect = "48,8b,c4,57,41,54,41,55,41,56,41,57,48,83,ec,40"
+# boundary = 16: mov rax,rsp (3 B) + 5 pushes (9 B) + sub rsp,0x40 (4 B).
+
+# ---- M4 inject-mode splice (notes/24 R5 + seams.md; machine-verified bytes
+# from the international Steam exe): the family-B loader's pool-runner call,
+# the one seam where decoded entry content can be extended per pack window.
+# VA 0x1403f0259/file 0x3ef659: `E8 62 02 C6 FF` = call FUN_1400504c0 (the
+# worker-row-pool runner), reached after the loader's row-fill (lea rcx,[
+# 0x140f02470] at 0x1403f0252 = RCX = &pool). The two bytes that follow —
+# `85 db` = test ebx,ebx at 0x1403f025E, with the je that closes the loader's
+# retry loop — are a READ-ONLY fingerprint: the splice rewrites ONLY the
+# 5 E8 bytes (the rel32 points at the injector stub; the caller's live EBX,
+# RSI, RBP, R12B/R13D sit across the call and are preserved by ABI).
+[build."5.00.5634".anchors.famb_runner_call]
+rva = 0x3F0259              # pool-runner call in pack_loader_image_generic (file 0x3ef659)
+expect = "e8,62,02,c6,ff,85,db"
+
+# The relay CAVE for the famb splice: a compiler alignment pad (a real inter-
+# function CC run, preceded by `41 5e 41 5d 41 5c 5f c3` = pops/ret — notes/
+# 24 round 6). 14-byte FF 25 + imm64 relay lands inside these 21 CC bytes.
+[build."5.00.5634".anchors.famb_runner_cave]
+rva = 0x59A071              # see note above; longest CC run in .text (21 bytes)
+expect = "cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc"

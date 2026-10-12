@@ -15,6 +15,7 @@ dependencies = [
 name = "a9-loader"
 version = "0.1.0"
 dependencies = [
+ "a9-formats",
  "a9-mod",
  "toml",
 ]
@@ -38,6 +39,8 @@ dependencies = [
  "anyhow",
  "clap",
  "flate2",
+ "semver",
+ "toml",
 ]
 
 [[package]]

@@ -23,6 +23,8 @@ pub const PAGE_EXECUTE_READWRITE: DWORD = 0x40;
 
 /// VirtualQuery states / protections (readability probing)
 pub const MEM_COMMIT: DWORD = 0x1000;
+pub const MEM_RESERVE: DWORD = 0x2000;
+pub const MEM_RELEASE: DWORD = 0x8000;
 pub const PAGE_NOACCESS: DWORD = 0x01;
 pub const PAGE_GUARD: DWORD = 0x100;
 
@@ -70,6 +72,13 @@ unsafe extern "system" {
         len: SIZE_T,
     ) -> SIZE_T;
     pub fn GetLocalTime(st: *mut SYSTEMTIME);
+    pub fn VirtualAlloc(
+        addr: *mut c_void,
+        size: usize,
+        alloc_type: DWORD,
+        prot: DWORD,
+    ) -> *mut c_void;
+    pub fn VirtualFree(addr: *mut c_void, size: SIZE_T, free_type: DWORD) -> BOOL;
 }
 
 /// True when every page of `[ptr, ptr+len)` is committed and readable.

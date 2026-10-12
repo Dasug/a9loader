@@ -172,6 +172,8 @@ pub fn resolve(mods: &[Manifest], cfg: &ResolveConfig) -> Resolution {
     }
 
     // 6. overlaps — same target key written by two enabled mods
+    //    (memory effects: anchors/raw targets; data effects: pack entries,
+    //    csv tables, file destinations)
     let mut owners: BTreeMap<String, Vec<usize>> = BTreeMap::new();
     for &i in &enabled {
         for p in &mods[i].patch {
@@ -179,6 +181,17 @@ pub fn resolve(mods: &[Manifest], cfg: &ResolveConfig) -> Resolution {
         }
         for h in &mods[i].hook {
             owners.entry(format!("hook:{}", h.target.key(0))).or_default().push(i);
+        }
+        for p in &mods[i].pack {
+            for e in &p.entry {
+                owners.entry(format!("pack:{}:{}", p.pack, e.name)).or_default().push(i);
+            }
+        }
+        for c in &mods[i].csv {
+            owners.entry(format!("csv:{}", c.name)).or_default().push(i);
+        }
+        for f in &mods[i].file {
+            owners.entry(format!("file:{}", f.dest)).or_default().push(i);
         }
     }
     for (key, os) in owners {
@@ -320,5 +333,43 @@ mod tests {
         let mods = vec![hook_on("a", "train_list_filter"), hook_on("b", "train_list_whitelist")];
         let res = resolve(&mods, &ResolveConfig::default());
         assert!(res.overlaps.is_empty());
+    }
+
+    #[test]
+    fn data_effect_overlaps_refuse_later_mods() {
+        // two mods adding the same pack entry
+        let a = build(
+            "aa",
+            10,
+            "[[pack]]\npack = \"mtentr0\"\n[[pack.entry]]\nname = \"_d_x.dds\"\nwidth = 1\nheight = 1\nfile = \"x.dds\"\n",
+        );
+        let b = build(
+            "bb",
+            20,
+            "[[pack]]\npack = \"mtentr0\"\n[[pack.entry]]\nname = \"_d_x.dds\"\nwidth = 2\nheight = 2\nfile = \"y.dds\"\n",
+        );
+        let mods = vec![b, a.clone()];
+        let res = resolve(&mods, &ResolveConfig::default());
+        assert_eq!(res.overlaps.len(), 1);
+        assert_eq!(res.overlaps[0].key, "pack:mtentr0:_d_x.dds");
+        assert!(!res.effect_refused(1, "pack:mtentr0:_d_x.dds"));
+        assert!(res.effect_refused(0, "pack:mtentr0:_d_x.dds"));
+        // different entry names in the same pack: fine
+        let b2 = build(
+            "bb",
+            20,
+            "[[pack]]\npack = \"mtentr0\"\n[[pack.entry]]\nname = \"_d_z.dds\"\nwidth = 2\nheight = 2\nfile = \"z.dds\"\n",
+        );
+        let res = resolve(&vec![b2, a], &ResolveConfig::default());
+        assert!(res.overlaps.is_empty());
+        // csv + file dests overlap too
+        let c1 = build("c1", 10, "[[csv]]\nname = \"t.csv\"\nfile = \"t.csv\"\n");
+        let c2 = build("c2", 20, "[[csv]]\nname = \"t.csv\"\nfile = \"u.csv\"\n");
+        let res = resolve(&vec![c2, c1], &ResolveConfig::default());
+        assert_eq!(res.overlaps[0].key, "csv:t.csv");
+        let f1 = build("f1", 10, "[[file]]\ndest = \"data/x.dds\"\nfile = \"x.dds\"\n");
+        let f2 = build("f2", 20, "[[file]]\ndest = \"data/x.dds\"\nfile = \"y.dds\"\n");
+        let res = resolve(&vec![f2, f1], &ResolveConfig::default());
+        assert_eq!(res.overlaps[0].key, "file:data/x.dds");
     }
 }

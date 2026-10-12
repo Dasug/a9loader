@@ -12,6 +12,9 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+mod classify;
+mod gen_builds;
+
 #[derive(Parser)]
 #[command(name = "a9ml", about = "A-Train 9 mod loader — authoring & diagnostics CLI", version)]
 struct Cli {
@@ -44,6 +47,9 @@ enum Cmd {
     Inspect {
         /// Path to the pack file
         path: PathBuf,
+        /// List every entry name, not just the first 40
+        #[arg(long)]
+        all: bool,
     },
     /// Show the mods of a game dir and how the loader would resolve them
     /// (offline — reads manifests + config, applies nothing)
@@ -59,6 +65,94 @@ enum Cmd {
         #[arg(long)]
         game: PathBuf,
     },
+    /// Classify each data effect by WHERE the game consumes it during boot —
+    /// "will my texture replace actually reach the game?" (`early:<window>` =
+    /// consumed inside that boot window — serve with pack_serving=inject or
+    /// merge; `pre-shader/pre-csv` = consumed in stage 1; `unknown` = be
+    /// conservative)
+    Classify {
+        /// A mod dir (holding mod.toml) or a mods dir (subdirs with mod.toml)
+        path: Option<PathBuf>,
+        /// Classify one entry name instead of a manifest
+        #[arg(long)]
+        entry: Option<String>,
+        /// Pack context for --entry (e.g. "me3", "mtentr0", "csvp")
+        #[arg(long)]
+        pack: Option<String>,
+    },
+    /// Generate a [[pack]] mod from a base pack and a repacked one: every
+    /// added or changed entry becomes a mod.toml [[pack.entry]] + a payload
+    /// file. Removed entries are unsupported (listed, error).
+    DiffPack {
+        /// Pack name without path/extension (e.g. "mtentr0")
+        #[arg(long)]
+        pack: String,
+        /// The original (vanilla) pack file
+        #[arg(long)]
+        base: PathBuf,
+        /// The repacked pack file (your result)
+        #[arg(long)]
+        modded: PathBuf,
+        /// Output mod directory (created; mod.toml + entries/)
+        #[arg(long)]
+        out: PathBuf,
+        #[arg(long)]
+        id: String,
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        author: String,
+        /// Optional: game build ids this mod targets
+        #[arg(long = "game-build", value_name = "ID")]
+        game_builds: Vec<String>,
+    },
+    /// Generate a [[csv]] mod from a base csvp and a repacked one: every
+    /// added or changed table becomes a mod.toml [[csv]] + a CSV payload.
+    DiffCsv {
+        /// The original (vanilla) csvp.bin
+        #[arg(long)]
+        base: PathBuf,
+        /// The repacked csvp.bin (your result)
+        #[arg(long)]
+        modded: PathBuf,
+        /// Output mod directory (created; mod.toml + csv/)
+        #[arg(long)]
+        out: PathBuf,
+        #[arg(long)]
+        id: String,
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        author: String,
+        #[arg(long = "game-build", value_name = "ID")]
+        game_builds: Vec<String>,
+    },
+    /// Regenerate the build address book's core anchors from a live exe
+    /// (provenance-stamped; hand-appended RE anchors stay in the file).
+    GenBuilds {
+        /// The game executable
+        #[arg(long)]
+        exe: PathBuf,
+        /// Output path (prints to stdout when omitted)
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Verify that out/... (requires --out) matches this exe exactly
+        #[arg(long)]
+        check: bool,
+    },
+    /// Build a pack file from raw payloads (fixtures/authoring): a family-B
+    /// container (images or csvs) + the pack encryption, byte-verified.
+    Mkpack {
+        /// Container kind: images (0x200 entries: name=w:h:file) or csvs
+        /// (0x204 entries: name=file)
+        #[arg(long)]
+        container: String,
+        /// images: NAME=WIDTH:HEIGHT:FILE ...; csvs: NAME=FILE ...
+        entries: Vec<String>,
+        /// Output pack file
+        #[arg(long)]
+        out: PathBuf,
+    },
 }
 
 fn main() {
@@ -67,9 +161,37 @@ fn main() {
         Cmd::Verify { data_dirs, oracle, expect_rebuild, only } => {
             verify(data_dirs, oracle.as_deref(), expect_rebuild, only)
         }
-        Cmd::Inspect { path } => inspect(path),
+        Cmd::Inspect { path, all } => inspect(path, *all),
         Cmd::List { game } => list(game),
         Cmd::Doctor { game } => doctor(game),
+        Cmd::Classify { path, entry, pack } => {
+            classify::run(path.as_deref(), entry.as_deref(), pack.as_deref())
+        }
+        Cmd::DiffPack {
+            pack,
+            base,
+            modded,
+            out,
+            id,
+            name,
+            author,
+            game_builds,
+        } => diff_pack(pack, base, modded, out, id, name, author, game_builds),
+        Cmd::DiffCsv {
+            base,
+            modded,
+            out,
+            id,
+            name,
+            author,
+            game_builds,
+        } => diff_csv(base, modded, out, id, name, author, game_builds),
+        Cmd::GenBuilds { exe, out, check } => gen_builds::run(exe, out.as_deref(), *check),
+        Cmd::Mkpack {
+            container,
+            entries,
+            out,
+        } => mkpack(container, entries, out),
     };
     if let Err(e) = result {
         eprintln!("a9ml: {e:#}");
@@ -505,6 +627,41 @@ fn print_common(o: &Offline, game: &Path, verbose: bool) {
     for w in &o.cfg.warnings {
         println!("  config warning: {w}");
     }
+    if o.cfg.probe_fetch {
+        println!("  probe: fetch hooks on (diagnostic)");
+    }
+    match o.cfg.pack_serving {
+        amod::config::PackServing::Merge => {
+            println!("  packs: merge ([[pack]] effects serve via the M3 cache overlay)")
+        }
+        amod::config::PackServing::Inject => {
+            // the injectable set = family-B image packs ([[pack]] sections);
+            // per-pack counts, priority order
+            let mut inject_packs = std::collections::BTreeMap::<String, usize>::new();
+            if let Some(res) = &o.resolution {
+                for &i in &res.order {
+                    for p in &o.manifests[i].pack {
+                        if matches!(
+                            pack::classify(&p.pack),
+                            Some((Family::B, pack::Container::Images))
+                        ) {
+                            *inject_packs.entry(p.pack.clone()).or_default() += p.entry.len();
+                        }
+                    }
+                }
+            }
+            if inject_packs.is_empty() {
+                println!("  packs: inject (no family-B [[pack]] effects — nothing to serve)");
+            } else {
+                let joined = inject_packs
+                    .iter()
+                    .map(|(p, n)| format!("{p} ({n} entr{})", if *n == 1 { "y" } else { "ies" }))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                println!("  packs: inject — {joined}");
+            }
+        }
+    }
     let n_mods = o.scanned.len();
     let dir_word = if n_mods == 1 { "directory" } else { "directories" };
     println!(
@@ -546,12 +703,37 @@ fn print_common(o: &Offline, game: &Path, verbose: bool) {
                 m.patch.len(),
                 m.hook.len()
             );
+            // where the game consumes this mod's data effects (additive line —
+            // the `order:`/`packs:` lines above stay byte-compatible)
+            let classify_rows = classify::classify_manifest(m);
+            if classify_rows.is_empty() {
+                println!("    classify: (no [[pack]]/[[csv]]/[[file]] data effects)");
+            } else {
+                println!(
+                    "    classify: {}",
+                    classify::Summary::of(&classify_rows).compact()
+                );
+            }
             if verbose {
                 for p in &m.patch {
                     println!("    [[patch]] {} off={} len={}", p.target.key(p.offset), p.offset, amod::hex::parse(&p.data).map(|d| d.len()).unwrap_or(0));
                 }
                 for h in &m.hook {
                     println!("    [[hook]] {} handler={} list={}", h.target.key(0), h.handler, h.list.as_deref().unwrap_or("-"));
+                }
+                for p in &m.pack {
+                    for e in &p.entry {
+                        println!("    [[pack]] {} entry {} ({}x{}, {})", p.pack, e.name, e.width, e.height, e.file);
+                    }
+                }
+                for c in &m.csv {
+                    println!("    [[csv]] {} ({})", c.name, c.file);
+                }
+                for f in &m.file {
+                    println!("    [[file]] {} <- {}", f.dest, f.file);
+                }
+                for r in &classify_rows {
+                    println!("      {}", r.line());
                 }
             }
         }
@@ -602,7 +784,278 @@ fn doctor(game: &Path) -> Result<()> {
     Ok(())
 }
 
-fn inspect(path: &Path) -> Result<()> {
+// ------------------------------------------------------ diff / mkpack
+
+use a9_formats::container::{parse_csvs, parse_images, CsvEntry, ImageEntry};
+use a9_formats::pack::{self, Family};
+use a9_mod::manifest::{CsvSection, Manifest, PackEntry, PackSection};
+
+fn sanitized(name: &str) -> String {
+    name.chars()
+        .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') { c } else { '_' })
+        .collect()
+}
+
+fn manifest_toml(m: &Manifest) -> Result<String> {
+    toml::to_string(m).context("serializing mod.toml")
+}
+
+fn write_mod(
+    out: &Path,
+    id: &str,
+    name: &str,
+    author: &str,
+    game_builds: &[String],
+    pack: Vec<PackSection>,
+    csv: Vec<CsvSection>,
+) -> Result<()> {
+    let m = Manifest {
+        id: id.to_string(),
+        name: name.to_string(),
+        version: semver::Version::new(1, 0, 0),
+        author: author.to_string(),
+        description: None,
+        license: None,
+        url: None,
+        game_builds: game_builds.to_vec(),
+        priority: a9_mod::manifest::DEFAULT_PRIORITY,
+        supplies: Vec::new(),
+        requires: Vec::new(),
+        conflicts: Vec::new(),
+        patch: Vec::new(),
+        hook: Vec::new(),
+        pack,
+        csv,
+        file: Vec::new(),
+    };
+    m.validate().map_err(|e| anyhow::anyhow!("generated manifest invalid: {e}"))?;
+    fs::create_dir_all(out).context("creating the mod dir")?;
+    fs::write(out.join("mod.toml"), manifest_toml(&m)?).context("writing mod.toml")?;
+    Ok(())
+}
+
+fn diff_pack(
+    pack: &str,
+    base: &Path,
+    modded: &Path,
+    out: &Path,
+    id: &str,
+    name: &str,
+    author: &str,
+    game_builds: &[String],
+) -> Result<()> {
+    let base_f = fs::read(&base).with_context(|| format!("reading {}", base.display()))?;
+    let mod_f = fs::read(&modded).with_context(|| format!("reading {}", modded.display()))?;
+    let base_e = parse_images(&pack::decode_pack(&base_f, Family::B)?)
+        .context("parsing the base pack (family-B 0x200 expected)")?;
+    let mod_e = parse_images(&pack::decode_pack(&mod_f, Family::B)?)
+        .context("parsing the modded pack (family-B 0x200 expected)")?;
+
+    let base_map: std::collections::BTreeMap<String, &ImageEntry> =
+        base_e.iter().map(|e| (e.name.as_str(), e)).collect();
+    let mod_names: std::collections::BTreeSet<String> =
+        mod_e.iter().map(|e| e.name.as_str()).collect();
+
+    let removed: Vec<String> = base_map
+        .keys()
+        .filter(|n| !mod_names.contains(*n))
+        .cloned()
+        .collect();
+    if !removed.is_empty() {
+        bail!(
+            "{} entries exist in the base but not in the modded pack — removal is not \
+             expressible as a [[pack]] mod: {}{}",
+            removed.len(),
+            removed.iter().take(5).cloned().collect::<Vec<_>>().join(", "),
+            if removed.len() > 5 { ", …" } else { "" }
+        );
+    }
+
+    let entries_dir = out.join("entries");
+    fs::create_dir_all(&entries_dir).context("creating entries/")?;
+    let mut section = PackSection {
+        pack: pack.to_string(),
+        entry: Vec::new(),
+    };
+    let mut added = 0usize;
+    let mut replaced = 0usize;
+    let mut total_bytes = 0usize;
+    for e in &mod_e {
+        let n = e.name.as_str();
+        let existing = base_map.get(&n);
+        let changed = match existing {
+            Some(b) => b.payload != e.payload || b.width != e.width || b.height != e.height,
+            None => true,
+        };
+        if !changed {
+            continue;
+        }
+        if existing.is_some() {
+            replaced += 1;
+        } else {
+            added += 1;
+        }
+        let file = format!("entries/{}", sanitized(&n));
+        fs::write(out.join(&file), &e.payload)
+            .with_context(|| format!("writing {}", out.join(&file).display()))?;
+        total_bytes += e.payload.len();
+        section.entry.push(PackEntry {
+            name: n.clone(),
+            width: e.width,
+            height: e.height,
+            file,
+        });
+    }
+    if section.entry.is_empty() {
+        bail!("no differences found between the packs — nothing to generate");
+    }
+    let n_entries = section.entry.len();
+    write_mod(
+        out,
+        id,
+        name,
+        author,
+        game_builds,
+        vec![section],
+        Vec::new(),
+    )?;
+    println!(
+        "mod '{id}' generated: pack {pack} — {added} added, {replaced} replaced, {n_entries} entries, {:.1} MB payloads -> {}",
+        total_bytes as f64 / (1024.0 * 1024.0),
+        out.display()
+    );
+    Ok(())
+}
+
+fn diff_csv(
+    base: &Path,
+    modded: &Path,
+    out: &Path,
+    id: &str,
+    name: &str,
+    author: &str,
+    game_builds: &[String],
+) -> Result<()> {
+    let base_f = fs::read(&base).with_context(|| format!("reading {}", base.display()))?;
+    let mod_f = fs::read(&modded).with_context(|| format!("reading {}", modded.display()))?;
+    let base_e = parse_csvs(&pack::decode_pack(&base_f, Family::B)?)
+        .context("parsing the base csvp (0x204 container expected)")?;
+    let mod_e = parse_csvs(&pack::decode_pack(&mod_f, Family::B)?)
+        .context("parsing the modded csvp (0x204 container expected)")?;
+    let base_map: std::collections::BTreeMap<String, &CsvEntry> =
+        base_e.iter().map(|e| (e.name.as_str(), e)).collect();
+    let mod_names: std::collections::BTreeSet<String> =
+        mod_e.iter().map(|e| e.name.as_str()).collect();
+    let removed: Vec<String> = base_map
+        .keys()
+        .filter(|n| !mod_names.contains(*n))
+        .cloned()
+        .collect();
+    if !removed.is_empty() {
+        bail!(
+            "{} tables exist in the base but not in the modded csvp — removal is not \
+             expressible: {}",
+            removed.len(),
+            removed.join(", ")
+        );
+    }
+    let csv_dir = out.join("csv");
+    fs::create_dir_all(&csv_dir).context("creating csv/")?;
+    let mut sections = Vec::new();
+    let mut added = 0usize;
+    let mut replaced = 0usize;
+    for e in &mod_e {
+        let n = e.name.as_str();
+        let existing = base_map.get(&n);
+        let changed = existing.map_or(true, |b| b.payload != e.payload);
+        if !changed {
+            continue;
+        }
+        if existing.is_some() {
+            replaced += 1;
+        } else {
+            added += 1;
+        }
+        let file = format!("csv/{}", sanitized(&n));
+        fs::write(out.join(&file), &e.payload)
+            .with_context(|| format!("writing {}", out.join(&file).display()))?;
+        sections.push(CsvSection {
+            name: n.clone(),
+            file,
+        });
+    }
+    if sections.is_empty() {
+        bail!("no differences found between the csvp files — nothing to generate");
+    }
+    let n_tables = sections.len();
+    write_mod(out, id, name, author, game_builds, Vec::new(), sections)?;
+    println!(
+        "mod '{id}' generated: csvp — {added} added, {replaced} replaced, {n_tables} tables -> {}",
+        out.display()
+    );
+    Ok(())
+}
+
+fn mkpack(container: &str, entries: &[String], out: &Path) -> Result<()> {
+    let file = match container {
+        "images" => {
+            let mut ents = Vec::new();
+            for spec in entries {
+                // NAME=WIDTH:HEIGHT:FILE (split from the right: the dims
+                // themselves contain a colon)
+                let (name, rest) = spec
+                    .split_once('=')
+                    .context("entry must be NAME=WIDTH:HEIGHT:FILE")?;
+                let (dims, path) = rest
+                    .rsplit_once(':')
+                    .context("entry must be NAME=WIDTH:HEIGHT:FILE")?;
+                let (w, h) = dims
+                    .split_once(':')
+                    .context("entry must be NAME=WIDTH:HEIGHT:FILE")?;
+                let payload = fs::read(path).with_context(|| format!("reading {path}"))?;
+                ents.push(ImageEntry {
+                    name: a9_formats::container::NameField::from_str(name)?,
+                    width: w.parse()?,
+                    height: h.parse()?,
+                    payload,
+                });
+            }
+            pack::encode_pack_b(&a9_formats::container::serialize_images(&ents))
+        }
+        "csvs" => {
+            let mut ents = Vec::new();
+            for spec in entries {
+                let (name, path) = spec
+                    .split_once('=')
+                    .context("entry must be NAME=FILE")?;
+                let payload = fs::read(path).with_context(|| format!("reading {path}"))?;
+                ents.push(CsvEntry {
+                    name: a9_formats::container::NameField::from_str(name)?,
+                    payload,
+                });
+            }
+            pack::encode_pack_b(&a9_formats::container::serialize_csvs(&ents))
+        }
+        other => bail!("--container must be images or csvs, got {other:?}"),
+    };
+    // byte-verify the result before writing
+    let decoded = pack::decode_pack(&file, Family::B)?;
+    let n = match container {
+        "images" => parse_images(&decoded)?.len(),
+        _ => parse_csvs(&decoded)?.len(),
+    };
+    anyhow::ensure!(n == entries.len(), "round-trip count mismatch: {n} != {}", entries.len());
+    fs::write(out, &file).with_context(|| format!("writing {}", out.display()))?;
+    println!(
+        "{} written: {} entries, {:.1} MB decoded",
+        out.display(),
+        entries.len(),
+        decoded.len() as f64 / (1024.0 * 1024.0)
+    );
+    Ok(())
+}
+
+fn inspect(path: &Path, all: bool) -> Result<()> {
     let name = path.file_name().unwrap().to_string_lossy().to_string();
     let key = fmt::pack::classify_key(&name);
     let Some((family, container)) = fmt::pack::classify(&name) else {
@@ -618,15 +1071,16 @@ fn inspect(path: &Path) -> Result<()> {
         let declared = u32::from_le_bytes(plain[..4].try_into().unwrap());
         println!("  declared output {} B (decoded {} B)", declared, decoded.len());
     }
+    let cap = if all { usize::MAX } else { 40 };
     match container {
         fmt::pack::Container::Images => {
             let entries = fmt::container::parse_images(&decoded)?;
             println!("  {} image entries:", entries.len());
-            for e in entries.iter().take(40) {
+            for e in entries.iter().take(cap) {
                 println!("    {:<28} {}x{} {:>10} B", e.name.as_str(), e.width, e.height, e.payload.len());
             }
-            if entries.len() > 40 {
-                println!("    … {} more", entries.len() - 40);
+            if entries.len() > cap {
+                println!("    … {} more", entries.len() - cap);
             }
         }
         fmt::pack::Container::Csvs => {

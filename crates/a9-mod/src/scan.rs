@@ -3,10 +3,9 @@
 //! failures produce a per-mod error entry (the mod is skipped loudly; other
 //! mods still load).
 //!
-//! Manifests carrying sections designed for M3/M4 (`[[pack]]`, `[[csv]]`,
-//! `[[file]]`, `[native]`) are refused with a note pointing at the milestone
-//! that implements them — refusing beats half-executing a design the current
-//! loader cannot honor.
+//! Manifests carrying `[native]` (mods that ship code — post-M4) are refused
+//! with a milestone pointer — refusing beats half-executing a design the
+//! current loader cannot honor.
 
 use crate::manifest::Manifest;
 use crate::ModError;
@@ -27,6 +26,8 @@ pub fn scan(mods_dir: &Path) -> Vec<ScannedMod> {
         .filter_map(|e| e.ok())
         .map(|e| e.path())
         .filter(|p| p.is_dir())
+        // the loader's own overlay cache dir is not a mod — never scanned
+        .filter(|p| p.file_name().map(|n| n != "cache").unwrap_or(true))
         .collect();
     dirs.sort();
     let mut out = Vec::new();
@@ -50,17 +51,12 @@ fn parse_manifest(text: &str) -> Result<Manifest, ModError> {
         Err(e) => {
             let msg = e.to_string();
             // friendly pointer for designed-but-not-yet-supported sections
-            for (name, milestone) in [
-                ("pack", "M3 (runtime overlay)"),
-                ("csv", "M3 (runtime overlay)"),
-                ("file", "M3 (boot-time file copies)"),
-                ("native", "M4+ (mods that ship code)"),
-            ] {
-                if msg.contains(&format!("unknown field `{name}`")) {
-                    return Err(ModError::Parse(format!(
-                        "section [[{name}]] is designed but lands with {milestone}; this loader build does not support it yet"
-                    )));
-                }
+            if msg.contains("unknown field `native`") {
+                return Err(ModError::Parse(
+                    "section [native] is designed but lands with M4+ (mods that ship code); \
+                     this loader build does not support it yet"
+                        .into(),
+                ));
             }
             Err(ModError::Parse(msg))
         }
@@ -121,7 +117,7 @@ mod tests {
         std::fs::write(dir.join("bad/mod.toml"), "id = 5\n").unwrap();
         std::fs::write(
             dir.join("future/mod.toml"),
-            "id=\"f\"\nname=\"F\"\nversion=\"1.0.0\"\nauthor=\"t\"\n[[pack]]\npack=\"mtentr0\"\n",
+            "id=\"f\"\nname=\"F\"\nversion=\"1.0.0\"\nauthor=\"t\"\n[native]\nabi=1\n",
         )
         .unwrap();
         let scanned = scan(&dir);
@@ -135,7 +131,7 @@ mod tests {
         assert!(bad.manifest.is_err());
         let future = scanned.iter().find(|s| s.dir.ends_with("future")).unwrap();
         let err = future.manifest.as_ref().unwrap_err().to_string();
-        assert!(err.contains("lands with M3"), "{err}");
+        assert!(err.contains("lands with M4+"), "{err}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

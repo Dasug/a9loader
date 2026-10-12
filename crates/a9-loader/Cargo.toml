@@ -6,6 +6,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+a9-formats = { path = "../a9-formats" }
 a9-mod = { path = "../a9-mod" }
 toml = "0.9"
 
