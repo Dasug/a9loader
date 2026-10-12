@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/a9-formats", "crates/a9-loader", "crates/a9ml"]
+members = ["crates/a9-formats", "crates/a9-loader", "crates/a9-mod", "crates/a9ml"]
 
 [workspace.package]
 version = "0.1.0"

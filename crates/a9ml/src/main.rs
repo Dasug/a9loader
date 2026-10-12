@@ -45,6 +45,20 @@ enum Cmd {
         /// Path to the pack file
         path: PathBuf,
     },
+    /// Show the mods of a game dir and how the loader would resolve them
+    /// (offline — reads manifests + config, applies nothing)
+    List {
+        /// Game dir (the dir holding ATrain9v5.exe)
+        #[arg(long)]
+        game: PathBuf,
+    },
+    /// Diagnose a game dir: build identity, mod resolution, gate verdicts,
+    /// and the loader log tail from the last boot
+    Doctor {
+        /// Game dir (the dir holding ATrain9v5.exe)
+        #[arg(long)]
+        game: PathBuf,
+    },
 }
 
 fn main() {
@@ -54,6 +68,8 @@ fn main() {
             verify(data_dirs, oracle.as_deref(), expect_rebuild, only)
         }
         Cmd::Inspect { path } => inspect(path),
+        Cmd::List { game } => list(game),
+        Cmd::Doctor { game } => doctor(game),
     };
     if let Err(e) = result {
         eprintln!("a9ml: {e:#}");
@@ -388,7 +404,203 @@ fn oracle_decode(oracle: &Path, file: &[u8], skip: usize, tag: &str) -> Result<V
     Ok(out)
 }
 
-// ---------------------------------------------------------------- inspect
+// ------------------------------------------------------- list / doctor
+
+use a9_mod as amod;
+
+/// Find the game exe in a game dir (Steam name first, then JP names).
+fn find_game_exe(game: &Path) -> Option<PathBuf> {
+    let mut candidates: Vec<PathBuf> = fs::read_dir(game)
+        .ok()?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| {
+            p.is_file()
+                && p.extension().map(|x| x == "exe").unwrap_or(false)
+                && p.file_name()
+                    .map(|n| n.to_string_lossy().starts_with("ATrain9"))
+                    .unwrap_or(false)
+        })
+        .collect();
+    candidates.sort_by_key(|p| {
+        // prefer ATrain9v5.exe (the international Steam exe), then g_x64
+        let n = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        (if n == "ATrain9v5.exe" { 0 } else if n == "ATrain9v5g_x64.exe" { 1 } else { 2 }, n)
+    });
+    candidates.into_iter().next()
+}
+
+/// Shared offline resolution report for list/doctor. Nothing is applied —
+/// this is the dry view of what the loader does at boot.
+fn offline_resolution(game: &Path) -> Result<Offline> {
+    let cfg = amod::config::read(&game.join("a9loader.toml"));
+    let exe = find_game_exe(game);
+    let build = exe
+        .as_ref()
+        .map(|p| fs::read(p).ok())
+        .flatten()
+        .and_then(|b| amod::buildid::from_exe_bytes(&b));
+    let scanned = amod::scan::scan(&game.join(&cfg.mods_dir));
+    let mut manifests = Vec::new();
+    let mut errors: Vec<(PathBuf, String)> = Vec::new();
+    for s in &scanned {
+        match &s.manifest {
+            Ok(m) => manifests.push(m.clone()),
+            Err(e) => errors.push((s.dir.clone(), e.to_string())),
+        }
+    }
+    let resolution = if manifests.is_empty() {
+        None
+    } else {
+        Some(amod::resolve::resolve(&manifests, &cfg.resolve_config()))
+    };
+    let out = Offline {
+        cfg,
+        exe,
+        build,
+        scanned,
+        manifests,
+        errors,
+        resolution,
+    };
+    Ok(out)
+}
+
+struct Offline {
+    cfg: amod::config::Config,
+    exe: Option<PathBuf>,
+    build: Option<amod::buildid::BuildId>,
+    scanned: Vec<amod::scan::ScannedMod>,
+    manifests: Vec<amod::manifest::Manifest>,
+    errors: Vec<(PathBuf, String)>,
+    resolution: Option<amod::resolve::Resolution>,
+}
+
+fn print_common(o: &Offline, game: &Path, verbose: bool) {
+    println!("game dir: {}", game.display());
+    match (&o.exe, &o.build) {
+        (Some(exe), Some(b)) => println!(
+            "exe: {} — build id {} (FILEVERSION {})",
+            exe.display(),
+            b.id,
+            b.tuple()
+        ),
+        (Some(exe), None) => println!("exe: {} — no VERSIONINFO found", exe.display()),
+        (None, _) => println!("exe: none found (expected ATrain9v5*.exe)"),
+    }
+    let book = amod::builds::embedded_book().ok();
+    let known_build = o
+        .build
+        .as_ref()
+        .map(|b| book.as_ref().map(|bk| bk.build.contains_key(&b.id)).unwrap_or(false));
+    if let Some(false) = known_build {
+        println!("  this loader build does NOT know that build id — the loader will apply no memory effects");
+    }
+    println!(
+        "config: mods_dir \"{}\", conflicts={}, disabled {:?}",
+        o.cfg.mods_dir.display(),
+        if o.cfg.allow_conflicts { "warn+load" } else { "error" },
+        o.cfg.disabled
+    );
+    for w in &o.cfg.warnings {
+        println!("  config warning: {w}");
+    }
+    let n_mods = o.scanned.len();
+    let dir_word = if n_mods == 1 { "directory" } else { "directories" };
+    println!(
+        "mods dir: {} — {} {}",
+        game.join(&o.cfg.mods_dir).display(),
+        n_mods,
+        dir_word
+    );
+    for (dir, e) in &o.errors {
+        println!("  broken mod {}: {e}", dir.display());
+    }
+    if let Some(res) = &o.resolution {
+        for w in &res.warnings {
+            println!("  warning: {w}");
+        }
+        for s in &res.skipped {
+            println!("  skipped '{}': {}", s.id, s.reason);
+        }
+        for o2 in &res.overlaps {
+            let owners: Vec<String> = o2.owners.iter().map(|&i| o.manifests[i].id.clone()).collect();
+            println!("  overlap on {}: {} (earlier mod keeps it)", o2.key, owners.join(" vs "));
+        }
+        let build_id = o.build.as_ref().map(|b| b.id.as_str());
+        for &i in &res.order {
+            let m = &o.manifests[i];
+            let gated = build_id.map(|bid| {
+                !m.game_builds.is_empty() && !m.game_builds.iter().any(|b| b == bid)
+            });
+            let gate_note = match gated {
+                Some(true) => "  [GATED: game_builds excludes this build — effects will be refused]",
+                _ => "",
+            };
+            println!(
+                "  order: '{}' v{} by {} (prio {}) — {} patch, {} hook{gate_note}",
+                m.id,
+                m.version,
+                m.author,
+                *o.cfg.priorities.get(&m.id).unwrap_or(&m.priority),
+                m.patch.len(),
+                m.hook.len()
+            );
+            if verbose {
+                for p in &m.patch {
+                    println!("    [[patch]] {} off={} len={}", p.target.key(p.offset), p.offset, amod::hex::parse(&p.data).map(|d| d.len()).unwrap_or(0));
+                }
+                for h in &m.hook {
+                    println!("    [[hook]] {} handler={} list={}", h.target.key(0), h.handler, h.list.as_deref().unwrap_or("-"));
+                }
+            }
+        }
+        if verbose {
+            println!("  (offline resolution — the loader applies this at boot)");
+        }
+    } else if n_mods == 0 {
+        println!("  (no mods — the loader is a pure proxy)");
+    }
+}
+
+fn list(game: &Path) -> Result<()> {
+    if !game.is_dir() {
+        bail!("not a directory: {}", game.display());
+    }
+    let o = offline_resolution(game)?;
+    print_common(&o, game, true);
+    Ok(())
+}
+
+fn doctor(game: &Path) -> Result<()> {
+    if !game.is_dir() {
+        bail!("not a directory: {}", game.display());
+    }
+    let o = offline_resolution(game)?;
+    print_common(&o, game, false);
+    // loader dll presence
+    let dll = game.join("version.dll");
+    println!(
+        "loader: {}",
+        if dll.is_file() {
+            "version.dll present"
+        } else {
+            "version.dll MISSING — the game runs vanilla"
+        }
+    );
+    // log tail
+    let log = game.join(&o.cfg.mods_dir).join("a9loader.log");
+    if log.is_file() {
+        println!("---- a9loader.log (last 30 lines) ----");
+        let text = fs::read_to_string(&log).context("reading the loader log")?;
+        for l in text.lines().rev().take(30).collect::<Vec<_>>().iter().rev() {
+            println!("{l}");
+        }
+    } else {
+        println!("loader log: none at {} (no boot with the M2+ loader yet?)", log.display());
+    }
+    Ok(())
+}
 
 fn inspect(path: &Path) -> Result<()> {
     let name = path.file_name().unwrap().to_string_lossy().to_string();

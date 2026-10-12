@@ -1,45 +1,50 @@
-//! a9-loader — the `version.dll` proxy product for A-Train 9 v5 (Steam build
-//! `5.00.5634`).
+//! a9-loader — the `version.dll` proxy product for A-Train 9 v5.
 //!
-//! **M0 scope**: a 1:1 behavioral port of the C reference proxy
-//! (`version_proxy.c` in the research corpus, `projects/dll-proxy/`):
-//! forwarded VERSION.dll exports + the train-list filter hook, driven by the
-//! legacy `atrain9_proxy.ini` compat config. The general engine (build-id
-//! gate, mod manifests, runtime overlay) lands with M2/M3 — see the
-//! architecture plan in the corpus (`projects/mod-loader/PLAN.md`).
+//! **M2 scope**: the general loader engine. `DllMain` boots the engine:
+//! config → build identity (from the exe's `VS_VERSIONINFO`, parsed from the
+//! file — the version APIs are our own forwarded exports and must not run
+//! under the loader lock) → address-book gate → mods-dir scan → dependency
+//! resolution → expect-verified, journaled effect execution. Mod manifests
+//! are data (`mod.toml`, schema in the `a9-mod` crate); there is deliberately
+//! no scripting in manifests. The M0 parity behaviors live on as the
+//! `train_list`/`nop` handlers.
 //!
-//! Parity rules kept from the C reference:
-//! - patches are applied in `DllMain` at `DLL_PROCESS_ATTACH` (the exe image
-//!   is mapped by then; the file on disk stays vanilla — APP_ERR195);
+//! Legacy `atrain9_proxy.ini` support was dropped before anything shipped
+//! (the ini was never published to anyone); mods are `mods/<id>/mod.toml`.
+//!
+//! Hard rules kept from the corpus handover:
+//! - patches are applied in `DllMain` at `DLL_PROCESS_ATTACH`; the exe file on
+//!   disk stays vanilla (APP_ERR195);
 //! - the real system VERSION.dll is loaded lazily on the first forwarded
-//!   call, never inside `DllMain` (loader lock);
-//! - every failure degrades silently to an unpatched (vanilla) game — the
-//!   only additive behavior is the `a9loader.log` next to the exe.
+//!   call — never inside `DllMain` (loader lock);
+//! - every failure degrades to an unpatched (vanilla) game + a loud log line.
 
 #![allow(non_snake_case)]
 
-// pure, host-testable; pub because the M2 engine consumes them from both
-// targets and the host lib build has no other callers (avoids dead-code noise)
-pub mod forms;
-pub mod ini;
+pub mod forms; // pure: FORM list / allow-list parsing + bitmap (host-testable)
 
 #[cfg(target_os = "windows")]
-mod compat; // DllMain glue: mode dispatch (parity with version_proxy.c)
+mod engine; // the M2 boot engine (config, build gate, scan, resolve, execute)
 #[cfg(target_os = "windows")]
 mod forward; // the 10 forwarded VERSION.dll exports
 #[cfg(target_os = "windows")]
-mod log; // exe-dir a9loader.log (additive; the C reference is silent)
+mod handlers; // effect handlers: train_list, nop, [[patch]] executor
+#[cfg(target_os = "windows")]
+mod log; // <mods_dir>/a9loader.log
 #[cfg(target_os = "windows")]
 mod patch; // VirtualProtect write helpers + patch recipes
 #[cfg(target_os = "windows")]
-mod sys; // minimal hand-declared Win32 (migrate to windows-sys in M2)
+mod sys; // minimal hand-declared Win32 + readability guards
 
 #[cfg(target_os = "windows")]
 #[unsafe(no_mangle)]
 unsafe extern "system" fn DllMain(
     hinst: *mut core::ffi::c_void,
     reason: u32,
-    reserved: *mut core::ffi::c_void,
+    _reserved: *mut core::ffi::c_void,
 ) -> i32 {
-    unsafe { compat::dllmain(hinst.cast(), reason, reserved) }
+    if reason == sys::DLL_PROCESS_ATTACH {
+        unsafe { engine::boot(hinst.cast()) };
+    }
+    1 // the game always boots
 }

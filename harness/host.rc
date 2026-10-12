@@ -1,0 +1,22 @@
+// host.rc — VERSIONINFO for the M2 harness host: the loader engine reads the
+// exe's FILEVERSION from the FILE bytes, so the fake-game host carries the
+// international Steam build's 5,0,0,5634 to satisfy the build gate.
+1 VERSIONINFO
+FILEVERSION 5,0,0,5634
+PRODUCTVERSION 5,0,0,5634
+FILEOS 0x40004
+FILETYPE 0x1
+BEGIN
+  BLOCK "StringFileInfo"
+  BEGIN
+    BLOCK "040904B0"
+    BEGIN
+      VALUE "FileDescription", "a9loader M2 harness host"
+      VALUE "FileVersion", "5.00.5634"
+    END
+  END
+  BLOCK "VarFileInfo"
+  BEGIN
+    VALUE "Translation", 0x409, 1200
+  END
+END
