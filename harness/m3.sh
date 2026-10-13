@@ -32,6 +32,19 @@ mk() { # mk <name> <payload-bytes...>
     printf '%b' "$2" > "$RUN/$1"
 }
 
+mk_csv() { # mk_csv <outfile> <row1> <row2> ...  (cells separated by '|')
+    # UTF-16 (BOM) CSV, CRLF, every field quoted — the game's own table style
+    # and the canonical form a9-formats writes for changed/added rows.
+    python3 - "$@" <<'EOF'
+import csv, sys
+out = sys.argv[1]
+rows = [r.split('|') for r in sys.argv[2:]]
+with open(out, 'w', encoding='utf-16', newline='') as f:
+    w = csv.writer(f, quoting=csv.QUOTE_ALL, lineterminator='\r\n')
+    w.writerows(rows)
+EOF
+}
+
 echo "== extracting the FORM list for the host's form page"
 python3 - "$GAME_EXE" "$RUN/form_list.bin" <<'EOF'
 import sys
@@ -327,6 +340,108 @@ mod brokenmod \
 run_host overlaypack
 check "original served"   "path=data.mtfake.bin"             "$scen_dir/out.txt"
 check "loud failure"       "serving the original this boot"      "$scen_dir/mods/a9loader.log"
+
+echo "== S9: [[csv]] row patches — two mods on one table (replace a cell + add a row)"
+new_scen s9-csv-rows
+mk_csv "$RUN/base_t1.csv" "KEY|VAL" "R1|a" "R2|b" "R3|c"
+mk_csv "$RUN/a_patch.csv" "R2|B2"
+mk_csv "$RUN/b_patch.csv" "R4|d"
+mk_csv "$RUN/exp_t1.csv"  "KEY|VAL" "R1|a" "R2|B2" "R3|c" "R4|d"
+# the scenario's base csvp carries a real UTF-16 table (the shared one is bytes)
+"$A9ML" mkpack --container csvs --out "$scen_dir/data/csvp.bin" "t1.csv=$RUN/base_t1.csv"
+mod rowedit \
+    'id = "rowedit"' \
+    'name = "Row edit"' \
+    'version = "1.0.0"' \
+    'author = "test"' \
+    'priority = 10' \
+    '' \
+    '[[csv]]' \
+    'name = "t1.csv"' \
+    'file = "csv/a.patch.csv"' \
+    'mode = "rows"'
+pay rowedit "csv/a.patch.csv" a_patch.csv
+mod rowadd \
+    'id = "rowadd"' \
+    'name = "Row add"' \
+    'version = "1.0.0"' \
+    'author = "test"' \
+    'priority = 20' \
+    '' \
+    '[[csv]]' \
+    'name = "t1.csv"' \
+    'file = "csv/b.patch.csv"' \
+    'mode = "rows"'
+pay rowadd "csv/b.patch.csv" b_patch.csv
+run_host overlaycsv
+check "redirected to csvp cache" "path=mods.cache.csvp.bin" "$scen_dir/out.txt"
+check "one table, two row patches" \
+    "1 table(s) merged (0 added, 1 replaced, 2 row patch(es) (1 replaced, 1 added" \
+    "$scen_dir/mods/a9loader.log"
+# byte-exact: an independently built csvp with the expected table
+"$A9ML" mkpack --container csvs --out "$scen_dir/expected.bin" "t1.csv=$RUN/exp_t1.csv"
+checkf "cache == expected row-merged csvp" cmp -s "$scen_dir/mods/cache/csvp.bin" "$scen_dir/expected.bin"
+
+echo "== S10: [[csv]] row overlap — the same row key, the earlier mod keeps it"
+new_scen s10-csv-row-overlap
+mk_csv "$RUN/base_t1o.csv" "KEY|VAL" "R1|a" "R2|b" "R3|c"
+mk_csv "$RUN/o1.csv" "R2|from-first"
+mk_csv "$RUN/o2.csv" "R2|from-second"
+mk_csv "$RUN/exp_o.csv" "KEY|VAL" "R1|a" "R2|from-first" "R3|c"
+"$A9ML" mkpack --container csvs --out "$scen_dir/data/csvp.bin" "t1.csv=$RUN/base_t1o.csv"
+mod firsto \
+    'id = "firsto"' \
+    'name = "First row"' \
+    'version = "1.0.0"' \
+    'author = "test"' \
+    'priority = 10' \
+    '' \
+    '[[csv]]' \
+    'name = "t1.csv"' \
+    'file = "csv/o1.csv"' \
+    'mode = "rows"'
+pay firsto "csv/o1.csv" o1.csv
+mod secondo \
+    'id = "secondo"' \
+    'name = "Second row"' \
+    'version = "1.0.0"' \
+    'author = "test"' \
+    'priority = 20' \
+    '' \
+    '[[csv]]' \
+    'name = "t1.csv"' \
+    'file = "csv/o2.csv"' \
+    'mode = "rows"'
+pay secondo "csv/o2.csv" o2.csv
+run_host overlaycsv
+check "row overlap reported" "overlap on csv:t1.csv:R2"          "$scen_dir/mods/a9loader.log"
+check "loser row refused"     "1 row patch(es) refused (overlap loser)" "$scen_dir/mods/a9loader.log"
+"$A9ML" mkpack --container csvs --out "$scen_dir/expected.bin" "t1.csv=$RUN/exp_o.csv"
+checkf "cache == first mod's row result" cmp -s "$scen_dir/mods/cache/csvp.bin" "$scen_dir/expected.bin"
+
+echo "== S11: [[csv]] row patch from a plain UTF-8 file (M5 W3 authoring)"
+new_scen s11-csv-utf8
+mk_csv "$RUN/base_u1.csv" "KEY|VAL" "R1|a" "R2|b"
+# a normal editor's UTF-8 patch file (no BOM); the loader re-encodes the row
+printf '"R2","B2"\r\n"R3","c"\r\n' > "$RUN/u_patch.csv"
+mk_csv "$RUN/exp_u1.csv" "KEY|VAL" "R1|a" "R2|B2" "R3|c"
+"$A9ML" mkpack --container csvs --out "$scen_dir/data/csvp.bin" "t1.csv=$RUN/base_u1.csv"
+mod utf8rows \
+    'id = "utf8rows"' \
+    'name = "UTF-8 rows"' \
+    'version = "1.0.0"' \
+    'author = "test"' \
+    '' \
+    '[[csv]]' \
+    'name = "t1.csv"' \
+    'file = "csv/u.patch.csv"' \
+    'mode = "rows"'
+pay utf8rows "csv/u.patch.csv" u_patch.csv
+run_host overlaycsv
+check "redirected to csvp cache" "path=mods.cache.csvp.bin" "$scen_dir/out.txt"
+check "one replaced, one added"  "2 row patch(es) (1 replaced, 1 added" "$scen_dir/mods/a9loader.log"
+"$A9ML" mkpack --container csvs --out "$scen_dir/expected.bin" "t1.csv=$RUN/exp_u1.csv"
+checkf "cache == expected utf8-row-merged csvp" cmp -s "$scen_dir/mods/cache/csvp.bin" "$scen_dir/expected.bin"
 
 echo
 if [ "$FAILED" = 0 ]; then

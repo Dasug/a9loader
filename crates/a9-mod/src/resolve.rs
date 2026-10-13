@@ -17,7 +17,7 @@
 //! - two enabled mods writing the same target key = overlap: the earlier mod
 //!   keeps the target, later effects are refused (reported to the loader).
 
-use crate::manifest::Manifest;
+use crate::manifest::{CsvMode, Manifest};
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Default, Debug, Clone)]
@@ -173,30 +173,61 @@ pub fn resolve(mods: &[Manifest], cfg: &ResolveConfig) -> Resolution {
 
     // 6. overlaps — same target key written by two enabled mods
     //    (memory effects: anchors/raw targets; data effects: pack entries,
-    //    csv tables, file destinations)
-    let mut owners: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+    //    csv tables, file destinations). `train_list` hooks are the one
+    //    composable effect: several mods may contribute forms and the loader
+    //    composes them (M5 W3), so a group made ONLY of train_list hooks is
+    //    not an overlap. A train_list vs a `nop` (or two `nop`s) still is.
+    let mut owners: BTreeMap<String, Vec<(usize, bool)>> = BTreeMap::new();
+    let mut own = |key: String, i: usize, composable: bool| {
+        owners.entry(key).or_default().push((i, composable));
+    };
     for &i in &enabled {
         for p in &mods[i].patch {
-            owners.entry(format!("patch:{}", p.target.key(p.offset))).or_default().push(i);
+            own(format!("patch:{}", p.target.key(p.offset)), i, false);
         }
         for h in &mods[i].hook {
-            owners.entry(format!("hook:{}", h.target.key(0))).or_default().push(i);
+            let composable = h.handler == "train_list";
+            own(format!("hook:{}", h.target.key(0)), i, composable);
         }
         for p in &mods[i].pack {
             for e in &p.entry {
-                owners.entry(format!("pack:{}:{}", p.pack, e.name)).or_default().push(i);
+                own(format!("pack:{}:{}", p.pack, e.name), i, false);
             }
         }
         for c in &mods[i].csv {
-            owners.entry(format!("csv:{}", c.name)).or_default().push(i);
+            // `replace` (whole table) keys as one target; `rows` keys per row
+            // so two mods editing different rows of one table coexist while two
+            // mods editing the SAME row collide. A `rows` section whose patch
+            // file could not be read falls back to the whole-table key
+            // (fail-safe: no silent permissiveness).
+            if c.mode == CsvMode::Rows && !c.row_keys.is_empty() {
+                let mut seen = BTreeSet::new();
+                for k in &c.row_keys {
+                    let key = format!("csv:{}:{}", c.name, k);
+                    if seen.insert(key.clone()) {
+                        own(key, i, false);
+                    }
+                }
+            } else {
+                own(format!("csv:{}", c.name), i, false);
+            }
         }
         for f in &mods[i].file {
-            owners.entry(format!("file:{}", f.dest)).or_default().push(i);
+            own(format!("file:{}", f.dest), i, false);
+        }
+        for a in &mods[i].asset {
+            // `[[asset]]` names are bare master-map keys — a difference from the
+            // family-B pack-entry namespace; colliding with a SHIPPED i.dat row
+            // is a separate (load-time) hard refusal.
+            own(format!("asset:{}", a.name), i, false);
         }
     }
     for (key, os) in owners {
-        if os.len() > 1 {
-            res.overlaps.push(Overlap { key, owners: os });
+        if os.len() > 1 && !os.iter().all(|(_, composable)| *composable) {
+            res.overlaps.push(Overlap {
+                key,
+                owners: os.into_iter().map(|(i, _)| i).collect(),
+            });
         }
     }
 
@@ -335,6 +366,32 @@ mod tests {
         assert!(res.overlaps.is_empty());
     }
 
+    /// A train_list hook (`mode` selects allow/add/deny).
+    fn tl_on(id: &str, mode: &str, list: &str) -> Manifest {
+        build(
+            id,
+            50,
+            &format!(
+                "[[hook]]\ntarget = \"train_list_filter\"\nhandler = \"train_list\"\nmode = \"{mode}\"\nlist = \"{list}\"\n"
+            ),
+        )
+    }
+
+    #[test]
+    fn train_list_hooks_compose_without_overlap() {
+        // two train_list contributions are composable (M5 W3): no overlap, so
+        // the engine folds both into one filter install
+        let a = tl_on("a", "allow", "a.txt");
+        let b = tl_on("b", "add", "b.txt");
+        let res = resolve(&[a, b], &ResolveConfig::default());
+        assert!(res.overlaps.is_empty(), "{:?}", res.overlaps);
+        // a train_list vs a nop still conflicts on the seam (one writer)
+        let c = hook_on("c", "train_list_filter");
+        let res = resolve(&[tl_on("d", "add", "d.txt"), c], &ResolveConfig::default());
+        assert_eq!(res.overlaps.len(), 1);
+        assert_eq!(res.overlaps[0].key, "hook:train_list_filter");
+    }
+
     #[test]
     fn data_effect_overlaps_refuse_later_mods() {
         // two mods adding the same pack entry
@@ -371,5 +428,58 @@ mod tests {
         let f2 = build("f2", 20, "[[file]]\ndest = \"data/x.dds\"\nfile = \"y.dds\"\n");
         let res = resolve(&vec![f2, f1], &ResolveConfig::default());
         assert_eq!(res.overlaps[0].key, "file:data/x.dds");
+        // two mods adding the same NEW asset name: overlap, earlier wins,
+        // no hard error (the loser's op is skipped by the engine)
+        let a1 = build("a1", 10, "[[asset]]\nname=\"_t_dup_a.x\"\ndir=\"train\\\\dup\"\nhost=\"vp\"\nfile=\"x.x\"\n");
+        let a2 = build("a2", 20, "[[asset]]\nname=\"_t_dup_a.x\"\ndir=\"train\\\\dup\"\nhost=\"vp\"\nfile=\"y.x\"\n");
+        let res = resolve(&vec![a2, a1.clone()], &ResolveConfig::default());
+        assert_eq!(res.overlaps.len(), 1);
+        assert_eq!(res.overlaps[0].key, "asset:_t_dup_a.x");
+        let w = res.order[0];
+        let l = res.order[1];
+        assert!(!res.effect_refused(w, "asset:_t_dup_a.x"));
+        assert!(res.effect_refused(l, "asset:_t_dup_a.x"));
+        // different asset names: no overlap
+        let a3 = build("a3", 20, "[[asset]]\nname=\"_t_other_a.x\"\ndir=\"train\\\\o\"\nhost=\"vp\"\nfile=\"z.x\"\n");
+        assert!(resolve(&vec![a3, a1], &ResolveConfig::default()).overlaps.is_empty());
+    }
+
+    #[test]
+    fn csv_row_patch_overlaps_are_per_row() {
+        fn row_mod(id: &str, prio: i64, keys: &[&str]) -> Manifest {
+            let mut m = build(id, prio, "[[csv]]\nname = \"t.csv\"\nfile = \"p.csv\"\nmode = \"rows\"\n");
+            m.csv[0].row_keys = keys.iter().map(|s| s.to_string()).collect();
+            m
+        }
+        // same row key -> overlap, earlier mod keeps it
+        let a = row_mod("a", 10, &["R1", "R2"]);
+        let b = row_mod("b", 20, &["R1"]);
+        let mods = vec![b, a];
+        let res = resolve(&mods, &ResolveConfig::default());
+        assert_eq!(res.overlaps.len(), 1);
+        assert_eq!(res.overlaps[0].key, "csv:t.csv:R1");
+        let a_idx = res.order[0];
+        let b_idx = res.order[1];
+        assert!(!res.effect_refused(a_idx, "csv:t.csv:R1"));
+        assert!(res.effect_refused(b_idx, "csv:t.csv:R1"));
+        // a different row of the same table is fine
+        assert!(!res.effect_refused(b_idx, "csv:t.csv:R2"));
+        // different rows only -> no overlap at all
+        let c = row_mod("c", 10, &["R1"]);
+        let d = row_mod("d", 20, &["R2"]);
+        assert!(resolve(&vec![d, c], &ResolveConfig::default()).overlaps.is_empty());
+        // duplicate keys within one section don't self-overlap
+        let dup = row_mod("dup", 10, &["R1", "R1"]);
+        assert!(resolve(&vec![dup], &ResolveConfig::default()).overlaps.is_empty());
+        // a whole-table replace and a row patch of the same table do not collide
+        let rep = build("rep", 10, "[[csv]]\nname = \"t.csv\"\nfile = \"whole.csv\"\n");
+        assert!(resolve(&vec![rep, row_mod("rp", 20, &["R1"])], &ResolveConfig::default())
+            .overlaps
+            .is_empty());
+        // unprimed row sections fall back to the whole-table key (fail-safe)
+        let u1 = build("u1", 10, "[[csv]]\nname = \"t.csv\"\nfile = \"p.csv\"\nmode = \"rows\"\n");
+        let u2 = build("u2", 20, "[[csv]]\nname = \"t.csv\"\nfile = \"q.csv\"\nmode = \"rows\"\n");
+        let res = resolve(&vec![u2, u1], &ResolveConfig::default());
+        assert_eq!(res.overlaps[0].key, "csv:t.csv");
     }
 }

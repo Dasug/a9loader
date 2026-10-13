@@ -1,11 +1,11 @@
-//! Pack-file framing — the two families (corpus handover §2.3):
+//! Pack-file framing — the two families:
 //!
 //! - **Family A** (size-prefixed): decrypted body = `[u32 declared out size]
 //!   [LZSS stream]` — `tp`, `mcp`, `vp`, `ep`, `cp`, `i.dat`.
 //! - **Family B** (entry-table): decrypted body = `[LZSS stream]` decoding
 //!   straight into the entry table — `me0..3`, `mt*`, `csvp`, `sdp`, `csdp`.
 //!
-//! Family-A size checking uses the tolerance validated by corpus `a9dec.c`'s
+//! Family-A size checking uses the tolerance validated by the reference decoder's
 //! auto mode (`max(declared/1000, 4096)` slack). Encode is `repack.py`
 //! semantics: family A re-prefixes `[u32 len][LZSS]`, family B is bare LZSS;
 //! both wrap with the MD5-header cipher.
@@ -34,7 +34,7 @@ pub enum Container {
 }
 
 /// Classify a pack by filename (basename, case-insensitive) using the game's
-/// own load table (corpus notes / a9dec.c comments). `None` = not a pack we
+/// own load-table behavior). `None` = not a pack we
 /// decode (kit markers, stubs, unknown names).
 pub fn classify(name: &str) -> Option<(Family, Container)> {
     let n = name.to_ascii_lowercase();
@@ -63,7 +63,7 @@ pub fn classify_key(name: &str) -> String {
 }
 
 /// Decrypt + integrity-check + LZSS-decode a pack file.
-/// Family A also validates the declared output size (tolerance per `a9dec.c`).
+/// Family A also validates the declared output size (reference-decoder tolerance).
 pub fn decode_pack(file: &[u8], family: Family) -> Result<Vec<u8>, crate::Error> {
     let plain = crypt::decrypt_body(file)?;
     if !crypt::header_matches(file, &plain) {
@@ -84,6 +84,33 @@ pub fn decode_pack(file: &[u8], family: Family) -> Result<Vec<u8>, crate::Error>
         }
         Family::B => Ok(lzss::decode(&plain, 0)),
     }
+}
+
+/// The **declared output size** of a family-A pack FILE: the u32 that sits
+/// immediately before the LZSS stream in the decrypted body.
+///
+/// Cheap by construction: the cipher is position-indexed, so the first four
+/// plaintext bytes need only `ADD[0..4]` and `hdr[0..4]` — this decrypts
+/// exactly those four bytes, never the LZSS stream and never the whole body.
+/// No MD5 check either (that would require the full plaintext); the caller
+/// cross-checks the value where it matters — the tailgate appends at
+/// `dest + declared` and asserts the runtime decoded length equals it.
+///
+/// For the vanilla packs the declared size equals the decoded length (a9ml
+/// `inspect` shows vp/tp/i.dat equal), which is what makes `|V|` derivable at
+/// boot without decompressing.
+pub fn family_a_declared_size(file: &[u8]) -> Result<usize, crate::Error> {
+    use crate::add::ADD;
+    if file.len() < crypt::HEADER_LEN + 4 {
+        return Err(crate::Error::TooShort(file.len()));
+    }
+    let hdr = &file[..crypt::HEADER_LEN];
+    let mut d = [0u8; 4];
+    for (i, b) in d.iter_mut().enumerate() {
+        // dec: plain[i] = ((enc[i] + ADD[i & 0xff]) & 0xff) ^ hdr[i & 0xf]
+        *b = (file[crypt::HEADER_LEN + i].wrapping_add(ADD[i])) ^ hdr[i];
+    }
+    Ok(u32::from_le_bytes(d) as usize)
 }
 
 /// Re-materialize a family-A pack file: `[u32 len][LZSS(decoded)]` + cipher.
@@ -170,5 +197,43 @@ mod tests {
         let last = file.len() - 1;
         file[last] ^= 0xff;
         assert!(matches!(decode_pack(&file, Family::B), Err(crate::Error::Md5Mismatch)));
+    }
+
+    #[test]
+    fn family_a_declared_size_reads_without_decompressing() {
+        // a synthetic pack: the reader must return what encode_pack_a declared
+        let raw: Vec<u8> = (0..4096u32).map(|i| (i * 31) as u8).collect();
+        let file = encode_pack_a(&raw);
+        assert_eq!(family_a_declared_size(&file).unwrap(), raw.len());
+        // empty body: declared 0
+        let empty = encode_pack_a(&[]);
+        assert_eq!(family_a_declared_size(&empty).unwrap(), 0);
+        // too short to carry the size word
+        assert!(family_a_declared_size(&[0u8; 15]).is_err());
+        assert!(family_a_declared_size(&[0u8; 19]).is_err());
+        // a declared size that disagrees with the stream still READS (the
+        // reader is a plain header peek — no LZSS, no MD5)
+        let mut plain = crypt::decrypt_body(&file).unwrap();
+        plain[..4].copy_from_slice(&123_456u32.to_le_bytes());
+        let tampered = crypt::encrypt_file(&plain);
+        assert_eq!(family_a_declared_size(&tampered).unwrap(), 123_456);
+    }
+
+    #[test]
+    fn family_a_declared_size_real_packs_when_available() {
+        let Ok(dir) = std::env::var("A9_DATA_DIR") else { return };
+        for name in ["vp.bin", "tp.bin", "i.dat"] {
+            let p = std::path::Path::new(&dir).join(name);
+            let Ok(file) = std::fs::read(&p) else { continue };
+            let declared = family_a_declared_size(&file).unwrap();
+            // the declared size is a cheap peek; prove it equals the real
+            // decoded length (the property the tailgate's |V| relies on)
+            let decoded = decode_pack(&file, Family::A).unwrap();
+            assert_eq!(
+                declared,
+                decoded.len(),
+                "{name}: declared != decoded on the live install"
+            );
+        }
     }
 }

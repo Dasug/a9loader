@@ -50,9 +50,14 @@ pub struct Manifest {
     /// cache (M3)
     #[serde(default)]
     pub pack: Vec<PackSection>,
-    /// csvp table overlays — whole-table replace-or-add by name (M3)
+    /// csvp table overlays — whole-table replace (default) or per-row patches
+    /// (`mode = "rows"`): served at the player's csvp load (M3/M5)
     #[serde(default)]
     pub csv: Vec<CsvSection>,
+    /// genuinely-new i.dat rows whose payloads are appended to a family-A host
+    /// pack's decoded stream, merged in-memory at the game's load (M5 W1)
+    #[serde(default)]
+    pub asset: Vec<AssetSection>,
     /// genuinely-new files copied into the game tree at boot, before the game
     /// enumerates, journaled in `<mods_dir>/journal.json` (M3). Never
     /// overwrites an existing file — that is [[pack]]/[[csv]] territory.
@@ -89,7 +94,9 @@ pub struct Hook {
     pub target: TargetRef,
     /// "train_list" | "nop"
     pub handler: String,
-    /// train_list: keep listed (allow, default) or drop listed (deny)
+    /// train_list: `allow` (keep only the listed forms, default), `add`
+    /// (offer the listed forms in addition to the shipped whitelist) or
+    /// `deny` (drop the listed forms)
     #[serde(default)]
     pub mode: Option<ListMode>,
     /// train_list: allow/deny list file, relative to the mod dir
@@ -100,7 +107,13 @@ pub struct Hook {
 #[derive(Deserialize, Serialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum ListMode {
+    /// keep only the listed forms (a mod's list declares the offered set;
+    /// several `allow` mods compose as the union of their lists)
     Allow,
+    /// offer the listed forms *in addition to* the shipped purchase whitelist
+    /// (and any `allow` list) — what a new-train mod wants
+    Add,
+    /// drop the listed forms (subtracted last: a deny always wins)
     Deny,
 }
 
@@ -138,14 +151,103 @@ pub struct PackEntry {
     pub file: String,
 }
 
-/// `[[csv]]` — whole-table replace-or-add in csvp by name (e.g.
+/// `[[csv]]` — an operation on one table inside csvp by name (e.g.
 /// "train_form.csv").
+///
+/// `mode` decides how `file` composes with the shipped table:
+/// - `"replace"` (the default, and the only mode the pre-W2 loader had):
+///   the file IS the whole table — it takes the table over. Existing
+///   whole-table mods (english-train-names) keep this exact behavior with no
+///   manifest change, so the default stays `replace` rather than switching to
+///   `rows`: a whole table re-parsed as row patches would choke on its
+///   header/comment rows (empty first column = no row identity).
+/// - `"rows"`: the file holds just the rows to edit/add, keyed by the first
+///   column. Independent mods can then patch the same table without a
+///   whole-table conflict, and a mod can append a new row.
 #[derive(Deserialize, Serialize, Debug, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct CsvSection {
     pub name: String,
-    /// CSV payload file, relative to the mod dir
+    /// CSV payload file, relative to the mod dir (whole table or patch rows)
     pub file: String,
+    #[serde(default)]
+    pub mode: CsvMode,
+    /// The patch rows' first-column keys, filled by [`crate::scan`] from the
+    /// file for `mode = "rows"` — derived state, never part of the manifest
+    /// (skipped by serde; the resolver uses it for per-row overlap keys).
+    #[serde(skip)]
+    pub row_keys: Vec<String>,
+}
+
+/// How a `[[csv]]` section's file composes with the shipped table.
+#[derive(Deserialize, Serialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum CsvMode {
+    /// the file IS the whole table (default — backward compatible)
+    #[default]
+    Replace,
+    /// the file is a set of row patches (row identity = first column)
+    Rows,
+}
+
+/// `host = "auto"`: resolve the host pack at load time from the embedded
+/// per-build `dir -> pack` index ([`crate::dirindex`]). It is the default in
+/// both asset forms; an explicit family-A pack key always overrides it.
+pub const HOST_AUTO: &str = "auto";
+
+fn default_host() -> String {
+    HOST_AUTO.to_string()
+}
+
+/// `[[asset]]` — a genuinely-new i.dat row whose payload is appended to a
+/// family-A host pack's decoded stream (M5 W1). Served only through the merge
+/// overlay (inject has no family-A seam).
+///
+/// Exactly one of two forms:
+/// - **single-file**: `name` + `file` (one row per section);
+/// - **folder**: `folder = "<dir inside the mod>"` — every file under it,
+///   recursively, becomes one row. [`crate::scan`] expands folder sections
+///   into single-file-form ops before resolution, so nothing downstream sees
+///   the folder form (`folder` is `None` on an expanded op).
+#[derive(Deserialize, Serialize, Debug, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct AssetSection {
+    /// bare i.dat / master-map key (no directory), e.g. "_t_mynew_a.x" — the
+    /// basename the train CSVs' `train\<dir>\<model>.x` composition produces.
+    /// Globally unique per build. Single-file form only (empty in folder form).
+    #[serde(default)]
+    pub name: String,
+    /// i.dat `dir` field (consumer grouping, not part of the lookup key),
+    /// e.g. "train\\mynew" (backslashes are allowed here). Optional: a folder
+    /// form derives each row's dir from the file's subfolder (see `folder`).
+    #[serde(default)]
+    pub dir: String,
+    /// host pack key: `"auto"` (the default — resolved from the embedded
+    /// dir index) or a family-A pack the loader can append to — "vp", "tp",
+    /// "mcp", "ep" or "cp" (must classify `(Family::A, Opaque)`).
+    #[serde(default = "default_host")]
+    pub host: String,
+    /// payload file inside the mod dir — shipped as the exact pack chunk, so
+    /// the i.dat row's `len` is this file's size (a `.x` includes the 12-byte
+    /// ADX0 header). Single-file form only.
+    #[serde(default)]
+    pub file: String,
+    /// folder form: a folder inside the mod. Every file under it, recursively,
+    /// becomes one row: the file's basename is the row `name` and its
+    /// subfolder path (relative to the folder, `\`-separated) is the row
+    /// `dir`. A file directly in the folder takes the folder's own path as its
+    /// `dir`; when the folder IS the mod root (`.`), that falls back to the
+    /// section's explicit `dir`. Mutually exclusive with `name`/`file`.
+    #[serde(default)]
+    pub folder: Option<String>,
+    /// allow this asset to REPLACE a row that exists in the SHIPPED i.dat.
+    /// Without it such a name collision is a hard refusal (the engine's
+    /// master-map insert-or-find would otherwise silently overwrite a shipped
+    /// asset). Concerns only shipped assets — a mod-vs-mod collision on the
+    /// same name is resolved by load order (higher priority wins) and needs
+    /// no flag. Applies to every file of a folder form.
+    #[serde(default)]
+    pub override_vanilla: bool,
 }
 
 /// `[[file]]` — a genuinely-new file copied into the game tree at boot.
@@ -377,8 +479,95 @@ impl Manifest {
                 )));
             }
         }
+        // [[asset]] — a family-A append + an i.dat row (M5 W1), single-file
+        // form (`name`+`file`) or folder form (`folder`, expanded at scan
+        // time). Exactly one form per section.
+        let mut asset_names = std::collections::BTreeSet::new();
+        for a in &self.asset {
+            let folder = a.folder.as_deref().map(str::trim).filter(|s| !s.is_empty());
+            match folder {
+                Some(folder) => {
+                    if !a.name.trim().is_empty() || !a.file.trim().is_empty() {
+                        return Err(ModError::Invalid(format!(
+                            "asset folder {folder:?}: `name`/`file` are not allowed together \
+                             with `folder` — a folder expands to one row per file"
+                        )));
+                    }
+                    validate_mod_rel_path(folder, "asset folder")?;
+                }
+                None => {
+                    if a.name.trim().is_empty() {
+                        return Err(ModError::Invalid(
+                            "asset name must be a nonempty plain name \
+                             (or use `folder` to declare a whole folder)"
+                                .into(),
+                        ));
+                    }
+                    if a.file.trim().is_empty() {
+                        return Err(ModError::Invalid(format!(
+                            "asset {:?} has no `file`",
+                            a.name
+                        )));
+                    }
+                }
+            }
+            if a.name.contains('\0') || a.dir.contains('\0') {
+                return Err(ModError::Invalid(
+                    "asset name/dir must not contain NUL".into(),
+                ));
+            }
+            // only the single-file form has a name yet; folder-derived names
+            // are de-duplicated by the post-expansion validate()
+            if !a.name.trim().is_empty() && !asset_names.insert(a.name.clone()) {
+                return Err(ModError::Invalid(format!(
+                    "two [[asset]] sections for name {:?} — a name is one row",
+                    a.name
+                )));
+            }
+            // host: "auto" (resolved at load time from the embedded dir index)
+            // or a family-A opaque stream the loader can append to
+            // (vp/tp/mcp/ep/cp) — never i.dat itself (that is the index)
+            if !a.host.eq_ignore_ascii_case(HOST_AUTO) {
+                let host_slug = !a.host.is_empty()
+                    && a.host
+                        .chars()
+                        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
+                if !host_slug
+                    || !matches!(
+                        a9_formats::pack::classify(&a.host),
+                        Some((a9_formats::pack::Family::A, a9_formats::pack::Container::Opaque))
+                    )
+                {
+                    return Err(ModError::Invalid(format!(
+                        "asset {:?}: host {:?} must be \"auto\" or a family-A pack the loader \
+                         can append to (vp/tp/mcp/ep/cp)",
+                        if a.name.is_empty() {
+                            a.folder.as_deref().unwrap_or("")
+                        } else {
+                            &a.name
+                        },
+                        a.host
+                    )));
+                }
+            }
+        }
         Ok(())
     }
+}
+
+/// A mod-relative path (folder form): not absolute, no drive, no `..`.
+fn validate_mod_rel_path(p: &str, what: &str) -> Result<(), ModError> {
+    if p.starts_with('/') || p.starts_with('\\') || p.contains(':') {
+        return Err(ModError::Invalid(format!(
+            "{what} {p:?} must be a relative path inside the mod dir"
+        )));
+    }
+    if p.split(['/', '\\']).any(|c| c == "..") {
+        return Err(ModError::Invalid(format!(
+            "{what} {p:?} must not contain '..'"
+        )));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -435,6 +624,31 @@ expect = "bb 00 00 00"
     }
 
     #[test]
+    fn train_list_modes_allow_add_deny() {
+        // `add` (M5 W3): offer the listed forms on top of the shipped whitelist
+        let m = parse(
+            "\nid=\"x\"\nname=\"X\"\nversion=\"1.0.0\"\nauthor=\"a\"\n\
+             [[hook]]\ntarget=\"train_list_filter\"\nhandler=\"train_list\"\nmode=\"add\"\nlist=\"add.txt\"\n",
+        )
+        .unwrap();
+        m.validate().unwrap();
+        assert_eq!(m.hook[0].mode, Some(ListMode::Add));
+        // an unknown mode is refused by the enum, like any typo
+        assert!(parse(
+            "\nid=\"x\"\nname=\"X\"\nversion=\"1.0.0\"\nauthor=\"a\"\n\
+             [[hook]]\ntarget=\"train_list_filter\"\nhandler=\"train_list\"\nmode=\"append\"\nlist=\"a.txt\"\n"
+        )
+        .is_err());
+        // `add` still requires a list
+        let m = parse(
+            "\nid=\"x\"\nname=\"X\"\nversion=\"1.0.0\"\nauthor=\"a\"\n\
+             [[hook]]\ntarget=\"train_list_filter\"\nhandler=\"train_list\"\nmode=\"add\"\n",
+        )
+        .unwrap();
+        assert!(m.validate().unwrap_err().to_string().contains("requires `list`"));
+    }
+
+    #[test]
     fn unknown_fields_refuse_the_mod() {
         let bad = GOOD.to_owned() + "\n[[effect]]\nkind = \"x\"\n";
         let err = parse(&bad).unwrap_err().to_string();
@@ -482,6 +696,17 @@ expect = "bb 00 00 00"
         let m = parse("\nid=\"x\"\nname=\"X\"\nversion=\"1.0.0\"\nauthor=\"a\"\n[[csv]]\nname=\"t.csv\"\nfile=\"f\"\n[[csv]]\nname=\"t.csv\"\nfile=\"g\"\n").unwrap();
         let e = m.validate().unwrap_err().to_string();
         assert!(e.contains("two [[csv]]"), "{e}");
+        // csv mode: `rows` parses + validates; `mode` defaults to replace
+        let m = parse("\nid=\"x\"\nname=\"X\"\nversion=\"1.0.0\"\nauthor=\"a\"\n[[csv]]\nname=\"t.csv\"\nfile=\"f\"\nmode=\"rows\"\n").unwrap();
+        m.validate().unwrap();
+        assert_eq!(m.csv[0].mode, CsvMode::Rows);
+        assert!(m.csv[0].row_keys.is_empty());
+        let d = parse("\nid=\"x\"\nname=\"X\"\nversion=\"1.0.0\"\nauthor=\"a\"\n[[csv]]\nname=\"t.csv\"\nfile=\"f\"\n").unwrap();
+        assert_eq!(d.csv[0].mode, CsvMode::Replace);
+        // an unknown mode is a hard refusal (deny_unknown_fields + enum)
+        assert!(parse("\nid=\"x\"\nname=\"X\"\nversion=\"1.0.0\"\nauthor=\"a\"\n[[csv]]\nname=\"t.csv\"\nfile=\"f\"\nmode=\"cells\"\n").is_err());
+        // `row_keys` is derived state — authoring it is refused (skipped field)
+        assert!(parse("\nid=\"x\"\nname=\"X\"\nversion=\"1.0.0\"\nauthor=\"a\"\n[[csv]]\nname=\"t.csv\"\nfile=\"f\"\nrow_keys=[\"R1\"]\n").is_err());
         // file dest escaping the game dir (TOML needs \\ for a literal backslash)
         for dest in ["/abs/x.dds", "C:\\\\x.dds", "data/../../x.dds"] {
             let m = parse(&format!("\nid=\"x\"\nname=\"X\"\nversion=\"1.0.0\"\nauthor=\"a\"\n[[file]]\ndest=\"{dest}\"\nfile=\"f\"\n")).unwrap();
@@ -490,6 +715,126 @@ expect = "bb 00 00 00"
         // duplicate file dests
         let m = parse("\nid=\"x\"\nname=\"X\"\nversion=\"1.0.0\"\nauthor=\"a\"\n[[file]]\ndest=\"data/x.dds\"\nfile=\"f\"\n[[file]]\ndest=\"data/x.dds\"\nfile=\"g\"\n").unwrap();
         assert!(m.validate().unwrap_err().to_string().contains("two [[file]]"));
+    }
+
+    #[test]
+    fn m5_asset_section_parses_and_validates() {
+        // a minimal valid new asset, hosted in vp
+        let m = parse(
+            "\nid=\"x\"\nname=\"X\"\nversion=\"1.0.0\"\nauthor=\"a\"\n\
+             [[asset]]\nname=\"_t_mynew_a.x\"\ndir=\"train\\\\mynew\"\nhost=\"vp\"\nfile=\"assets/_t_mynew_a.x\"\n",
+        )
+        .unwrap();
+        m.validate().unwrap();
+        assert_eq!(m.asset.len(), 1);
+        assert_eq!(m.asset[0].name, "_t_mynew_a.x");
+        assert_eq!(m.asset[0].dir, "train\\mynew");
+        assert_eq!(m.asset[0].host, "vp");
+        assert!(!m.asset[0].override_vanilla, "default is false");
+        // override_vanilla round-trips
+        let ov = parse(
+            "\nid=\"x\"\nname=\"X\"\nversion=\"1.0.0\"\nauthor=\"a\"\n\
+             [[asset]]\nname=\"_t_van_a.x\"\ndir=\"train\\\\van\"\nhost=\"tp\"\nfile=\"f\"\noverride_vanilla=true\n",
+        )
+        .unwrap();
+        ov.validate().unwrap();
+        assert!(ov.asset[0].override_vanilla);
+
+        // every family-A host classifies; a family-B/unknown host is refused
+        for host in ["tp", "mcp", "ep", "cp"] {
+            let m = parse(&format!(
+                "\nid=\"x\"\nname=\"X\"\nversion=\"1.0.0\"\nauthor=\"a\"\n\
+                 [[asset]]\nname=\"_t_a.x\"\ndir=\"d\"\nhost=\"{host}\"\nfile=\"f\"\n"
+            ))
+            .unwrap();
+            m.validate().unwrap();
+        }
+        for host in ["i.dat", "mtentr0", "me3", "csvp", "bogus", "VP"] {
+            let m = parse(&format!(
+                "\nid=\"x\"\nname=\"X\"\nversion=\"1.0.0\"\nauthor=\"a\"\n\
+                 [[asset]]\nname=\"_t_a.x\"\ndir=\"d\"\nhost=\"{host}\"\nfile=\"f\"\n"
+            ))
+            .unwrap();
+            let e = m.validate().unwrap_err().to_string();
+            assert!(e.contains("family-A pack"), "host {host}: {e}");
+        }
+        // duplicate asset names in one mod
+        let m = parse(
+            "\nid=\"x\"\nname=\"X\"\nversion=\"1.0.0\"\nauthor=\"a\"\n\
+             [[asset]]\nname=\"_t_a.x\"\ndir=\"d\"\nhost=\"vp\"\nfile=\"f\"\n\
+             [[asset]]\nname=\"_t_a.x\"\ndir=\"d\"\nhost=\"vp\"\nfile=\"g\"\n",
+        )
+        .unwrap();
+        let e = m.validate().unwrap_err().to_string();
+        assert!(e.contains("two [[asset]]"), "{e}");
+        // empty name / empty file
+        let m = parse("\nid=\"x\"\nname=\"X\"\nversion=\"1.0.0\"\nauthor=\"a\"\n[[asset]]\nname=\" \"\ndir=\"d\"\nhost=\"vp\"\nfile=\"f\"\n").unwrap();
+        assert!(m.validate().unwrap_err().to_string().contains("nonempty plain name"));
+        let m = parse("\nid=\"x\"\nname=\"X\"\nversion=\"1.0.0\"\nauthor=\"a\"\n[[asset]]\nname=\"a.x\"\ndir=\"d\"\nhost=\"vp\"\nfile=\" \"\n").unwrap();
+        assert!(m.validate().unwrap_err().to_string().contains("no `file`"));
+        // unknown field inside the section is refused (strict schema)
+        assert!(parse(
+            "\nid=\"x\"\nname=\"X\"\nversion=\"1.0.0\"\nauthor=\"a\"\n\
+             [[asset]]\nname=\"a.x\"\ndir=\"d\"\nhost=\"vp\"\nfile=\"f\"\nwidth=1\n"
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn m5b_asset_folder_form_parses_and_validates() {
+        // folder form: name/file absent, dir optional, host defaults to auto
+        let m = parse(
+            "\nid=\"x\"\nname=\"X\"\nversion=\"1.0.0\"\nauthor=\"a\"\n\
+             [[asset]]\nfolder=\"assets\"\n",
+        )
+        .unwrap();
+        m.validate().unwrap();
+        assert_eq!(m.asset[0].folder.as_deref(), Some("assets"));
+        assert_eq!(m.asset[0].host, HOST_AUTO, "folder form defaults host to auto");
+        assert!(m.asset[0].name.is_empty() && m.asset[0].file.is_empty());
+
+        // host = "auto" is allowed explicitly in the single-file form too,
+        // and is the default when `host` is omitted
+        let m = parse(
+            "\nid=\"x\"\nname=\"X\"\nversion=\"1.0.0\"\nauthor=\"a\"\n\
+             [[asset]]\nname=\"_t_a.x\"\ndir=\"train\\\\a\"\nhost=\"auto\"\nfile=\"f\"\n\
+             [[asset]]\nname=\"_t_b.x\"\ndir=\"train\\\\b\"\nfile=\"f\"\n",
+        )
+        .unwrap();
+        m.validate().unwrap();
+        assert_eq!(m.asset[0].host, HOST_AUTO);
+        assert_eq!(m.asset[1].host, HOST_AUTO, "omitted host defaults to auto");
+
+        // exactly one form: name/file with folder is refused; neither is refused
+        let both = parse(
+            "\nid=\"x\"\nname=\"X\"\nversion=\"1.0.0\"\nauthor=\"a\"\n\
+             [[asset]]\nfolder=\"assets\"\nname=\"_t_a.x\"\nfile=\"f\"\n",
+        )
+        .unwrap();
+        assert!(both.validate().unwrap_err().to_string().contains("not allowed together"));
+        let neither = parse(
+            "\nid=\"x\"\nname=\"X\"\nversion=\"1.0.0\"\nauthor=\"a\"\n[[asset]]\ndir=\"d\"\n",
+        )
+        .unwrap();
+        assert!(neither.validate().unwrap_err().to_string().contains("nonempty plain name"));
+        // folder paths escaping the mod dir are refused
+        for folder in ["/abs", "..\\\\x", "C:\\\\x"] {
+            let m = parse(&format!(
+                "\nid=\"x\"\nname=\"X\"\nversion=\"1.0.0\"\nauthor=\"a\"\n[[asset]]\nfolder=\"{folder}\"\n"
+            ))
+            .unwrap();
+            assert!(m.validate().is_err(), "folder {folder} must be refused");
+        }
+        // the removed empty-name message stays: a bare name is required in the
+        // single-file form (folder mode is the way to avoid naming rows)
+        let m = parse("\nid=\"x\"\nname=\"X\"\nversion=\"1.0.0\"\nauthor=\"a\"\n[[asset]]\nname=\" \"\nhost=\"vp\"\nfile=\"f\"\n").unwrap();
+        assert!(m.validate().unwrap_err().to_string().contains("nonempty plain name"));
+        // unknown field stays refused
+        assert!(parse(
+            "\nid=\"x\"\nname=\"X\"\nversion=\"1.0.0\"\nauthor=\"a\"\n\
+             [[asset]]\nfolder=\"assets\"\nrecurse=false\n"
+        )
+        .is_err());
     }
 
     #[test]

@@ -24,8 +24,11 @@
 //! * `sdp` — shader bytecode compiled to COM shaders at load.
 //! * `mcp`/`ep`/`cp` — models (`.x`/`.att`) parsed/built in-window.
 //! * `vp` — the train/road/auto/rail pipelines, reading the **pre-resident
-//!   csvp reservoir**; there is no per-entry vp target, so nothing is labelled
-//!   `early:vp` (table data is `pre-shader/pre-csv`).
+//!   csvp reservoir**; there is no per-entry vp target among the shipped
+//!   packs, so nothing *shipped* is labelled `early:vp` (table data is
+//!   `pre-shader/pre-csv`). A **merge-hosted `[[asset]]`** in `vp` (M5 W1) IS
+//!   consumed in the vp window — its payload is appended to the merged vp
+//!   image and its i.dat row is read here — so it is labelled `early:vp`.
 //!
 //! **Late-override-viable**: ONLY the family-B image packs `me0-3`/`mtentr0`/
 //! `mtcutp0`. Their entries go through `texture_manager_insert_raw` into the
@@ -175,6 +178,10 @@ pub enum Early {
     Famb,
     /// `pack_loader_mcp/ep/cp` (models/meshes/prop-dir sets).
     Models,
+    /// `pack_loader_vp` — the train/road/auto/rail pipelines, reading the
+    /// pre-resident csvp reservoir and the models the merged `vp` hosts
+    /// (a `[[asset]]` payload hosted in `vp` is created here).
+    Vp,
 }
 
 impl Early {
@@ -184,6 +191,7 @@ impl Early {
             Early::Sdp => "sdp",
             Early::Famb => "me/mt",
             Early::Models => "mcp/ep/cp",
+            Early::Vp => "vp",
         }
     }
 }
@@ -273,7 +281,7 @@ impl Summary {
             }
         }
         // boot order (this also exercises every Early variant)
-        const ORDER: [Early; 4] = [Early::Tp, Early::Sdp, Early::Famb, Early::Models];
+        const ORDER: [Early; 5] = [Early::Tp, Early::Sdp, Early::Famb, Early::Models, Early::Vp];
         s.windows
             .sort_by_key(|w| ORDER.iter().position(|e| e.window() == *w).unwrap_or(usize::MAX));
         s
@@ -450,6 +458,49 @@ pub fn classify_manifest(m: &Manifest) -> Vec<Row> {
             reason: v.reason,
         });
     }
+    for a in &m.asset {
+        // the windows the family-A host packs are loaded in (boot order:
+        // tp -> ... -> mcp/ep/cp -> vp); a merge-hosted payload is resident
+        // only while that pack is the current one.
+        // `host = "auto"` is resolved at load time from the per-build dir
+        // index — the window depends on the resolved pack, so classify labels
+        // it as the family-A bucket and says so.
+        if a.host.eq_ignore_ascii_case(a9_mod::manifest::HOST_AUTO) {
+            rows.push(Row {
+                mod_id: m.id.clone(),
+                mechanism: "asset:auto".into(),
+                target: a.name.clone(),
+                class: Class::Early(Early::Models),
+                reason: "[[asset]] host = \"auto\": the host pack is resolved at load time \
+                         from the embedded per-build dir index (dir -> pack); the residency \
+                         window is that of the resolved family-A pack — check `a9ml list` for \
+                         the concrete host"
+                    .into(),
+            });
+            continue;
+        }
+        let (early, hostname) = match pack::classify_key(&a.host).as_str() {
+            "tp" => (Early::Tp, "tp"),
+            "vp" => (Early::Vp, "vp"),
+            _ => (Early::Models, "mcp/ep/cp"),
+        };
+        rows.push(Row {
+            mod_id: m.id.clone(),
+            mechanism: format!("asset:{}", a.host),
+            target: a.name.clone(),
+            class: Class::Early(early),
+            reason: format!(
+                "[[asset]] merge-served: appended to the {hostname} pack's decoded stream \
+                 + an i.dat row (off from the shared layout) — window-time only (the payload \
+                 is resident only while {hostname} is the current pack){}",
+                if a.override_vanilla {
+                    "; replaces a shipped i.dat row (override_vanilla)"
+                } else {
+                    ""
+                }
+            ),
+        });
+    }
     for f in &m.file {
         // the destination's basename, classified without pack context
         let base = f.dest.rsplit(['/', '\\']).next().unwrap_or(&f.dest);
@@ -503,7 +554,7 @@ pub fn run(path: Option<&Path>, entry: Option<&str>, pack: Option<&str>) -> Resu
         }
         println!("   summary: {}", s.compact());
         if rows.is_empty() {
-            println!("   verdict: no [[pack]]/[[csv]]/[[file]] data effects");
+            println!("   verdict: no [[pack]]/[[csv]]/[[asset]]/[[file]] data effects");
         } else if s.all_known() {
             println!(
                 "   verdict: all {} target(s) have known consumption points — see the classes",
@@ -535,7 +586,9 @@ fn load_mods(path: &Path) -> Result<Vec<(String, Manifest)>> {
     if path.join("mod.toml").is_file() {
         let text = fs::read_to_string(path.join("mod.toml"))
             .with_context(|| format!("reading {}", path.join("mod.toml").display()))?;
-        let m: Manifest = toml::from_str(&text).context("parsing mod.toml")?;
+        let mut m: Manifest = toml::from_str(&text).context("parsing mod.toml")?;
+        m.validate().map_err(|e| anyhow::anyhow!("{e}"))?;
+        a9_mod::scan::expand_asset_folders(&mut m, path).map_err(|e| anyhow::anyhow!("{e}"))?;
         m.validate().map_err(|e| anyhow::anyhow!("{e}"))?;
         return Ok(vec![(path.display().to_string(), m)]);
     }
@@ -696,18 +749,19 @@ mod tests {
             Row { mod_id: "m".into(), mechanism: "pack:tp".into(), target: "env_map.dds".into(), class: Class::Early(Early::Tp), reason: String::new() },
             Row { mod_id: "m".into(), mechanism: "pack:mcp".into(), target: "clock_long.x".into(), class: Class::Early(Early::Models), reason: String::new() },
             Row { mod_id: "m".into(), mechanism: "pack:sdp".into(), target: "c.vs".into(), class: Class::Early(Early::Sdp), reason: String::new() },
+            Row { mod_id: "m".into(), mechanism: "asset:vp".into(), target: "_t_new_a.x".into(), class: Class::Early(Early::Vp), reason: String::new() },
             Row { mod_id: "m".into(), mechanism: "csvp".into(), target: "t.csv".into(), class: Class::Pre, reason: String::new() },
             Row { mod_id: "m".into(), mechanism: "file".into(), target: "data/x.bin".into(), class: Class::Unknown, reason: String::new() },
         ];
         let s = Summary::of(&rows);
-        assert_eq!(s.early, 4);
+        assert_eq!(s.early, 5);
         assert_eq!(s.pre, 1);
         assert_eq!(s.unknown, 1);
         // boot order, deduped
-        assert_eq!(s.windows, vec!["tp", "sdp", "me/mt", "mcp/ep/cp"]);
+        assert_eq!(s.windows, vec!["tp", "sdp", "me/mt", "mcp/ep/cp", "vp"]);
         assert_eq!(
             s.compact(),
-            "early: 4 (windows: tp,sdp,me/mt,mcp/ep/cp), pre: 1, unknown: 1"
+            "early: 5 (windows: tp,sdp,me/mt,mcp/ep/cp,vp), pre: 1, unknown: 1"
         );
         assert!(!s.all_known());
     }
@@ -733,5 +787,55 @@ mod tests {
         assert_eq!(rows[2].class, Class::Pre);
         assert_eq!(rows[2].mechanism, "csvp");
         assert!(rows.iter().all(|r| r.mod_id == "demo"));
+    }
+
+    #[test]
+    fn asset_rows_are_window_time_by_host() {
+        let m: Manifest = toml::from_str(
+            "id=\"na\"\nname=\"N\"\nversion=\"1.0.0\"\nauthor=\"t\"\n\
+             [[asset]]\nname=\"_t_new_a.x\"\ndir=\"train\\\\new\"\nhost=\"vp\"\nfile=\"a.x\"\n\
+             [[asset]]\nname=\"_t_p_a.x\"\ndir=\"train\\\\p\"\nhost=\"tp\"\nfile=\"b.x\"\n\
+             [[asset]]\nname=\"_t_m_a.x\"\ndir=\"train\\\\m\"\nhost=\"mcp\"\nfile=\"c.x\"\n",
+        )
+        .unwrap();
+        m.validate().unwrap();
+        let rows = classify_manifest(&m);
+        assert_eq!(rows.len(), 3);
+        let by = |t: &str| rows.iter().find(|r| r.target == t).unwrap();
+        assert_eq!(by("_t_new_a.x").class, Class::Early(Early::Vp));
+        assert_eq!(by("_t_new_a.x").mechanism, "asset:vp");
+        assert!(by("_t_new_a.x").reason.contains("merge-served"), "{}", by("_t_new_a.x").reason);
+        assert!(by("_t_new_a.x").reason.contains("window-time only"), "{}", by("_t_new_a.x").reason);
+        assert_eq!(by("_t_p_a.x").class, Class::Early(Early::Tp));
+        assert_eq!(by("_t_m_a.x").class, Class::Early(Early::Models));
+        // windows in boot order: tp, then mcp/ep/cp, then vp
+        let s = Summary::of(&rows);
+        assert_eq!(s.windows, vec!["tp", "mcp/ep/cp", "vp"]);
+        // the override_vanilla note is carried in the reason
+        let ov: Manifest = toml::from_str(
+            "id=\"na\"\nname=\"N\"\nversion=\"1.0.0\"\nauthor=\"t\"\n\
+             [[asset]]\nname=\"_t_van_a.x\"\ndir=\"train\\\\v\"\nhost=\"vp\"\nfile=\"a.x\"\noverride_vanilla=true\n",
+        )
+        .unwrap();
+        ov.validate().unwrap();
+        let r = classify_manifest(&ov);
+        assert!(r[0].reason.contains("override_vanilla"), "{}", r[0].reason);
+    }
+
+    #[test]
+    fn auto_host_asset_is_labelled_asset_auto() {
+        let m: Manifest = toml::from_str(
+            "id=\"auto\"\nname=\"A\"\nversion=\"1.0.0\"\nauthor=\"t\"\n\
+             [[asset]]\nfolder=\"assets\"\n",
+        )
+        .unwrap();
+        m.validate().unwrap();
+        // (folder expansion is the scan's job; classify sees the raw section,
+        // so a folder-form row has an empty name — that is fine here)
+        let rows = classify_manifest(&m);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].mechanism, "asset:auto");
+        assert_eq!(rows[0].class, Class::Early(Early::Models));
+        assert!(rows[0].reason.contains("resolved at load time"), "{}", rows[0].reason);
     }
 }

@@ -12,8 +12,10 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+mod asset;
 mod classify;
 mod gen_builds;
+mod gen_dirindex;
 
 #[derive(Parser)]
 #[command(name = "a9ml", about = "A-Train 9 mod loader — authoring & diagnostics CLI", version)]
@@ -108,6 +110,8 @@ enum Cmd {
     },
     /// Generate a [[csv]] mod from a base csvp and a repacked one: every
     /// added or changed table becomes a mod.toml [[csv]] + a CSV payload.
+    /// With `--rows`, changed tables ship only their changed/added rows as a
+    /// `mode = "rows"` patch instead of the whole table.
     DiffCsv {
         /// The original (vanilla) csvp.bin
         #[arg(long)]
@@ -126,6 +130,10 @@ enum Cmd {
         author: String,
         #[arg(long = "game-build", value_name = "ID")]
         game_builds: Vec<String>,
+        /// Emit row-level row patches (`mode = "rows"`) for changed tables
+        /// instead of whole-table replaces
+        #[arg(long)]
+        rows: bool,
     },
     /// Regenerate the build address book's core anchors from a live exe
     /// (provenance-stamped; hand-appended RE anchors stay in the file).
@@ -140,16 +148,111 @@ enum Cmd {
         #[arg(long)]
         check: bool,
     },
+    /// Regenerate the per-build `dir -> pack` index (the `host = "auto"`
+    /// resolution table) from a live install's i.dat + packs: every shipped
+    /// row is verified against every decoded pack buffer and aggregated per
+    /// `dir`. Reports ambiguous dirs; `--check` verifies an existing table.
+    GenDirindex {
+        /// Game data dir holding i.dat and the packs
+        #[arg(long = "data-dir", value_name = "DIR")]
+        data_dir: PathBuf,
+        /// Output path (prints to stdout when omitted)
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Verify that --out matches this data dir (update-day check)
+        #[arg(long)]
+        check: bool,
+        /// The game exe (else an ATrain9*.exe next to the data dir is used)
+        #[arg(long, value_name = "EXE")]
+        exe: Option<PathBuf>,
+    },
     /// Build a pack file from raw payloads (fixtures/authoring): a family-B
-    /// container (images or csvs) + the pack encryption, byte-verified.
+    /// container (images or csvs), a family-A opaque stream (`a`), or a
+    /// family-A `i.dat` index (`idat`) + the pack encryption, byte-verified.
     Mkpack {
-        /// Container kind: images (0x200 entries: name=w:h:file) or csvs
-        /// (0x204 entries: name=file)
+        /// Container kind: images (0x200 entries: name=w:h:file), csvs
+        /// (0x204 entries: name=file), a (family-A: FILE ... concatenated),
+        /// or idat (family-A index: name=dir:len:off ...)
         #[arg(long)]
         container: String,
-        /// images: NAME=WIDTH:HEIGHT:FILE ...; csvs: NAME=FILE ...
+        /// images: NAME=WIDTH:HEIGHT:FILE ...; csvs: NAME=FILE ...;
+        /// a: FILE ...; idat: NAME=DIR:LEN:OFF ...
         entries: Vec<String>,
         /// Output pack file
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// Extract one table out of the game's `data/csvp.bin` for authoring
+    /// (byte-exact UTF-16 payload by default; `--utf8` for an editable/text
+    /// view of the same rows, `--list` to just name the tables).
+    ExtractCsv {
+        /// Game dir (the dir holding data/csvp.bin)
+        #[arg(long)]
+        game: PathBuf,
+        /// Table name inside csvp (e.g. "train_form.csv"); required unless --list
+        #[arg(long)]
+        table: Option<String>,
+        /// Output file (written verbatim) — omit to write to stdout
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// List the tables in the container and exit
+        #[arg(long)]
+        list: bool,
+        /// Convert the table to UTF-8 text (readable/editable; the game's
+        /// tables are UTF-16LE — a `mode = "rows"` row patch may be either)
+        #[arg(long)]
+        utf8: bool,
+    },
+    /// Apply `mode = "rows"` row-patch files to a shipped csvp table offline
+    /// and report the merge (the authoring dry-run; nothing is installed).
+    PatchCsv {
+        /// Game dir (the dir holding data/csvp.bin)
+        #[arg(long)]
+        game: PathBuf,
+        /// Table name inside csvp (e.g. "train_comment.csv")
+        #[arg(long)]
+        table: String,
+        /// Row-patch file(s), applied in order (UTF-16LE or UTF-8)
+        #[arg(long = "patch", value_name = "FILE")]
+        patches: Vec<PathBuf>,
+        /// Write the merged table here (UTF-16 payload, or a UTF-8 view)
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Write a UTF-8 view instead of the raw UTF-16 table bytes
+        #[arg(long)]
+        utf8: bool,
+    },
+    /// Extract one shipped i.dat row's raw payload bytes from the pack that
+    /// hosts it (e.g. "previewtexture.dir", "form_kh32_f.dds", a mesh) — the
+    /// authoring "take a shipped asset apart" command. The host pack is
+    /// resolved from the embedded dir index, or by a content scan of the
+    /// family-A packs; `--pack` forces it.
+    ExtractAsset {
+        /// Game dir (holding data/i.dat and the packs), or the data dir itself
+        #[arg(long)]
+        game: PathBuf,
+        /// The i.dat row name (bare, e.g. "previewtexture.dir")
+        #[arg(long)]
+        name: String,
+        /// Output file (written verbatim) — omit to write to stdout
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Force the host pack (skip resolution), e.g. "tp"
+        #[arg(long)]
+        pack: Option<String>,
+    },
+    /// Build the offline `[[asset]]` merge for one mod: append each payload to
+    /// its host pack's decoded stream and synthesize the merged `i.dat`, using
+    /// the exact `a9-formats` primitives the loader runs (the authoring proof
+    /// that the merged artifacts are correct; nothing is installed).
+    MergeAssets {
+        /// Game dir (holding data/i.dat and the packs), or the data dir itself
+        #[arg(long)]
+        game: PathBuf,
+        /// The mod dir (holding mod.toml)
+        #[arg(long)]
+        mod_dir: PathBuf,
+        /// Output dir (created): the merged `<host>.bin` pack(s) + `i.dat`
         #[arg(long)]
         out: PathBuf,
     },
@@ -185,13 +288,41 @@ fn main() {
             name,
             author,
             game_builds,
-        } => diff_csv(base, modded, out, id, name, author, game_builds),
+            rows,
+        } => diff_csv(base, modded, out, id, name, author, game_builds, *rows),
         Cmd::GenBuilds { exe, out, check } => gen_builds::run(exe, out.as_deref(), *check),
+        Cmd::GenDirindex {
+            data_dir,
+            out,
+            check,
+            exe,
+        } => gen_dirindex::run(data_dir, exe.as_deref(), out.as_deref(), *check),
         Cmd::Mkpack {
             container,
             entries,
             out,
         } => mkpack(container, entries, out),
+        Cmd::ExtractCsv {
+            game,
+            table,
+            out,
+            list,
+            utf8,
+        } => extract_csv(game, table.as_deref(), out.as_deref(), *list, *utf8),
+        Cmd::PatchCsv {
+            game,
+            table,
+            patches,
+            out,
+            utf8,
+        } => patch_csv(game, table, patches, out.as_deref(), *utf8),
+        Cmd::ExtractAsset {
+            game,
+            name,
+            out,
+            pack,
+        } => asset::run(game, name, out.as_deref(), pack.as_deref()),
+        Cmd::MergeAssets { game, mod_dir, out } => asset::run_merge(game, mod_dir, out),
     };
     if let Err(e) = result {
         eprintln!("a9ml: {e:#}");
@@ -564,10 +695,14 @@ fn offline_resolution(game: &Path) -> Result<Offline> {
         .and_then(|b| amod::buildid::from_exe_bytes(&b));
     let scanned = amod::scan::scan(&game.join(&cfg.mods_dir));
     let mut manifests = Vec::new();
+    let mut dirs = Vec::new();
     let mut errors: Vec<(PathBuf, String)> = Vec::new();
     for s in &scanned {
         match &s.manifest {
-            Ok(m) => manifests.push(m.clone()),
+            Ok(m) => {
+                manifests.push(m.clone());
+                dirs.push(s.dir.clone());
+            }
             Err(e) => errors.push((s.dir.clone(), e.to_string())),
         }
     }
@@ -582,6 +717,7 @@ fn offline_resolution(game: &Path) -> Result<Offline> {
         build,
         scanned,
         manifests,
+        dirs,
         errors,
         resolution,
     };
@@ -594,8 +730,20 @@ struct Offline {
     build: Option<amod::buildid::BuildId>,
     scanned: Vec<amod::scan::ScannedMod>,
     manifests: Vec<amod::manifest::Manifest>,
+    /// mod dirs, index-aligned with `manifests` (for offline payload checks)
+    dirs: Vec<PathBuf>,
     errors: Vec<(PathBuf, String)>,
     resolution: Option<amod::resolve::Resolution>,
+}
+
+/// Best-effort read of the shipped `data/i.dat` row names for the offline
+/// `[[asset]]` collision report. `None` = not readable/parseable (the report
+/// then says so; the loader's merge-time check stays authoritative).
+fn vanilla_asset_names(game: &Path) -> Option<std::collections::BTreeSet<String>> {
+    let file = fs::read(game.join("data/i.dat")).ok()?;
+    let decoded = fmt::pack::decode_pack(&file, Family::A).ok()?;
+    let idat = fmt::idat::parse(&decoded).ok()?;
+    Some(idat.entries.iter().map(|e| e.name.clone()).collect())
 }
 
 fn print_common(o: &Offline, game: &Path, verbose: bool) {
@@ -685,6 +833,7 @@ fn print_common(o: &Offline, game: &Path, verbose: bool) {
             println!("  overlap on {}: {} (earlier mod keeps it)", o2.key, owners.join(" vs "));
         }
         let build_id = o.build.as_ref().map(|b| b.id.as_str());
+        let vanilla_assets = vanilla_asset_names(game);
         for &i in &res.order {
             let m = &o.manifests[i];
             let gated = build_id.map(|bid| {
@@ -707,12 +856,140 @@ fn print_common(o: &Offline, game: &Path, verbose: bool) {
             // the `order:`/`packs:` lines above stay byte-compatible)
             let classify_rows = classify::classify_manifest(m);
             if classify_rows.is_empty() {
-                println!("    classify: (no [[pack]]/[[csv]]/[[file]] data effects)");
+                println!("    classify: (no [[pack]]/[[csv]]/[[asset]]/[[file]] data effects)");
             } else {
                 println!(
                     "    classify: {}",
                     classify::Summary::of(&classify_rows).compact()
                 );
+            }
+            // csvp data-effect count — row patches distinctly (M5 W2)
+            if !m.csv.is_empty() {
+                let n = m.csv.len();
+                let rows: usize = m
+                    .csv
+                    .iter()
+                    .filter(|c| c.mode == CsvMode::Rows)
+                    .map(|c| c.row_keys.len())
+                    .sum();
+                let replaces = m.csv.iter().filter(|c| c.mode == CsvMode::Replace).count();
+                print!("    csv: {n} csv table{}", if n == 1 { "" } else { "s" });
+                let mut parts: Vec<String> = Vec::new();
+                if rows > 0 {
+                    parts.push(format!(
+                        "{rows} row patch{}",
+                        if rows == 1 { "" } else { "es" }
+                    ));
+                }
+                if replaces > 0 {
+                    parts.push(format!(
+                        "{replaces} whole-table replace{}",
+                        if replaces == 1 { "" } else { "s" }
+                    ));
+                }
+                if parts.is_empty() {
+                    println!();
+                } else {
+                    println!(" ({})", parts.join(", "));
+                }
+            }
+            // [[asset]] roll-up (M5 W1 / W1b) — new rows vs overrides of
+            // shipped ones, and the `host = "auto"` resolution
+            let mut auto_hosts: std::collections::BTreeMap<
+                String,
+                Result<String, String>,
+            > = std::collections::BTreeMap::new();
+            if !m.asset.is_empty() {
+                let n = m.asset.len();
+                // resolve every `host = "auto"` row against the embedded dir
+                // index for the running build (the same call the loader makes)
+                let autos: Vec<&amod::manifest::AssetSection> = m
+                    .asset
+                    .iter()
+                    .filter(|a| a.host.eq_ignore_ascii_case(amod::manifest::HOST_AUTO))
+                    .collect();
+                if !autos.is_empty() {
+                    let dirindex = amod::dirindex::embedded_index().ok();
+                    for a in &autos {
+                        let r = match (o.build.as_ref(), &dirindex) {
+                            (Some(b), Some(idx)) => {
+                                amod::dirindex::resolve_auto(idx, &b.id, &a.name, &a.dir)
+                            }
+                            (None, _) => Err(
+                                "unknown build (no exe identity) — cannot resolve host = \"auto\""
+                                    .to_string(),
+                            ),
+                            (_, None) => {
+                                Err("the embedded dir index failed to parse".to_string())
+                            }
+                        };
+                        auto_hosts.insert(a.name.clone(), r);
+                    }
+                    let ok = auto_hosts.values().filter(|r| r.is_ok()).count();
+                    let refused = auto_hosts.len() - ok;
+                    let mut hosts: Vec<String> = auto_hosts
+                        .values()
+                        .filter_map(|r| r.as_ref().ok().cloned())
+                        .collect();
+                    hosts.sort();
+                    hosts.dedup();
+                    println!(
+                        "    host auto: {ok} resolved{}; {refused} refused",
+                        if hosts.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" ({})", hosts.join(", "))
+                        }
+                    );
+                    for (name, r) in &auto_hosts {
+                        if let Err(e) = r {
+                            println!("      refusal: {name}: {e}");
+                        }
+                    }
+                }
+                match &vanilla_assets {
+                    Some(names) => {
+                        let over = m.asset.iter().filter(|a| names.contains(&a.name)).count();
+                        println!(
+                            "    assets: {n} ({} new, {over} vanilla override{})",
+                            n - over,
+                            if over == 1 { "" } else { "s" }
+                        );
+                        let need: Vec<&str> = m
+                            .asset
+                            .iter()
+                            .filter(|a| names.contains(&a.name) && !a.override_vanilla)
+                            .map(|a| a.name.as_str())
+                            .collect();
+                        if !need.is_empty() {
+                            println!(
+                                "      warning: {} asset name(s) collide with the shipped i.dat \
+                                 and need `override_vanilla = true`: {}",
+                                need.len(),
+                                need.join(", ")
+                            );
+                        }
+                    }
+                    None => println!(
+                        "    assets: {n} (vanilla data/i.dat not readable — collisions unchecked \
+                         offline; the loader refuses them at merge time)"
+                    ),
+                }
+                // the payload must exist in the mod dir (offline check; the
+                // loader also fails loudly at merge time)
+                let missing: Vec<&str> = m
+                    .asset
+                    .iter()
+                    .filter(|a| o.dirs.get(i).is_some_and(|d| !d.join(&a.file).is_file()))
+                    .map(|a| a.file.as_str())
+                    .collect();
+                if !missing.is_empty() {
+                    println!(
+                        "      warning: {} asset payload file(s) missing in the mod dir: {}",
+                        missing.len(),
+                        missing.join(", ")
+                    );
+                }
             }
             if verbose {
                 for p in &m.patch {
@@ -727,10 +1004,32 @@ fn print_common(o: &Offline, game: &Path, verbose: bool) {
                     }
                 }
                 for c in &m.csv {
-                    println!("    [[csv]] {} ({})", c.name, c.file);
+                    println!(
+                        "    [[csv]] {} ({}, {})",
+                        c.name,
+                        c.file,
+                        match c.mode {
+                            CsvMode::Replace => "replace",
+                            CsvMode::Rows => "rows",
+                        }
+                    );
                 }
                 for f in &m.file {
                     println!("    [[file]] {} <- {}", f.dest, f.file);
+                }
+                for a in &m.asset {
+                    let host = match auto_hosts.get(&a.name) {
+                        Some(Ok(h)) => format!("{h} [auto]"),
+                        Some(Err(_)) => "auto [REFUSED]".to_string(),
+                        None => a.host.clone(),
+                    };
+                    println!(
+                        "    [[asset]] {} (host {host}, dir {}, file {}{})",
+                        a.name,
+                        a.dir,
+                        a.file,
+                        if a.override_vanilla { ", override_vanilla" } else { "" }
+                    );
                 }
                 for r in &classify_rows {
                     println!("      {}", r.line());
@@ -787,8 +1086,9 @@ fn doctor(game: &Path) -> Result<()> {
 // ------------------------------------------------------ diff / mkpack
 
 use a9_formats::container::{parse_csvs, parse_images, CsvEntry, ImageEntry};
+use a9_formats::csv;
 use a9_formats::pack::{self, Family};
-use a9_mod::manifest::{CsvSection, Manifest, PackEntry, PackSection};
+use a9_mod::manifest::{CsvMode, CsvSection, Manifest, PackEntry, PackSection};
 
 fn sanitized(name: &str) -> String {
     name.chars()
@@ -826,6 +1126,7 @@ fn write_mod(
         hook: Vec::new(),
         pack,
         csv,
+        asset: Vec::new(),
         file: Vec::new(),
     };
     m.validate().map_err(|e| anyhow::anyhow!("generated manifest invalid: {e}"))?;
@@ -935,6 +1236,7 @@ fn diff_csv(
     name: &str,
     author: &str,
     game_builds: &[String],
+    rows_mode: bool,
 ) -> Result<()> {
     let base_f = fs::read(&base).with_context(|| format!("reading {}", base.display()))?;
     let mod_f = fs::read(&modded).with_context(|| format!("reading {}", modded.display()))?;
@@ -964,6 +1266,8 @@ fn diff_csv(
     let mut sections = Vec::new();
     let mut added = 0usize;
     let mut replaced = 0usize;
+    let mut row_replaced_total = 0usize;
+    let mut row_added_total = 0usize;
     for e in &mod_e {
         let n = e.name.as_str();
         let existing = base_map.get(&n);
@@ -976,28 +1280,156 @@ fn diff_csv(
         } else {
             added += 1;
         }
+        // row-level view of the change (best effort — reports nothing when a
+        // side is not a parseable UTF-16 table)
+        let (r_replaced, r_added, r_removed) = match existing {
+            Some(b) => diff_rows(&b.payload, &e.payload),
+            None => (Vec::new(), Vec::new(), Vec::new()),
+        };
         let file = format!("csv/{}", sanitized(&n));
-        fs::write(out.join(&file), &e.payload)
-            .with_context(|| format!("writing {}", out.join(&file).display()))?;
-        sections.push(CsvSection {
-            name: n.clone(),
-            file,
-        });
+        // A pure row-level change (existing table, parseable, nothing removed)
+        // can ship as a compact row patch under --rows.
+        let as_rows = rows_mode
+            && existing.is_some()
+            && r_removed.is_empty()
+            && !(r_replaced.is_empty() && r_added.is_empty());
+        if as_rows {
+            let modded_tbl = csv::Table::parse(&e.payload)
+                .with_context(|| format!("parsing changed table {n} (row mode)"))?;
+            let keys: std::collections::BTreeSet<String> = r_replaced
+                .iter()
+                .chain(r_added.iter())
+                .cloned()
+                .collect();
+            let patch = row_patch_bytes(&modded_tbl, &keys);
+            fs::write(out.join(&file), &patch)
+                .with_context(|| format!("writing {}", out.join(&file).display()))?;
+            sections.push(CsvSection {
+                name: n.to_string(),
+                file,
+                mode: CsvMode::Rows,
+                row_keys: Vec::new(),
+            });
+            println!(
+                "    {n}: row patch — {} row(s) replaced, {} added{}",
+                r_replaced.len(),
+                r_added.len(),
+                list_keys(&r_replaced, &r_added)
+            );
+        } else {
+            fs::write(out.join(&file), &e.payload)
+                .with_context(|| format!("writing {}", out.join(&file).display()))?;
+            sections.push(CsvSection {
+                name: n.to_string(),
+                file,
+                mode: CsvMode::Replace,
+                row_keys: Vec::new(),
+            });
+            let row_note = if r_removed.is_empty() {
+                format!(
+                    "{} row(s) replaced, {} added",
+                    r_replaced.len(),
+                    r_added.len()
+                )
+            } else {
+                format!(
+                    "{} row(s) replaced, {} added, {} removed — shipped as a whole table",
+                    r_replaced.len(),
+                    r_added.len(),
+                    r_removed.len()
+                )
+            };
+            println!(
+                "    {n}: whole table — {row_note}{}",
+                list_keys(&r_replaced, &r_added)
+            );
+        }
+        row_replaced_total += r_replaced.len();
+        row_added_total += r_added.len();
     }
     if sections.is_empty() {
         bail!("no differences found between the csvp files — nothing to generate");
     }
     let n_tables = sections.len();
+    let n_rows = sections.iter().filter(|c| c.mode == CsvMode::Rows).count();
     write_mod(out, id, name, author, game_builds, Vec::new(), sections)?;
     println!(
-        "mod '{id}' generated: csvp — {added} added, {replaced} replaced, {n_tables} tables -> {}",
+        "mod '{id}' generated: csvp — {added} added, {replaced} replaced, {n_tables} tables \
+         ({n_rows} as row patches; {row_replaced_total} rows replaced, {row_added_total} rows added) -> {}",
         out.display()
     );
     Ok(())
 }
 
+/// Row-level comparison of two table payloads: (replaced keys, added keys,
+/// removed keys), each sorted. Empty when a side is not a parseable table or
+/// has no keyed rows.
+fn diff_rows(base: &[u8], modded: &[u8]) -> (Vec<String>, Vec<String>, Vec<String>) {
+    let (Ok(b), Ok(m)) = (csv::Table::parse(base), csv::Table::parse(modded)) else {
+        return (Vec::new(), Vec::new(), Vec::new());
+    };
+    let bmap: std::collections::BTreeMap<&str, &csv::Row> = b
+        .rows
+        .iter()
+        .filter(|r| !r.key().is_empty())
+        .map(|r| (r.key(), r))
+        .collect();
+    let mmap: std::collections::BTreeMap<&str, &csv::Row> = m
+        .rows
+        .iter()
+        .filter(|r| !r.key().is_empty())
+        .map(|r| (r.key(), r))
+        .collect();
+    let mut replaced = Vec::new();
+    let mut added = Vec::new();
+    for (k, mr) in &mmap {
+        match bmap.get(k) {
+            Some(br) => {
+                if br.fields != mr.fields {
+                    replaced.push((*k).to_string());
+                }
+            }
+            None => added.push((*k).to_string()),
+        }
+    }
+    let removed = bmap
+        .keys()
+        .filter(|k| !mmap.contains_key(**k))
+        .map(|k| (*k).to_string())
+        .collect();
+    (replaced, added, removed)
+}
+
+/// Serialize just the named keys' rows from `modded` as a UTF-16 row patch.
+fn row_patch_bytes(modded: &csv::Table, keys: &std::collections::BTreeSet<String>) -> Vec<u8> {
+    let mut t = csv::Table::new();
+    for r in &modded.rows {
+        if !r.key().is_empty() && keys.contains(r.key()) {
+            t.push_row(r.fields.clone());
+        }
+    }
+    t.serialize()
+}
+
+/// A short ", e.g. R1, R2" tail naming a few changed keys.
+fn list_keys(replaced: &[String], added: &[String]) -> String {
+    let mut names: Vec<&str> = replaced.iter().map(String::as_str).take(4).collect();
+    names.extend(added.iter().map(String::as_str).take(4));
+    if names.is_empty() {
+        return String::new();
+    }
+    let shown = names.len();
+    let total = replaced.len() + added.len();
+    let tail = if total > shown {
+        format!(", … (+{})", total - shown)
+    } else {
+        String::new()
+    };
+    format!(" (e.g. {}{tail})", names.join(", "))
+}
+
 fn mkpack(container: &str, entries: &[String], out: &Path) -> Result<()> {
-    let file = match container {
+    let (file, family) = match container {
         "images" => {
             let mut ents = Vec::new();
             for spec in entries {
@@ -1020,7 +1452,10 @@ fn mkpack(container: &str, entries: &[String], out: &Path) -> Result<()> {
                     payload,
                 });
             }
-            pack::encode_pack_b(&a9_formats::container::serialize_images(&ents))
+            (
+                pack::encode_pack_b(&a9_formats::container::serialize_images(&ents)),
+                Family::B,
+            )
         }
         "csvs" => {
             let mut ents = Vec::new();
@@ -1034,24 +1469,196 @@ fn mkpack(container: &str, entries: &[String], out: &Path) -> Result<()> {
                     payload,
                 });
             }
-            pack::encode_pack_b(&a9_formats::container::serialize_csvs(&ents))
+            (
+                pack::encode_pack_b(&a9_formats::container::serialize_csvs(&ents)),
+                Family::B,
+            )
         }
-        other => bail!("--container must be images or csvs, got {other:?}"),
+        // a family-A opaque stream: the named files' bytes, concatenated (the
+        // M5 W1 fixture path — a host pack `V`)
+        "a" => {
+            let mut decoded = Vec::new();
+            for path in entries {
+                decoded.extend_from_slice(&fs::read(path).with_context(|| format!("reading {path}"))?);
+            }
+            (pack::encode_pack_a(&decoded), Family::A)
+        }
+        // a family-A `i.dat` index: NAME=DIR:LEN:OFF (OFF optional, default 0);
+        // tails are synthesized clean (flag 0), pad = the Steam build's
+        "idat" => {
+            let mut rows = Vec::new();
+            for spec in entries {
+                let (name, rest) = spec.split_once('=').context("entry must be NAME=DIR:LEN:OFF")?;
+                let (dir, rest) = rest.split_once(':').context("entry must be NAME=DIR:LEN:OFF")?;
+                let (len_s, off_s) = rest
+                    .split_once(':')
+                    .unwrap_or((rest, "0"));
+                let mut tail = [0u8; 9];
+                tail[0..4].copy_from_slice(&len_s.parse::<u32>()?.to_le_bytes());
+                tail[5..9].copy_from_slice(&off_s.parse::<u32>()?.to_le_bytes());
+                rows.push(fmt::idat::Entry {
+                    name: name.to_string(),
+                    dir: dir.to_string(),
+                    tail,
+                });
+            }
+            let idat = fmt::idat::Idat { pad: fmt::idat::PAD_STEAM, entries: rows };
+            (pack::encode_pack_a(&fmt::idat::serialize(&idat)), Family::A)
+        }
+        other => bail!("--container must be images, csvs, a or idat, got {other:?}"),
     };
     // byte-verify the result before writing
-    let decoded = pack::decode_pack(&file, Family::B)?;
+    let decoded = pack::decode_pack(&file, family)?;
     let n = match container {
         "images" => parse_images(&decoded)?.len(),
-        _ => parse_csvs(&decoded)?.len(),
+        "csvs" => parse_csvs(&decoded)?.len(),
+        "idat" => fmt::idat::parse(&decoded)?.entries.len(),
+        _ => decoded.len(), // "a": raw decoded stream
     };
-    anyhow::ensure!(n == entries.len(), "round-trip count mismatch: {n} != {}", entries.len());
+    if container != "a" {
+        anyhow::ensure!(n == entries.len(), "round-trip count mismatch: {n} != {}", entries.len());
+    }
     fs::write(out, &file).with_context(|| format!("writing {}", out.display()))?;
     println!(
-        "{} written: {} entries, {:.1} MB decoded",
+        "{} written: {} {} (family {:?}), {:.1} MB decoded",
         out.display(),
         entries.len(),
+        if container == "a" { "payload(s)" } else { "entries" },
+        family,
         decoded.len() as f64 / (1024.0 * 1024.0)
     );
+    Ok(())
+}
+
+// ---------------------------------------------------------------- extract-csv
+
+/// The tables inside the game's `data/csvp.bin`: (name, payload bytes).
+fn csvp_tables(game: &Path) -> Result<Vec<(String, Vec<u8>)>> {
+    let path = game.join("data").join("csvp.bin");
+    let file = fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
+    let decoded = fmt::pack::decode_pack(&file, fmt::pack::Family::B)
+        .with_context(|| format!("decoding {}", path.display()))?;
+    let entries = fmt::container::parse_csvs(&decoded)
+        .with_context(|| format!("parsing the csvp container in {}", path.display()))?;
+    Ok(entries
+        .into_iter()
+        .map(|e| (e.name.as_str(), e.payload))
+        .collect())
+}
+
+/// A UTF-8 view of a UTF-16 table: canonical quoting, CRLF rows — readable and
+/// editable in any editor. Not what the game stores, but a `mode = "rows"` row
+/// patch may be UTF-8 (the loader re-encodes patched rows canonically anyway).
+fn table_to_utf8(payload: &[u8]) -> Result<String> {
+    let t = csv::Table::parse(payload)
+        .context("the table is not a UTF-16 CSV (cannot convert to UTF-8)")?;
+    let mut out = String::new();
+    for r in &t.rows {
+        let fields: Vec<String> = r
+            .fields
+            .iter()
+            .map(|f| format!("\"{}\"", f.replace('"', "\"\"")))
+            .collect();
+        out.push_str(&fields.join(","));
+        out.push_str("\r\n");
+    }
+    Ok(out)
+}
+
+fn extract_csv(
+    game: &Path,
+    table: Option<&str>,
+    out: Option<&Path>,
+    list: bool,
+    utf8: bool,
+) -> Result<()> {
+    let tables = csvp_tables(game)?;
+    if list {
+        for (name, payload) in &tables {
+            println!("{name}\t{} B", payload.len());
+        }
+        return Ok(());
+    }
+    let name = table.context("--table is required (or use --list)")?;
+    let (_, payload) = tables.iter().find(|(n, _)| n == name).with_context(|| {
+        let names: Vec<&str> = tables.iter().map(|(n, _)| n.as_str()).collect();
+        format!("table {name:?} is not in csvp (have: {})", names.join(", "))
+    })?;
+    let bytes = if utf8 {
+        table_to_utf8(payload)?.into_bytes()
+    } else {
+        payload.clone()
+    };
+    match out {
+        Some(p) => {
+            fs::write(p, &bytes).with_context(|| format!("writing {}", p.display()))?;
+            println!(
+                "{} written: {name}, {} B{}",
+                p.display(),
+                bytes.len(),
+                if utf8 { " (utf8 view)" } else { " (verbatim UTF-16)" }
+            );
+        }
+        None => {
+            use std::io::Write as _;
+            std::io::stdout().write_all(&bytes)?;
+        }
+    }
+    Ok(())
+}
+
+fn patch_csv(
+    game: &Path,
+    table: &str,
+    patches: &[PathBuf],
+    out: Option<&Path>,
+    utf8: bool,
+) -> Result<()> {
+    if patches.is_empty() {
+        bail!("--patch is required at least once");
+    }
+    let tables = csvp_tables(game)?;
+    let (_, payload) = tables.iter().find(|(n, _)| n == table).with_context(|| {
+        let names: Vec<&str> = tables.iter().map(|(n, _)| n.as_str()).collect();
+        format!("table {table:?} is not in csvp (have: {})", names.join(", "))
+    })?;
+    let base = csv::Table::parse(payload).context("the shipped table is not a UTF-16 CSV")?;
+    let mut patch_tables = Vec::new();
+    for p in patches {
+        let bytes = fs::read(p).with_context(|| format!("reading {}", p.display()))?;
+        let t = csv::parse_patch(&bytes).with_context(|| format!("parsing {}", p.display()))?;
+        patch_tables.push(t);
+    }
+    let (merged, stats) = csv::merge_rows(&base, &patch_tables, csv::MergeMode::Rows)
+        .context("merging the row patches")?;
+    println!(
+        "{table}: base {} rows -> merged {} rows ({} replaced, {} added, {} unchanged)",
+        base.rows.len(),
+        merged.rows.len(),
+        stats.replaced,
+        stats.appended,
+        stats.unchanged
+    );
+    let keys: std::collections::BTreeSet<String> = patch_tables
+        .iter()
+        .flat_map(|t| t.patch_keys())
+        .collect();
+    for k in &keys {
+        let present = merged.rows.iter().any(|r| r.key() == k);
+        println!(
+            "   row {k:?}: {}",
+            if present { "present in the merged table" } else { "MISSING" }
+        );
+    }
+    if let Some(out) = out {
+        let bytes = if utf8 {
+            table_to_utf8(&merged.serialize())?.into_bytes()
+        } else {
+            merged.serialize()
+        };
+        fs::write(out, &bytes).with_context(|| format!("writing {}", out.display()))?;
+        println!("   written: {}", out.display());
+    }
     Ok(())
 }
 
@@ -1108,6 +1715,20 @@ fn inspect(path: &Path, all: bool) -> Result<()> {
             );
             for (d, n) in dirs.iter().take(40) {
                 println!("    {n:>7}  {d}");
+            }
+            if all {
+                // per-row view: bare name, dir, and the (len, flag, off) tail —
+                // the row fields a [[asset]] merge writes (M5 W1)
+                for e in idat.entries.iter() {
+                    println!(
+                        "    {:<28} {:<18} len={:<9} flag={} off={}",
+                        e.name,
+                        e.dir,
+                        e.v1(),
+                        e.v2(),
+                        e.v3()
+                    );
+                }
             }
         }
         fmt::pack::Container::Opaque => println!("  opaque family-A stream"),

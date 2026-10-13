@@ -201,6 +201,10 @@ pub unsafe fn apply_patch(
 
 // ------------------------------------------------------------------ [[hook]]
 
+/// The shipped purchase whitelist's fixed length (the exe table bound is
+/// hard-coded to 97 entries; `train_list_whitelist` anchor + notes/18 §9).
+const WHITELIST_ENTRIES: usize = 97;
+
 pub unsafe fn apply_hook(
     h: &Hook,
     entry: &BuildEntry,
@@ -209,7 +213,14 @@ pub unsafe fn apply_hook(
 ) -> Result<String, String> {
     let t = resolve_target(&h.target, entry)?;
     match h.handler.as_str() {
-        "train_list" => unsafe { apply_train_list(h, entry, base, mod_dir, &t) },
+        // `train_list` contributions are composed across mods by the engine
+        // (M5 W3) and installed ONCE — this per-hook path only serves `nop`.
+        "train_list" => {
+            let _ = mod_dir;
+            Err("train_list hooks are composed across mods by the engine \
+                 (install_train_list) — this path is nop-only"
+                .into())
+        }
         "nop" => unsafe {
             verify(base, t.rva, 0, &t.expect, "hook nop anchor bytes")?;
             let addr = base.add(t.rva) as *mut u8;
@@ -226,13 +237,32 @@ pub unsafe fn apply_hook(
     }
 }
 
-unsafe fn apply_train_list(
+/// One mod's `train_list` contribution: the listed forms as an id bitmap, the
+/// mode, and the resolved hook target. Parsed at boot with no globals touched —
+/// the engine composes every contribution into ONE bitmap and installs ONE
+/// hook (M5 W3: additive composition instead of a single owner).
+pub struct Contribution {
+    pub id: String,
+    pub mode: ListMode,
+    pub list_name: String,
+    pub matched: usize,
+    pub unmatched: usize,
+    /// resolved target RVA (every contribution must name the same seam)
+    pub rva: usize,
+    pub expect: Vec<u8>,
+    pub bitmap: Box<[u8; FORMS_MAX / 8]>,
+}
+
+/// Read + parse one `train_list` hook's mod-relative list file into a bitmap —
+/// the same refusals as the pre-W3 single-mod path (missing/empty list, no
+/// FORM anchor, unreadable FORM list).
+pub unsafe fn train_list_contribution(
     h: &Hook,
     entry: &BuildEntry,
     base: *const u8,
     mod_dir: &Path,
-    t: &ResolvedTarget,
-) -> Result<String, String> {
+    mod_id: &str,
+) -> Result<Contribution, String> {
     let mode = h.mode.unwrap_or(ListMode::Allow);
     let list_name = h.list.as_deref().unwrap_or_default();
     let text = std::fs::read_to_string(mod_dir.join(list_name))
@@ -250,49 +280,134 @@ unsafe fn apply_train_list(
     let units = unsafe { read_u16s_bounded(base, form_anchor.rva as usize, FORMS_SCAN_LIMIT)? };
     let forms_list = forms::parse_form_list(&units);
     let report = forms::build_bitmap(&forms_list, &allowed);
-    // allow: keep listed. deny: keep everything except the listed forms.
-    let bitmap = match mode {
-        ListMode::Allow => report.bitmap,
-        ListMode::Deny => {
-            let mut inv = report.bitmap.clone();
-            for i in 0..forms_list.len().min(FORMS_MAX) {
-                inv[i >> 3] ^= 1u8 << (i & 7);
-            }
-            inv
-        }
-    };
-    let _ = G_ALLOWED.set(bitmap);
-    // the per-call trace logger — the mods dir is the mod dir's parent
-    if let Some(mods_dir) = mod_dir.parent() {
-        let _ = G_TRACE.set(log::Logger::new(&mods_dir.join("a9loader.log")));
-    }
-    let f: FilterFn = my_filter;
+    let t = resolve_target(&h.target, entry)?;
+    Ok(Contribution {
+        id: mod_id.to_string(),
+        mode,
+        list_name: list_name.to_string(),
+        matched: report.matched,
+        unmatched: report.unmatched,
+        rva: t.rva,
+        expect: t.expect,
+        bitmap: report.bitmap,
+    })
+}
+
+/// The shipped whitelist as a keep-bitmap — the baseline an `Add` contribution
+/// builds on. Expect-verified and readability-guarded: a failure refuses the
+/// `Add` loudly rather than silently offering every form.
+pub unsafe fn read_vanilla_whitelist(
+    entry: &BuildEntry,
+    base: *const u8,
+) -> Result<Box<[u8; FORMS_MAX / 8]>, String> {
+    let anchor = entry
+        .anchor("train_list_whitelist")
+        .ok_or_else(|| "this build has no train_list_whitelist anchor".to_string())?;
     unsafe {
         verify(
             base,
-            t.rva,
+            anchor.rva as usize,
             0,
-            &t.expect,
-            &format!("hook train_list@{} anchor bytes", describe(&h.target)),
+            &anchor.expect_bytes().unwrap_or_default(),
+            "train_list_whitelist anchor bytes",
         )?;
-        let addr = base.add(t.rva) as *mut u8;
-        if !patch::write_bytes(addr, &patch::jmp_bytes(f as *const c_void), sys::PAGE_EXECUTE_READWRITE) {
+        let raw = read_at(base, anchor.rva as usize, WHITELIST_ENTRIES * 4)?;
+        let mut bm = Box::new([0u8; FORMS_MAX / 8]);
+        for c in raw.chunks_exact(4) {
+            let id = u32::from_le_bytes([c[0], c[1], c[2], c[3]]) as usize;
+            if id < FORMS_MAX {
+                bm[id >> 3] |= 1u8 << (id & 7);
+            }
+        }
+        Ok(bm)
+    }
+}
+
+fn mode_name(m: ListMode) -> &'static str {
+    match m {
+        ListMode::Allow => "allow",
+        ListMode::Add => "add",
+        ListMode::Deny => "deny",
+    }
+}
+
+/// Compose every `train_list` contribution into ONE keep-bitmap and install the
+/// ONE filter hook (M5 W3). All contributions must resolve to the same target
+/// RVA. Returns the journal line; a per-contribution breakdown goes to the log.
+pub unsafe fn install_train_list(
+    contribs: &[Contribution],
+    entry: &BuildEntry,
+    base: *const u8,
+    forms_len: usize,
+    logger: &log::Logger,
+) -> Result<String, String> {
+    let rva0 = contribs[0].rva;
+    if let Some(bad) = contribs.iter().find(|c| c.rva != rva0) {
+        return Err(format!(
+            "train_list contributions resolve to different targets \
+             ({rva0:#x} vs {:#x}) — refusing",
+            bad.rva
+        ));
+    }
+    let has_add = contribs.iter().any(|c| c.mode == ListMode::Add);
+    let vanilla = if has_add {
+        unsafe { read_vanilla_whitelist(entry, base)? }
+    } else {
+        Box::new([0u8; FORMS_MAX / 8])
+    };
+    let vanilla_n = (0..FORMS_MAX).filter(|&i| forms::kept(&vanilla, i)).count();
+    let refs: Vec<(ListMode, &[u8; FORMS_MAX / 8])> =
+        contribs.iter().map(|c| (c.mode, &*c.bitmap)).collect();
+    let bitmap = forms::compose_filter(forms_len, &vanilla, &refs);
+    let kept = (0..forms_len.min(FORMS_MAX))
+        .filter(|&i| forms::kept(&bitmap, i))
+        .count();
+    let _ = G_ALLOWED.set(bitmap);
+    let _ = G_TRACE.set(logger.clone());
+    let f: FilterFn = my_filter;
+    unsafe {
+        verify(base, rva0, 0, &contribs[0].expect, "hook train_list anchor bytes")?;
+        let addr = base.add(rva0) as *mut u8;
+        if !patch::write_bytes(
+            addr,
+            &patch::jmp_bytes(f as *const c_void),
+            sys::PAGE_EXECUTE_READWRITE,
+        ) {
             return Err("VirtualProtect failed — write refused".into());
         }
     }
-    let mode_name = match mode {
-        ListMode::Allow => "allow",
-        ListMode::Deny => "deny",
-    };
+    let detail: Vec<String> = contribs
+        .iter()
+        .map(|c| {
+            format!(
+                "{}:{}({} matched, {} unmatched)",
+                c.id,
+                mode_name(c.mode),
+                c.matched,
+                c.unmatched
+            )
+        })
+        .collect();
+    for c in contribs {
+        logger.line(&format!(
+            "train_list contribution '{}': mode={} list={} ({} names: {} matched, {} unmatched)",
+            c.id,
+            mode_name(c.mode),
+            c.list_name,
+            c.matched + c.unmatched,
+            c.matched,
+            c.unmatched
+        ));
+    }
     Ok(format!(
-        "hook train_list@{} rva={:#x} mode={} list={} ({} names: {} matched, {} unmatched; {} forms in exe) installed",
-        describe(&h.target),
-        t.rva,
-        mode_name,
-        list_name,
-        allowed.len(),
-        report.matched,
-        report.unmatched,
-        forms_list.len()
+        "hook train_list@train_list_filter rva={rva0:#x} composed {} contribution(s) [{}]{} \
+         -> kept {kept} of {forms_len} forms installed",
+        contribs.len(),
+        detail.join(", "),
+        if has_add {
+            format!(" (add baseline = the shipped whitelist: {vanilla_n} forms)")
+        } else {
+            String::new()
+        },
     ))
 }

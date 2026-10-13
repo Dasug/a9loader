@@ -165,30 +165,68 @@ pub fn run(exe: &Path, out: Option<&Path>, check: bool) -> Result<()> {
 
     if check {
         let path = out.ok_or_else(|| anyhow::anyhow!("--check needs --out"))?;
-        let cur = std::fs::read_to_string(path).unwrap_or_default();
-        let norm = |s: &str| -> String {
-            s.lines()
-                .filter(|l| {
-                    let l = l.trim_start();
-                    !l.starts_with('#') && !l.is_empty()
-                })
-                .map(|l| l.split('#').next().unwrap_or(l).trim().to_string())
-                .collect::<Vec<_>>()
-                .join("\n")
+        let cur = std::fs::read_to_string(path)
+            .with_context(|| format!("reading {}", path.display()))?;
+
+        // The book also carries hand-appended RE anchors the generator does not
+        // know about, so a whole-file comparison always differs. Verify only the
+        // generated CORE anchors: each must be present with the same rva and the
+        // same expect bytes (case-insensitive) as the live exe.
+        let field = |section: &str, key: &str| -> Option<String> {
+            section.lines().find_map(|l| {
+                let l = l.trim().strip_prefix(key)?.trim_start();
+                let l = l.strip_prefix('=')?.trim();
+                let v = l.split('#').next().unwrap_or(l).trim();
+                Some(v.trim_matches('"').to_string())
+            })
         };
-        if norm(&cur) != norm(&full) {
-            // the file also carries hand-appended RE anchors, so a mismatch is
-            // expected when those exist — say so instead of failing the check
-            println!(
-                "NOTE: {} differs from the generated core (hand-appended RE anchors are kept; compare by section)",
-                path.display()
-            );
+        let mut problems: Vec<String> = Vec::new();
+        let mut seen = 0usize;
+        for a in &anchors {
+            let (_, hex, _) = fingerprint(&d, a)?;
+            let want = hex.to_ascii_lowercase().replace(' ', "");
+            let header = format!("[build.{id:?}.anchors.{}]", a.name);
+            let Some(pos) = cur.find(&header) else {
+                problems.push(format!("{}: section missing", a.name));
+                continue;
+            };
+            seen += 1;
+            let section = &cur[pos + header.len()..];
+            let section = section.split("\n[").next().unwrap_or(section);
+            let got_rva = field(section, "rva")
+                .and_then(|v| u64::from_str_radix(v.trim_start_matches("0x").trim_start_matches("0X"), 16).ok());
+            let got_expect = field(section, "expect")
+                .map(|v| v.to_ascii_lowercase().replace(' ', ""));
+            if got_rva != Some(a.rva as u64) {
+                problems.push(format!(
+                    "{}: rva mismatch (book {:?}, generated {:#x})",
+                    a.name,
+                    field(section, "rva").unwrap_or_default(),
+                    a.rva
+                ));
+            } else if got_expect.as_deref() != Some(want.as_str()) {
+                problems.push(format!("{}: expect bytes differ from the exe", a.name));
+            }
+        }
+        if !problems.is_empty() {
+            for p in &problems {
+                println!("MISMATCH: {p}");
+            }
             bail!(
-                "{} does not match the generated core exactly — inspect the diff manually",
-                path.display()
+                "{}: {} of {} core anchor(s) do not match {}",
+                path.display(),
+                problems.len(),
+                anchors.len(),
+                exe.display()
             );
         }
-        println!("check ok: {} matches the exe's core anchors", path.display());
+        let total = cur.matches(&format!("[build.{id:?}.anchors.")).count();
+        println!(
+            "check ok: {} core anchor(s) verified against {}; {} hand-appended anchor(s) retained (not generated)",
+            seen,
+            exe.display(),
+            total.saturating_sub(seen)
+        );
         return Ok(());
     }
 

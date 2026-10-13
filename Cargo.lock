@@ -24,6 +24,7 @@ dependencies = [
 name = "a9-mod"
 version = "0.1.0"
 dependencies = [
+ "a9-formats",
  "semver",
  "serde",
  "thiserror",

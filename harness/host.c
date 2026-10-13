@@ -42,6 +42,63 @@
 #define RVA_WSOUT 0x4F86088u     /* DAT_144f86088 workspace out ptr */
 #define RVA_OUTBUF 0x4F87000u    /* the fake decoded family-B stream */
 
+/* M5 family-A tailgate anchors (builds.toml pack_lzss_*; the fake pages the
+ * loader's expect-verification reads) */
+#define RVA_TG_DECODE 0x314BF0u  /* pack_lzss_decode — the fake family-A decoder */
+#define RVA_TG_IDAT_SITE 0x31516Fu /* i.dat's CALL pack_lzss_decode */
+#define RVA_TG_VP_SITE 0x3F1434u /* vp's CALL pack_lzss_decode */
+#define RVA_TG_TP_SITE 0x3F0F4Du /* tp's CALL pack_lzss_decode */
+#define RVA_TG_CAVE 0x5A1D13u    /* the shared relay cave (19-byte CC run) */
+#define RVA_TG_OUT 0x4F87000u    /* == RVA_OUTBUF: the fake workspace out buffer */
+#define RVA_TG_IN 0x4F89000u     /* the fake encoded family-A file (in-buffer) */
+#define RVA_TG_WORK 0x1000u      /* the fake workspace out span we clear per call */
+
+/* M5-T family-A decode workspace swap (builds.toml workspace_*). The site is
+ * boot_pack_system_driver's CALL pack_master_map_access, right after both
+ * _aligned_malloc calls; the fake pages carry the address book's site/cave
+ * bytes AND reproduce the game's own _aligned_malloc/_aligned_free prologues
+ * (so the loader's entry-byte verification passes) with their internal `call`
+ * redirected to the harness bodies below. */
+#define RVA_WS_SITE 0x31981Au    /* the swap site (E8 -> pack_master_map_access) */
+#define RVA_WS_CALLEE 0x314F20u  /* the site's pinned target (page 0x314000 exists) */
+#define RVA_WS_MALLOC 0x597BA8u  /* _aligned_malloc */
+#define RVA_WS_FREE 0x597B8Cu    /* _aligned_free */
+#define RVA_WS_CAVE 0x592363u    /* the M5-T relay cave (19-byte CC run) */
+#define RVA_WS_GLOBALS 0x4F86088u /* the workspace singleton (== RVA_WSOUT) */
+#define RVA_WS_OLDOUT 0x4F8A000u /* the "game-allocated" OUT buffer */
+#define RVA_WS_OLDIN 0x4F8B000u  /* the "game-allocated" IN buffer */
+#define RVA_WS_NEWOUT 0x4F8C000u /* what the fake _aligned_malloc hands back */
+
+static const unsigned char g_ws_site_orig[5] = { 0xE8,0x01,0xB7,0xFF,0xFF };
+
+static unsigned g_ws_malloc_size, g_ws_malloc_calls, g_ws_free_calls;
+static void *g_ws_malloc_ret;
+static void *g_ws_freed;
+
+/* the bodies the faked CRT prologues call into (arguments intact: the malloc
+ * body sees rcx=size/rdx=align, the free body rcx = the raw [ptr-8] pointer) */
+__attribute__((used, noinline)) void *ws_malloc_body(unsigned long size, unsigned long align)
+{
+    (void)align;
+    g_ws_malloc_calls++;
+    g_ws_malloc_size = (unsigned)size;
+    return g_ws_malloc_ret;
+}
+__attribute__((used, noinline)) void ws_free_body(void *raw)
+{
+    g_ws_free_calls++;
+    g_ws_freed = raw;
+}
+
+/* calls the spliced swap site exactly as the loader does (a plain call from
+ * the wrapper's entry RSP, so the site's own E8 lands the shim at RSP ≡ 8) */
+extern uintptr_t ws_call_site(uintptr_t site);
+__asm__(
+    ".globl ws_call_site\n"
+    "ws_call_site:\n"
+    "callq *%rcx\n"           /* the site's E8 -> cave -> version.dll stub */
+    "retq\n");
+
 /* the ORIGINAL bytes the M2 engine's address book records at its anchors —
  * the engine verifies these before any write, so the fake pages must carry
  * them (from the international Steam exe, file offset 0x1a07b0 / 0x6fb5c0) */
@@ -85,6 +142,13 @@ static const unsigned char g_cache_orig[16] = {
  * fingerprint — the splice rewrites only the E8's 5 bytes) and a `74 00 C3`
  * continuation so a plain call of the site entry returns cleanly */
 static const unsigned char g_famb_orig[7] = { 0xE8,0x62,0x02,0xC6,0xFF,0x85,0xDB };
+
+/* the M5 tailgate call-site bytes (builds.toml pack_lzss_*_call expect values;
+ * the same RVA-relative E8s also aim the fake host's calls at ITS image +
+ * 0x314bf0 — the fake family-A decoder) */
+static const unsigned char g_tg_vp_orig[5]   = { 0xE8,0xB7,0x37,0xF2,0xFF };
+static const unsigned char g_tg_tp_orig[5]   = { 0xE8,0x9E,0x3C,0xF2,0xFF };
+static const unsigned char g_tg_idat_orig[5] = { 0xE8,0x7C,0xFA,0xFF,0xFF };
 
 /* the fake original's body: entered via the 16-byte prologue above (from the
  * mapped page or through the loader's trampoline), this thunk undoes the
@@ -270,12 +334,130 @@ __asm__(
 
 typedef void *(*fn_t)(void *, DWORD *, DWORD *, void *);
 
+/* ---- M5 tailgate fakes. The loader splices the family-A decode call sites
+ * over to a relay cave → the version.dll stub, which CALLS the original
+ * decoder at RVA_TG_DECODE (the shim below) and then appends into the fake
+ * workspace. The fake decoder copies a canned decoded stream into dest and
+ * writes its length back to *cap — exactly the ABI the stub relies on. */
+static unsigned char *g_tg_decode_src;   /* canned decoded bytes */
+static unsigned int g_tg_decode_force_len; /* 0 = use the declared size (else a mismatch) */
+/* decoder tail junk: the live decoder decodes the staged input to exhaustion
+ * and produces a few bytes MORE than the declared size (vp +119, tp +45,
+ * i.dat +21). The fake reproduces that so the tailgate's declared-base append
+ * is exercised against the exact live shape. */
+static unsigned int g_tg_decode_delta;
+
+__attribute__((used, noinline)) int tg_decode_body(unsigned char *dest, unsigned int *cap,
+                                                   const unsigned char *src, unsigned int srclen)
+{
+    (void)srclen;
+    unsigned int declared = *(const unsigned int *)(src - 4);
+    unsigned int n = g_tg_decode_force_len
+                        ? g_tg_decode_force_len
+                        : declared + g_tg_decode_delta;
+    if (n > *cap) {
+        printf("tg decode: declared=%u over cap=%u -> fail\n", declared, *cap);
+        return 0;
+    }
+    if (g_tg_decode_src) {
+        unsigned int copy = n < declared ? n : declared;
+        memcpy(dest, g_tg_decode_src, copy);
+        if (n > copy) memset(dest + copy, 0xEE, n - copy); /* tail junk */
+    } else {
+        memset(dest, 0, n);
+    }
+    *cap = n;
+    printf("tg decode: declared=%u produced=%u\n", declared, n);
+    return 1;
+}
+
+/* calls the spliced decode site with the loader's argument shape (rcx=dest,
+ * rdx=&cap, r8=src, r9d=srclen) and the loader's stack discipline: at the
+ * `callq` RSP is 16-aligned so the site's own E8 pushes its continuation and
+ * the stub sees RSP ≡ 8 (the M4 lesson — a misaligned entry faults the stub's
+ * movaps). The 5th C argument (srclen) sits in the caller shadow space. */
+extern uintptr_t tg_call_site(uintptr_t site, void *dest, unsigned *cap, void *src, uintptr_t srclen);
+
+__asm__(
+    ".globl tg_call_site\n"
+    "tg_call_site:\n"
+    "movq %rcx, %r10\n"       /* r10 = site */
+    "movq %rdx, %rcx\n"       /* rcx = dest */
+    "movq %r8, %rdx\n"        /* rdx = &cap */
+    "movq %r9, %r8\n"         /* r8  = src  */
+    "movq 0x28(%rsp), %r9\n"  /* r9  = srclen (the 5th argument) */
+    "callq *%r10\n"           /* the site's E8 -> cave -> version.dll stub */
+    "retq\n");
+
 static BYTE *g_base;
 
 static void *map_fixed(UINT_PTR addr, SIZE_T size, DWORD prot) {
     /* VirtualAlloc rounds down to 64K as needed; we only need the requested
        range to end up mapped. */
     return VirtualAlloc((void *)addr, size, MEM_RESERVE | MEM_COMMIT, prot);
+}
+
+/* small file helpers for the M5 tailgate host mode (canned decoded streams
+ * in, the post-decode workspace out) */
+static long read_whole(const char *path, unsigned char *buf, size_t cap) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return -1;
+    size_t n = fread(buf, 1, cap, f);
+    fclose(f);
+    return (long)n;
+}
+
+static void write_whole(const char *path, const unsigned char *buf, size_t n) {
+    FILE *f = fopen(path, "wb");
+    if (!f) return;
+    (void)fwrite(buf, 1, n, f);
+    fclose(f);
+}
+
+/* ---- M5-T: build the fake swap environment (see the RVA_WS_* block above).
+ * `fail_alloc` makes the fake _aligned_malloc return NULL (the fail-open case). */
+static void ws_setup(int fail_alloc)
+{
+    BYTE *g = (BYTE *)g_base + RVA_WS_GLOBALS;
+    BYTE *site = (BYTE *)g_base + RVA_WS_SITE;
+    BYTE *callee = (BYTE *)g_base + RVA_WS_CALLEE;
+    BYTE *m = (BYTE *)g_base + RVA_WS_MALLOC;
+    BYTE *f = (BYTE *)g_base + RVA_WS_FREE;
+
+    /* the singleton: the game's own allocations + the shipped caps */
+    *(void **)(g + 0x00) = (void *)(g_base + RVA_WS_OLDOUT);
+    *(void **)(g + 0x08) = (void *)(g_base + RVA_WS_OLDIN);
+    *(unsigned *)(g + 0x10) = 0xC800000u;
+    *(unsigned *)(g + 0x14) = 0x9600000u;
+
+    /* the site: the address book's bytes (E8 -> the pinned callee) + a clean
+     * return so calling the site comes back to us */
+    memcpy(site, g_ws_site_orig, 5);
+    site[5] = 0xC3;
+
+    /* the pinned callee: a value in RAX so the shim's tail jump is observable */
+    callee[0] = 0xB8;
+    *(unsigned *)(callee + 1) = 0xDEADBEEFu;
+    callee[5] = 0xC3;
+
+    /* the cave: the address book records a 16-byte CC run here */
+    memset((BYTE *)g_base + RVA_WS_CAVE, 0xCC, 19);
+
+    /* the fakes are simple trampolines to the bodies below (`mov rax, body;
+     * jmp rax`) — no prologue to reproduce, no stack change */
+    {
+        BYTE *m = (BYTE *)g_base + RVA_WS_MALLOC;
+        BYTE *f = (BYTE *)g_base + RVA_WS_FREE;
+        void *mbody = (void *)ws_malloc_body, *fbody = (void *)ws_free_body;
+        m[0] = 0x48; m[1] = 0xB8; memcpy(m + 2, &mbody, 8); m[10] = 0xFF; m[11] = 0xE0;
+        f[0] = 0x48; f[1] = 0xB8; memcpy(f + 2, &fbody, 8); f[10] = 0xFF; f[11] = 0xE0;
+    }
+
+    g_ws_malloc_calls = 0;
+    g_ws_free_calls = 0;
+    g_ws_malloc_size = 0;
+    g_ws_freed = NULL;
+    g_ws_malloc_ret = fail_alloc ? NULL : (void *)(g_base + RVA_WS_NEWOUT);
 }
 
 int main(int argc, char **argv) {
@@ -379,22 +561,38 @@ int main(int argc, char **argv) {
     {
         int inj_ok = 1;
         struct { UINT_PTR page; UINT_PTR span; DWORD prot; } irooms[] = {
-            { 0x3F0000, 0x10000, PAGE_EXECUTE_READWRITE }, /* the spliced site */
+            { 0x3F0000, 0x10000, PAGE_EXECUTE_READWRITE }, /* the spliced site (+ vp/tp) */
             { 0x50000,  0x10000, PAGE_EXECUTE_READWRITE }, /* the fake runner */
             { 0xF02000, 0x4000,  PAGE_READWRITE },         /* pool + rows */
             { 0xD65000, 0x1000,  PAGE_READWRITE },         /* capacity global */
-            { 0x4F86000, 0x2000, PAGE_READWRITE },         /* workspace + stream */
-            { 0x59A000, 0x2000, PAGE_EXECUTE_READWRITE },  /* the relay cave (0x59a071) */
+            { 0x4F86000, 0x10000, PAGE_READWRITE },        /* workspace + stream + in-buffer; M5-T: the game out/in + new out */
+            { 0x59A000, 0x2000, PAGE_EXECUTE_READWRITE },  /* the M4 relay cave (0x59a071) */
+            { 0x314000, 0x6000, PAGE_EXECUTE_READWRITE },  /* M5: decode + i.dat site; M5-T: the alloc-tail site 0x31981a */
+            { 0x5A1000, 0x1000, PAGE_EXECUTE_READWRITE },  /* M5: the tailgate relay cave */
+            { 0x597000, 0x1000, PAGE_EXECUTE_READWRITE },  /* M5-T: malloc/free fakes */
+            { 0x592000, 0x1000, PAGE_EXECUTE_READWRITE },  /* M5-T: the workspace relay cave */
         };
         for (unsigned i = 0; i < sizeof(irooms) / sizeof(irooms[0]); i++) {
-            if (!map_fixed((UINT_PTR)g_base + irooms[i].page, irooms[i].span,
-                           irooms[i].prot)) {
-                printf("WARN: could not map inject page at RVA 0x%lX err=%lu\n",
-                       (unsigned long)irooms[i].page, (unsigned long)GetLastError());
-                inj_ok = 0;
-                continue;
+            BYTE *want = (BYTE *)g_base + irooms[i].page;
+            int fresh = 1;
+            if (!map_fixed((UINT_PTR)want, irooms[i].span, irooms[i].prot)) {
+                /* the range may already be committed because the host image
+                 * grew over it (the fake runner RVA 0x504c0 sits inside the
+                 * host's own .text once the harness is big enough) — accept a
+                 * committed range but NEVER memset it: that would clobber the
+                 * host's own code. */
+                MEMORY_BASIC_INFORMATION mbi;
+                if (VirtualQuery(want, &mbi, sizeof mbi) && mbi.State == MEM_COMMIT
+                    && mbi.Protect != PAGE_NOACCESS) {
+                    fresh = 0;
+                } else {
+                    printf("WARN: could not map inject page at RVA 0x%lX err=%lu\n",
+                           (unsigned long)irooms[i].page, (unsigned long)GetLastError());
+                    inj_ok = 0;
+                    continue;
+                }
             }
-            memset((BYTE *)g_base + irooms[i].page, 0xCC, irooms[i].span);
+            if (fresh) memset(want, 0xCC, irooms[i].span);
         }
         if (inj_ok) {
             /* the famb call site: book bytes + a clean continuation */
@@ -440,7 +638,51 @@ int main(int argc, char **argv) {
             }
             /* the hook only consults the workspace pointer */
             *(void **)((BYTE *)g_base + RVA_WSOUT) = (void *)((BYTE *)g_base + RVA_OUTBUF);
-            printf("fake: inject pages mapped\n");
+            /* ---- M5 tailgate fakes (same page set). The family-A decode
+             * entry carries a movabs+branch shim to the plain C decoder; the
+             * vp/tp/i.dat call sites carry the address book's E8 expect bytes
+             * followed by a clean `ret` continuation the spliced stub returns
+             * into; the relay cave page stays 0xCC (the cave expect bytes). */
+            {
+                BYTE *shim = (BYTE *)g_base + RVA_TG_DECODE;
+                intptr_t target = (intptr_t)&tg_decode_body;
+                shim[0] = 0x48; shim[1] = 0xB8;
+                memcpy(shim + 2, &target, 8);
+                shim[10] = 0xFF; shim[11] = 0xE0;
+            }
+            {
+                struct { UINT_PTR site; const unsigned char *bytes; const char *tag; } tsites[] = {
+                    { RVA_TG_VP_SITE,   g_tg_vp_orig,   "vp" },
+                    { RVA_TG_TP_SITE,   g_tg_tp_orig,   "tp" },
+                    { RVA_TG_IDAT_SITE, g_tg_idat_orig, "i.dat" },
+                };
+                for (unsigned i = 0; i < sizeof(tsites) / sizeof(tsites[0]); i++) {
+                    BYTE *s = (BYTE *)g_base + tsites[i].site;
+                    memcpy(s, tsites[i].bytes, 5);
+                    s[5] = 0xC3; /* return to the host caller when the stub comes back */
+                    printf("fake: tailgate %s site at RVA 0x%lX\n",
+                           tsites[i].tag, (unsigned long)tsites[i].site);
+                }
+            }
+            *(void **)((BYTE *)g_base + RVA_WSOUT) = (void *)((BYTE *)g_base + RVA_TG_OUT);
+            printf("fake: tailgate pages mapped\n");
+            /* M5-T: the fake workspace environment (the singleton, the alloc
+             * tail site, the CRT fakes) — written BEFORE the DLL is loaded,
+             * because the loader verifies those bytes at boot. Only for the
+             * workspace modes: it repoints the workspace singleton, which the
+             * other modes set up for themselves. */
+            if (!strcmp(mode, "workspace") || !strcmp(mode, "workspace-fail")
+                || !strcmp(mode, "tailgate-ws")) {
+                ws_setup(0);
+                /* ws_setup repoints the singleton at its own "game" buffer; the
+                 * tailgate stub compares `dest` against it, so the combined mode
+                 * hands it back the tailgate's workspace out */
+                if (!strcmp(mode, "tailgate-ws")) {
+                    *(void **)((BYTE *)g_base + RVA_WSOUT) =
+                        (void *)((BYTE *)g_base + RVA_TG_OUT);
+                }
+                printf("fake: workspace pages mapped\n");
+            }
         }
     }
 
@@ -514,6 +756,68 @@ int main(int argc, char **argv) {
         CloseHandle(h);
         free(buf);
         printf("overlay %s: %lu bytes, handle-read ok\n", mode, (unsigned long)lo);
+        return 0;
+    }
+    if (!strcmp(mode, "overlaydat")) {
+        /* M5 W1: open data\i.dat (stage 1 — the loader builds every host
+         * pack's cache first, then the merged index) and data\vp.bin (stage 2
+         * — the family-A host the appended asset bytes ride) through the
+         * (possibly hooked) CFile::Open. Evidence: WHICH path each open used
+         * (cfile_open_body prints it) + the byte size. */
+        const wchar_t *paths[2] = { L"data\\i.dat", L"data\\vp.bin" };
+        const char *tags[2] = { "i.dat", "vp.bin" };
+        for (int i = 0; i < 2; i++) {
+            unsigned char cfile[0x28];
+            cfile_open_fn cfo = (cfile_open_fn)(g_base + RVA_CFILE);
+            HANDLE h;
+            DWORD lo, hi, rd = 0;
+            BYTE *buf;
+            int ok;
+            memset(cfile, 0, sizeof(cfile));
+            int r = cfo(cfile, paths[i], 0, 0);
+            if (!r) {
+                printf("overlay %s: open FAILED (ret=0)\n", tags[i]);
+                continue;
+            }
+            h = *(HANDLE *)(cfile + 8);
+            lo = GetFileSize(h, &hi);
+            buf = (BYTE *)malloc(lo ? lo : 1);
+            ok = ReadFile(h, buf, lo, &rd, NULL) && rd == lo;
+            CloseHandle(h);
+            free(buf);
+            printf("overlay %s: %lu bytes, handle-read %s\n",
+                   tags[i], (unsigned long)lo, ok ? "ok" : "SHORT");
+        }
+        return 0;
+    }
+    if (!strcmp(mode, "overlaytp")) {
+        /* M5-U: stage 1 opens data\i.dat (the loader builds every host pack's
+         * cache — tp for a preview-listing mod — then the merged index), stage 2
+         * opens data\tp.bin. Same evidence shape as overlaydat. */
+        const wchar_t *paths[2] = { L"data\\i.dat", L"data\\tp.bin" };
+        const char *tags[2] = { "i.dat", "tp.bin" };
+        for (int i = 0; i < 2; i++) {
+            unsigned char cfile[0x28];
+            cfile_open_fn cfo = (cfile_open_fn)(g_base + RVA_CFILE);
+            HANDLE h;
+            DWORD lo, hi, rd = 0;
+            BYTE *buf;
+            int ok;
+            memset(cfile, 0, sizeof(cfile));
+            int r = cfo(cfile, paths[i], 0, 0);
+            if (!r) {
+                printf("overlay %s: open FAILED (ret=0)\n", tags[i]);
+                continue;
+            }
+            h = *(HANDLE *)(cfile + 8);
+            lo = GetFileSize(h, &hi);
+            buf = (BYTE *)malloc(lo ? lo : 1);
+            ok = ReadFile(h, buf, lo, &rd, NULL) && rd == lo;
+            CloseHandle(h);
+            free(buf);
+            printf("overlay %s: %lu bytes, handle-read %s\n",
+                   tags[i], (unsigned long)lo, ok ? "ok" : "SHORT");
+        }
         return 0;
     }
     if (!strcmp(mode, "probe")) {
@@ -604,6 +908,122 @@ int main(int argc, char **argv) {
                memcmp((BYTE *)g_base + RVA_INJ_SITE + 5, g_famb_orig + 5, 2) == 0
                    ? "untouched (PASS)"
                    : "BROKEN (FAIL)");
+        return 0;
+    }
+    if (!strcmp(mode, "tailgate") || !strcmp(mode, "tailgate-mismatch")
+        || !strcmp(mode, "tailgate-ws")) {
+        /* the M5 tailgate scenario host path: feed the two spliced decode
+         * sites the way the loaders do — a fake in-buffer whose +0x10 carries
+         * the declared size, dest = the workspace out the stub checks, and
+         * the canned vanilla decoded bytes the fake decoder hands back — then
+         * dump the post-decode workspace the harness compares byte-exactly. */
+        static unsigned char vbuf[0x1000], ibuf[0x1000];
+        BYTE *out = (BYTE *)g_base + RVA_TG_OUT;
+        BYTE *in = (BYTE *)g_base + RVA_TG_IN;
+        long vlen = read_whole("vanilla_vp.dec", vbuf, sizeof vbuf);
+        long ilen = read_whole("vanilla_idat.dec", ibuf, sizeof ibuf);
+        if (vlen <= 0 || ilen <= 0) {
+            printf("FAIL: vanilla_vp.dec/vanilla_idat.dec missing (%ld, %ld)\n", vlen, ilen);
+            return 2;
+        }
+
+        /* ---- i.dat (stage 1): declared = the vanilla decoded length ---- */
+        memset(out, 0, RVA_TG_WORK);
+        memset(in, 0, 0x40);
+        *(unsigned int *)(in + 0x10) = (unsigned int)ilen;
+        g_tg_decode_src = ibuf;
+        g_tg_decode_force_len = 0;
+        g_tg_decode_delta = (!strcmp(mode, "tailgate") || !strcmp(mode, "tailgate-ws")) ? 21u : 0u;
+        unsigned cap = 0xC800000u;
+        uintptr_t r = tg_call_site((uintptr_t)(g_base + RVA_TG_IDAT_SITE), out, &cap,
+                                   in + 0x14, 0x100);
+        printf("tg host: i.dat site ret=%d cap=%u\n", (int)(r & 0xff), (unsigned)cap);
+        write_whole("ws_idat.bin", out, (size_t)ilen + 0x800);
+
+        /* ---- vp (stage 2): declared = the vanilla decoded length ---- */
+        memset(out, 0, RVA_TG_WORK);
+        memset(in, 0, 0x40);
+        *(unsigned int *)(in + 0x10) = (unsigned int)vlen;
+        g_tg_decode_src = vbuf;
+        g_tg_decode_delta = (!strcmp(mode, "tailgate") || !strcmp(mode, "tailgate-ws")) ? 13u : 0u;
+        g_tg_decode_force_len =
+            (!strcmp(mode, "tailgate-mismatch")) ? (unsigned int)vlen - 8u : 0;
+        cap = 0xC800000u;
+        r = tg_call_site((uintptr_t)(g_base + RVA_TG_VP_SITE), out, &cap, in + 0x14, 0x100);
+        printf("tg host: vp site ret=%d cap=%u\n", (int)(r & 0xff), (unsigned)cap);
+        write_whole("ws_vp.bin", out, (size_t)vlen + 0x100);
+        printf("tailgate host: done\n");
+        return 0;
+    }
+    if (!strcmp(mode, "tailgate-tp")) {
+        /* M5-U: the same tailgate host path, but for the `tp` host — stage 1
+         * feeds the i.dat site (its declared size + canned decoded bytes), stage
+         * 2 the tp site. The mod's preview assets + the rebuilt
+         * `previewtexture.dir` listing ride the tp append. */
+        static unsigned char tbuf[0x4000], ibuf[0x4000];
+        BYTE *out = (BYTE *)g_base + RVA_TG_OUT;
+        BYTE *in = (BYTE *)g_base + RVA_TG_IN;
+        long tlen = read_whole("vanilla_tp.dec", tbuf, sizeof tbuf);
+        long ilen = read_whole("vanilla_idat.dec", ibuf, sizeof ibuf);
+        if (tlen <= 0 || ilen <= 0) {
+            printf("FAIL: vanilla_tp.dec/vanilla_idat.dec missing (%ld, %ld)\n", tlen, ilen);
+            return 2;
+        }
+        /* ---- i.dat (stage 1) ---- */
+        memset(out, 0, RVA_TG_WORK);
+        memset(in, 0, 0x40);
+        *(unsigned int *)(in + 0x10) = (unsigned int)ilen;
+        g_tg_decode_src = ibuf;
+        g_tg_decode_force_len = 0;
+        g_tg_decode_delta = 21u;
+        unsigned cap = 0xC800000u;
+        uintptr_t r = tg_call_site((uintptr_t)(g_base + RVA_TG_IDAT_SITE), out, &cap,
+                                   in + 0x14, 0x100);
+        printf("tg host: i.dat site ret=%d cap=%u\n", (int)(r & 0xff), (unsigned)cap);
+        write_whole("ws_idat.bin", out, (size_t)ilen + 0x800);
+        /* ---- tp (stage 2) ---- */
+        memset(out, 0, RVA_TG_WORK);
+        memset(in, 0, 0x40);
+        *(unsigned int *)(in + 0x10) = (unsigned int)tlen;
+        g_tg_decode_src = tbuf;
+        g_tg_decode_delta = 13u;
+        cap = 0xC800000u;
+        r = tg_call_site((uintptr_t)(g_base + RVA_TG_TP_SITE), out, &cap, in + 0x14, 0x100);
+        printf("tg host: tp site ret=%d cap=%u\n", (int)(r & 0xff), (unsigned)cap);
+        /* dump enough of the tail for several appended payloads + a listing */
+        write_whole("ws_tp.bin", out, (size_t)tlen + 0x800);
+        printf("tailgate host: done\n");
+        return 0;
+    }
+    if (!strcmp(mode, "workspace") || !strcmp(mode, "workspace-fail")) {
+        /* the M5-T swap: the loader splices boot_pack_system_driver's alloc
+         * tail, so calling the site must hand the workspace over to a bigger
+         * buffer allocated through the game's own _aligned_malloc (cap raised,
+         * the game's buffer freed), and the shim's tail-jump must reach the
+         * pinned callee with RAX flowing back. `workspace-fail` makes the
+         * allocator return NULL: nothing may change. */
+        /* the fake environment was written BEFORE the DLL loaded (the loader
+         * verifies those bytes at boot and splices the site) — here we only
+         * reset the bookkeeping and decide what the allocator returns */
+        g_ws_malloc_calls = 0;
+        g_ws_free_calls = 0;
+        g_ws_malloc_size = 0;
+        g_ws_freed = NULL;
+        g_ws_malloc_ret = strcmp(mode, "workspace-fail") ? (void *)(g_base + RVA_WS_NEWOUT) : NULL;
+        BYTE *g = (BYTE *)g_base + RVA_WS_GLOBALS;
+        void *old = *(void **)g;
+        uintptr_t rax = ws_call_site((uintptr_t)(g_base + RVA_WS_SITE));
+        void *now = *(void **)g;
+        unsigned cap = *(unsigned *)(g + 0x10);
+        printf("ws host: callee rax=%#lx (%s)\n", (unsigned long)rax,
+               rax == 0xDEADBEEFu ? "PASS" : "FAIL");
+        printf("ws host: malloc calls=%u requested=%u MiB (%s)\n", g_ws_malloc_calls,
+               g_ws_malloc_size >> 20, g_ws_malloc_size == 0x10000000u ? "PASS" : "FAIL");
+        printf("ws host: out %p -> %p %s\n", old, now,
+               now != old ? "(SWAPPED)" : "(unchanged)");
+        printf("ws host: cap=%u (%s)\n", cap, cap == 0x10000000u ? "PASS" : "FAIL");
+        printf("ws host: free calls=%u freed=%p\n", g_ws_free_calls, g_ws_freed);
+        printf("workspace host: done\n");
         return 0;
     }
     if (!strcmp(mode, "table113")) {

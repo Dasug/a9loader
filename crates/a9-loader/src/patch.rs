@@ -39,44 +39,75 @@ pub unsafe fn write_bytes(addr: *mut u8, bytes: &[u8], prot: DWORD) -> bool {
     }
 }
 
-/// Splice an in-image call site over to a nominated stub, returning the
-/// ORIGINAL call target (site+5+rel32) for the record. The site's `expect`
-/// bytes (address book) are verified first — a mismatch refuses without
-/// touching anything. When `expect_target` is `Some(va)` the computed
-/// original target must equal it — refuse before any write (this pins the
-/// runner identity: the call really is the code the address book names).
-///
-/// The nominated stub is an `extern "system"` function living in OUR dll —
-/// usually many GB away from the game image, unreachable by any `E8`-rel32.
-/// The splice therefore lands on a 23-byte VERNIER page allocated near the
-/// game image:
-///
-/// ```text
-/// 58                   pop rbx            ; rbx = return address (site+5)
-/// 48 83 EC 20          sub rsp,0x20       ; 16-align + shadow for the call
-/// 48 B8 <imm64 stub>   movabs rax, stub   ; patched at install
-/// FF D0                call rax
-/// 48 83 C4 20          add rsp,0x20
-/// FF E3                jmp rbx            ; return where the call would have
-/// ```
-///
-/// The original call site keeps its opcode byte (`E8`) and gets a fresh
-/// rel32 into the vernier — always within rel32 range by construction (the
-/// page is allocated within ±2 GB of the site, first choice
-/// site+0x10000000). Call semantics match the original call exactly: the
-/// caller's volatile-argument registers (e.g. RCX = pool pointer) reach the
-/// stub unchanged, the stub's own callee-saved register preservation keeps
-/// the caller's live EBX/RSI/RBP/R12B intact (the loader reads EBX in the
-/// instruction right after the spliced site), and `jmp rbx` returns to
-/// site+5 — the exact continuation the original call had.
-pub unsafe fn splice_call(
-    site: *mut u8,
-    expect: &[u8],
-    stub: *const c_void,
-    prot: DWORD,
-    expect_target: Option<usize>,
+/// Write the same-image relay thunk into a code cave: `FF 25 00000000` +
+/// 8-byte absolute stub address (14 bytes). `cave_expect` (the address book's
+/// recorded bytes — a CC run) is verified first; a mismatch refuses without
+/// touching anything. Idempotent only in the sense that it must be called
+/// ONCE per cave: a second call would compare the already-written thunk
+/// against `cave_expect` and refuse. [`splice_call`] wraps this with one
+/// site; the M5 tailgate calls it once and then [`splice_to_cave`] per site.
+pub unsafe fn install_relay_cave(
     cave: *mut u8,
     cave_expect: &[u8],
+    stub: *const c_void,
+    prot: DWORD,
+) -> Result<(), String> {
+    unsafe {
+        if cave_expect.len() < 14 {
+            return Err("cave shorter than the 14-byte relay thunk".into());
+        }
+        let mut old: DWORD = 0;
+        if VirtualProtect(cave.cast(), cave_expect.len(), prot, &mut old) == 0 {
+            return Err("VirtualProtect on the relay cave failed".into());
+        }
+        let cave_ok = std::slice::from_raw_parts(cave, cave_expect.len()) == cave_expect;
+        // Idempotency: the M5-T workspace decision re-runs the tailgate install
+        // (once against the shipped cap, once after growing the workspace), so
+        // the cave may already hold OUR thunk. Accept it when it is exactly the
+        // one this call would write; anything else is still refused.
+        let already = !cave_ok
+            && cave_expect.len() >= 14
+            && {
+                let cur = std::slice::from_raw_parts(cave, 14);
+                cur[0] == 0xFF
+                    && cur[1] == 0x25
+                    && u64::from_ne_bytes(cur[6..14].try_into().unwrap()) == stub as usize as u64
+            };
+        VirtualProtect(cave.cast(), cave_expect.len(), old, &mut old);
+        if already {
+            return Ok(());
+        }
+        if !cave_ok {
+            return Err(
+                "relay cave bytes differ from the address book (game update?) — \
+                 refusing to splice"
+                    .into(),
+            );
+        }
+        //   cave: [FF 25 00000000][8-byte stub address]
+        let mut thunk = [0u8; 14];
+        thunk[0] = 0xFF;
+        thunk[1] = 0x25;
+        // [rip+0] — the immediate lands right after the instruction
+        thunk[2..6].copy_from_slice(&0u32.to_le_bytes());
+        thunk[6..14].copy_from_slice(&(stub as usize).to_ne_bytes());
+        if !write_bytes(cave, &thunk, prot) {
+            return Err("writing the relay thunk into the cave failed".into());
+        }
+        Ok(())
+    }
+}
+
+/// Splice one `E8` site's rel32 to an ALREADY-INSTALLED relay cave (see
+/// [`install_relay_cave`]). Verifies the site's `expect` bytes and, when
+/// `expect_target` is `Some(va)`, pins the E8's computed target to it before
+/// any write. Returns the original call target.
+pub unsafe fn splice_to_cave(
+    site: *mut u8,
+    expect: &[u8],
+    cave: *mut u8,
+    prot: DWORD,
+    expect_target: Option<usize>,
 ) -> Result<usize, String> {
     unsafe {
         if expect.len() < 5 {
@@ -92,6 +123,20 @@ pub unsafe fn splice_call(
         let ok = std::slice::from_raw_parts(site, expect.len()) == expect;
         VirtualProtect(site.cast(), expect.len(), old, &mut old);
         if !ok {
+            // Idempotency (M5-T's two-pass decision re-runs the install): the
+            // site may already point at this very cave. Accept that, and answer
+            // with the pinned target the caller passed (it cannot be recovered
+            // from the rewritten site).
+            let rel = i32::from_le_bytes([
+                *site.wrapping_add(1),
+                *site.wrapping_add(2),
+                *site.wrapping_add(3),
+                *site.wrapping_add(4),
+            ]);
+            let current = site_va.wrapping_add(5).wrapping_add(rel as isize as usize);
+            if *site == 0xE8 && current == cave as usize {
+                return Ok(expect_target.unwrap_or(0));
+            }
             return Err(
                 "call-site bytes differ from the address book (game update?) — \
                  refusing to splice"
@@ -116,42 +161,6 @@ pub unsafe fn splice_call(
                 ));
             }
         }
-        // the relay page: a recorded code CAVE inside the same image (a
-        // compiler alignment pad — CC run), expect-verified like the site.
-        // WHY: only 5 bytes at the site fit, so an E8 rel32 is the only
-        // encoding — and a rel32 can't reach our loaded dll (wine/Windows
-        // memory is far outside ±2 GiB). The cave -> hook relation uses the
-        // absolute FF 25 + imm64 form instead:
-        //   cave: [FF 25 00000000][8-byte stub address]
-        //   site: E8 <rel32 = cave - (site + 5)>   (same image ⇒ always fits)
-        // flow: game call → site → cave thunk → call [imm64] → our stub;
-        // the stub returns to site+5 (the game's caller pushed it), so the
-        // spliced call behaves like the original one byte-for-byte.
-        if cave_expect.len() < 14 {
-            return Err("cave shorter than the 14-byte relay thunk".into());
-        }
-        let mut told: DWORD = 0;
-        if VirtualProtect(cave.cast(), cave_expect.len(), prot, &mut told) == 0 {
-            return Err("VirtualProtect on the relay cave failed".into());
-        }
-        let cave_ok = std::slice::from_raw_parts(cave, cave_expect.len()) == cave_expect;
-        VirtualProtect(cave.cast(), cave_expect.len(), old, &mut old);
-        if !cave_ok {
-            return Err(
-                "relay cave bytes differ from the address book (game update?) — \
-                 refusing to splice"
-                    .into(),
-            );
-        }
-        let mut thunk = [0u8; 14];
-        thunk[0] = 0xFF;
-        thunk[1] = 0x25;
-        // [rip+0] — the immediate lands right after the instruction
-        thunk[2..6].copy_from_slice(&0u32.to_le_bytes());
-        thunk[6..14].copy_from_slice(&(stub as usize).to_ne_bytes());
-        if !write_bytes(cave, &thunk, prot) {
-            return Err("writing the relay thunk into the cave failed".into());
-        }
         // the site: keep the E8 opcode byte, rewrite the 4 rel32 bytes only;
         // both the site and the cave live in the same image, so the rel32
         // always fits — assert it anyway
@@ -170,6 +179,45 @@ pub unsafe fn splice_call(
             return Err("writing the spliced rel32 failed".into());
         }
         Ok(original)
+    }
+}
+
+/// Splice an in-image call site over to a nominated stub, returning the
+/// ORIGINAL call target (site+5+rel32) for the record. The site's `expect`
+/// bytes (address book) are verified first — a mismatch refuses without
+/// touching anything. When `expect_target` is `Some(va)` the computed
+/// original target must equal it — refuse before any write (this pins the
+/// runner identity: the call really is the code the address book names).
+///
+/// The nominated stub is an `extern "system"` function living in OUR dll —
+/// usually many GB away from the game image, unreachable by any `E8`-rel32.
+/// The splice therefore lands on a relay CAVE inside the game image (a
+/// recorded CC run): the cave holds `FF 25 00000000` + the 8-byte absolute
+/// stub address (the imm64 form reaches anywhere), and the site's `E8` rel32
+/// is rewritten to the cave (same image ⇒ always in range).
+///
+/// Call semantics match the original call exactly: the caller's
+/// volatile-argument registers reach the stub unchanged, the stub's own
+/// callee-saved preservation keeps the caller's live nonvolatiles intact, and
+/// the stub's `ret` consumes the return address the original `E8` pushed — so
+/// it returns to site+5, the exact continuation the original call had.
+///
+/// This is `install_relay_cave` + `splice_to_cave` for the common
+/// one-cave-one-site case. The M5 tailgate installs one cave for several
+/// sites: it calls [`install_relay_cave`] once, then [`splice_to_cave`] per
+/// site.
+pub unsafe fn splice_call(
+    site: *mut u8,
+    expect: &[u8],
+    stub: *const c_void,
+    prot: DWORD,
+    expect_target: Option<usize>,
+    cave: *mut u8,
+    cave_expect: &[u8],
+) -> Result<usize, String> {
+    unsafe {
+        install_relay_cave(cave, cave_expect, stub, prot)?;
+        splice_to_cave(site, expect, cave, prot, expect_target)
     }
 }
 

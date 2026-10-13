@@ -79,3 +79,105 @@ expect = "e8,62,02,c6,ff,85,db"
 [build."5.00.5634".anchors.famb_runner_cave]
 rva = 0x59A071              # see note above; longest CC run in .text (21 bytes)
 expect = "cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc"
+
+# ---- M5 family-A tailgate (in-place decode append). The game LZSS-decodes
+# every family-A pack through ONE funnel, `pack_lzss_decode` 0x140314bf0
+# (entry from the international Steam exe). Every family-A loader the loader
+# can host an [[asset]] in reaches it through a single 5-byte E8:
+#   vp    pack_loader_vp 0x1403f1210        site 0x1403f1434
+#   tp    pack_loader_tp 0x1403f0d20        site 0x1403f0f4d
+#   mcp   pack_loader_mcp 0x1403ee710       site 0x1403ee93a
+#   ep    pack_loader_ep 0x1403ef9f0         site 0x1403efc16
+#   cp    pack_loader_cp 0x1403ef100         site 0x1403ef326
+#   i.dat pack_idat_loader 0x140314fa0       site 0x14031516f
+# The splice rewrites each site's E8 rel32 to the relay cave below (exactly
+# like M4's famb splice); the cave's `FF 25` + imm64 jumps into version.dll.
+# All these sites call the same decode function, so the stub dispatches on the
+# caller's continuation (site+5): 0x1403f1439 / 0x1403f0f52 / 0x1403ee93f /
+# 0x1403efc1b / 0x1403ef32b / 0x140315174.
+[build."5.00.5634".anchors.pack_lzss_decode]
+rva = 0x314BF0              # pack_lzss_decode entry (file 0x313ff0)
+expect = "41,54,41,56,41,57,b8,60,10,00,00"
+
+[build."5.00.5634".anchors.pack_lzss_vp_call]
+rva = 0x3F1434              # vp's CALL pack_lzss_decode (file 0x3f0834)
+expect = "e8,b7,37,f2,ff"
+
+[build."5.00.5634".anchors.pack_lzss_tp_call]
+rva = 0x3F0F4D              # tp's CALL pack_lzss_decode (file 0x3f034d)
+expect = "e8,9e,3c,f2,ff"
+
+[build."5.00.5634".anchors.pack_lzss_idat_call]
+rva = 0x31516F              # i.dat's CALL pack_lzss_decode (file 0x31456f)
+expect = "e8,7c,fa,ff,ff"
+
+[build."5.00.5634".anchors.pack_lzss_mcp_call]
+rva = 0x3EE93A              # mcp's CALL pack_lzss_decode (file 0x3edd3a)
+expect = "e8,b1,62,f2,ff"
+
+[build."5.00.5634".anchors.pack_lzss_ep_call]
+rva = 0x3EFC16              # ep's CALL pack_lzss_decode (file 0x3ef016)
+expect = "e8,d5,4f,f2,ff"
+
+[build."5.00.5634".anchors.pack_lzss_cp_call]
+rva = 0x3EF326              # cp's CALL pack_lzss_decode (file 0x3ee726)
+expect = "e8,c5,58,f2,ff"
+
+# The tailgate relay cave: a real inter-function CC pad preceded by the
+# `41 5f 41 5e 41 5d 41 5c 5f c3` (pop r15/r14/r13/r12/rdi; ret) epilogue,
+# 19 CC bytes long — the 14-byte FF 25 + imm64 relay lands well inside. Chosen
+# fresh in .text (the M4 famb cave 0x59a071 is already consumed by the
+# injector and lives in a different CC run).
+[build."5.00.5634".anchors.pack_lzss_cave]
+rva = 0x5A1D13              # 19-byte CC run in .text (file 0x5a1113)
+expect = "cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc"
+
+# ---------------------------------------------------------------------------
+# M5-T — the family-A decode WORKSPACE (the 200 MB out buffer).
+#
+# `boot_pack_system_driver` 0x140319480 allocates the shared workspace ONCE at
+# boot (stage 1), before any pack decode:
+#   0x1403197cd  CALL pack_workspace_accessor      ; RAX = &DAT_144f86088
+#   0x1403197dc  MOV  [RAX+0x10], 0xC800000        ; out cap (200 MB)
+#   0x1403197e3  MOV  [RAX+0x14], 0x9600000        ; in cap (150 MB, never read)
+#   0x1403197ed  CALL _aligned_malloc(0xC800000,0x10)  ; -> DAT_144f86088 (out)
+#   0x140319808  CALL _aligned_malloc(0x9600000,0x10)  ; -> DAT_144f86090 (in)
+#   0x14031981a  CALL pack_master_map_access       ; <- the swap hook: both
+#                                                   buffers exist and are non-NULL
+# Consumers re-read the global at every use (no caching), and the teardown
+# frees both pointers with `_aligned_free` under a NULL guard, so a swap is
+# transparent — provided the new buffers come from the game's own
+# `_aligned_malloc` and the out CAP is raised too (it is the decoder's bound).
+# The in cap is never read (zero refs) and the tailgate never touches the
+# encoded file, so M5-T only swaps the OUT buffer.
+[build."5.00.5634".anchors.workspace_alloc]
+rva = 0x3197CD              # CALL pack_workspace_accessor (file 0x318bcd)
+expect = "e8,8e,d4,fe,ff"
+
+[build."5.00.5634".anchors.workspace_alloc_tail]
+rva = 0x31981A              # CALL pack_master_map_access — the swap site (file 0x318c1a)
+expect = "e8,01,b7,ff,ff"
+
+[build."5.00.5634".anchors.workspace_alloc_callee]
+rva = 0x314F20              # pack_master_map_access — the site's pinned target (file 0x314320)
+expect = "48,83,ec,38,48,c7,44,24,20,fe,ff,ff,ff,8b,05,bd"
+
+# The workspace singleton (zero-initialized .data/bss — no expect bytes; the
+# stub verifies the shipped caps at +0x10/+0x14 at runtime instead).
+[build."5.00.5634".anchors.workspace_globals]
+rva = 0x4F86088              # +0 out ptr, +8 in ptr, +0x10 out cap, +0x14 in cap
+
+[build."5.00.5634".anchors.aligned_malloc]
+rva = 0x597BA8              # _aligned_malloc(size, align) (file 0x596fa8)
+expect = "40,53,48,83,ec,20,48,8d,42,ff,48,85,c2,74,14,e8"
+
+[build."5.00.5634".anchors.aligned_free]
+rva = 0x597B8C              # _aligned_free(ptr) (file 0x596f8c)
+expect = "48,83,ec,28,48,85,c9,74,0d,48,83,e1,f8,48,8b,49"
+
+# The M5-T relay cave: a 19-byte CC run in .text (preceded by `33 c0 eb c4`),
+# fresh — the M4 famb cave 0x59a071 and the M5 tailgate cave 0x5a1d13 are both
+# consumed already.
+[build."5.00.5634".anchors.workspace_cave]
+rva = 0x592363              # 19-byte CC run in .text (file 0x591763)
+expect = "cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc"

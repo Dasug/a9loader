@@ -1,6 +1,6 @@
 //! The loader log — `<mods_dir>/a9loader.log`, one line per event with a
 //! local timestamp, size-capped, never panicking, never failing the boot.
-//! M2 upgrade over the M0 stub: severity tags + timestamps + lazy path
+//! Upgrade over the original stub: severity tags + timestamps + lazy path
 //! creation (the mods dir may not exist yet when boot starts).
 
 use crate::sys;
@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 
 const MAX_BYTES: u64 = 1_000_000;
 
+#[derive(Clone)]
 pub struct Logger {
     path: PathBuf,
     rotate_pending: bool,

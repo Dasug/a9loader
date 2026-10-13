@@ -1,6 +1,6 @@
-//! `i.dat` — the master asset index, port of corpus `tools/i_parse.py`
-//! (verified byte-identical round-trip on the demo build; loader
-//! `FUN_140314fa0`, entry parse `FUN_140314e60`).
+//! `i.dat` — the master asset index (verified as a byte-identical round-trip
+//! against real packs; the engine's loader at 0x140314fa0, entry parse at
+//! 0x140314e60).
 //!
 //! Decoded layout:
 //!
@@ -61,10 +61,151 @@ impl Entry {
     pub fn v3(&self) -> u32 {
         u32::from_le_bytes(self.tail[5..9].try_into().unwrap())
     }
-    fn size(&self) -> usize {
-        let nl = self.name.encode_utf16().count() + 1;
-        let dl = self.dir.encode_utf16().count() + 1;
-        4 + nl * 2 + 2 + dl * 2 + 9
+}
+
+/// The walked size of one entry record: `[u16 size][u16 nameLen][name UTF-16
+/// + NUL][u16 dirLen][dir UTF-16 + NUL][9-byte tail]`. Shared by [`serialize`]
+/// (a parsed [`Entry`]) and [`NewRow::to_bytes`] (a synthesized row) so the
+/// two renderings cannot drift.
+fn record_size(name: &str, dir: &str) -> usize {
+    let nl = name.encode_utf16().count() + 1;
+    let dl = dir.encode_utf16().count() + 1;
+    4 + nl * 2 + 2 + dl * 2 + 9
+}
+
+/// Append one entry record (the exact byte layout the loader walks: it reads
+/// the leading `size` and advances by it).
+fn write_record(out: &mut Vec<u8>, name: &str, dir: &str, tail: &[u8; 9]) {
+    let nl = name.encode_utf16().count() + 1;
+    let dl = dir.encode_utf16().count() + 1;
+    out.extend_from_slice(&(record_size(name, dir) as u16).to_le_bytes());
+    out.extend_from_slice(&(nl as u16).to_le_bytes());
+    for u in name.encode_utf16() {
+        out.extend_from_slice(&u.to_le_bytes());
+    }
+    out.extend_from_slice(&0u16.to_le_bytes()); // NUL terminator
+    out.extend_from_slice(&(dl as u16).to_le_bytes());
+    for u in dir.encode_utf16() {
+        out.extend_from_slice(&u.to_le_bytes());
+    }
+    out.extend_from_slice(&0u16.to_le_bytes()); // NUL terminator
+    out.extend_from_slice(tail);
+}
+
+/// A row to add or replace in a parsed `i.dat` (`[[asset]]`).
+///
+/// The tail is *synthesized* from these fields — a new row has no verbatim
+/// bytes to preserve. Field meanings are the loader's own
+///: `len` = bytes consumers get (node+0x48; for a
+/// `.x` this includes the 12-byte `ADX0` chunk header), `flag` = node+0x4c
+/// (0 in every shipped row), `off` = offset into the current pack's decoded
+/// buffer (node+0x50).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NewRow {
+    pub name: String,
+    pub dir: String,
+    pub len: u32,
+    pub flag: u8,
+    pub off: u32,
+}
+
+impl NewRow {
+    /// The 9-byte row tail: `[len u32][flag u8][off u32]`.
+    fn tail(&self) -> [u8; 9] {
+        let mut t = [0u8; 9];
+        t[0..4].copy_from_slice(&self.len.to_le_bytes());
+        t[4] = self.flag;
+        t[5..9].copy_from_slice(&self.off.to_le_bytes());
+        t
+    }
+
+    /// This row as one serialized entry record — byte-identical to what
+    /// [`Idat::serialize`] emits for an equivalent [`Entry`]. The tailgate
+    /// stub appends these bytes to the decoded `i.dat` image and bumps the
+    /// entry count, which is exactly the merged-table layout minus the
+    /// untouched vanilla prefix.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(record_size(&self.name, &self.dir));
+        write_record(&mut out, &self.name, &self.dir, &self.tail());
+        out
+    }
+}
+
+/// Render `rows` as the concatenated entry records [`NewRow::to_bytes`]
+/// produces, in order — the tailgate's append payload for `i.dat`.
+pub fn render_rows(rows: &[NewRow]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for r in rows {
+        out.extend_from_slice(&r.to_bytes());
+    }
+    out
+}
+
+/// Bump the `u32` entry count inside a decoded `i.dat` IMAGE in place (the
+/// count sits at `image[0x18]`, entries run from `image[0x1c]`; the loader
+/// reads the count right after the decode). The tailgate's count half of the
+/// row append; `Err` if the image is too short to hold the count word.
+pub fn bump_count(image: &mut [u8], add: u32) -> Result<(), Error> {
+    if image.len() < 0x1c {
+        return Err(Error::Idat(format!(
+            "decoded i.dat image is {} bytes — too short for the count word",
+            image.len()
+        )));
+    }
+    let c = u32::from_le_bytes(image[0x18..0x1c].try_into().unwrap());
+    image[0x18..0x1c].copy_from_slice(&c.wrapping_add(add).to_le_bytes());
+    Ok(())
+}
+
+impl Idat {
+    /// The row with this bare name, if present.
+    pub fn row(&self, name: &str) -> Option<&Entry> {
+        self.entries.iter().find(|e| e.name == name)
+    }
+
+    /// Add rows to the parsed table. A name that already exists **replaces**
+    /// that entry's tail in place (its position and `name`/`dir` are kept —
+    /// this is the `override_vanilla` case; the *caller* decides whether a
+    /// collision with a shipped row is allowed); a name that does not exist
+    /// **appends** a row. The header pad and every untouched entry's 9-byte
+    /// tail stay verbatim, so a merge that adds nothing serializes
+    /// byte-identically to its input.
+    ///
+    /// Two rows in `rows` carrying the same name are refused — that is a
+    /// caller bug, not a collision policy decision.
+    pub fn add_rows(&mut self, rows: &[NewRow]) -> Result<(), Error> {
+        let mut seen = std::collections::BTreeSet::new();
+        for r in rows {
+            if r.name.is_empty() || r.name.contains('\0') {
+                return Err(Error::Idat(format!(
+                    "new row name must be a nonempty plain name, got {:?}",
+                    r.name
+                )));
+            }
+            if r.dir.contains('\0') {
+                return Err(Error::Idat(format!(
+                    "new row {:?}: dir must not contain NUL",
+                    r.name
+                )));
+            }
+            if !seen.insert(r.name.as_str()) {
+                return Err(Error::Idat(format!(
+                    "two new rows named {:?} in one merge",
+                    r.name
+                )));
+            }
+        }
+        for r in rows {
+            match self.entries.iter_mut().find(|e| e.name == r.name) {
+                Some(e) => e.tail = r.tail(), // replace: keep name/dir/position
+                None => self.entries.push(Entry {
+                    name: r.name.clone(),
+                    dir: r.dir.clone(),
+                    tail: r.tail(),
+                }),
+            }
+        }
+        Ok(())
     }
 }
 
@@ -144,21 +285,7 @@ pub fn serialize(idat: &Idat) -> Vec<u8> {
     out.extend_from_slice(&idat.pad);
     out.extend_from_slice(&(entries.len() as u32).to_le_bytes());
     for e in entries {
-        let size = e.size();
-        let nl = e.name.encode_utf16().count() + 1;
-        let dl = e.dir.encode_utf16().count() + 1;
-        out.extend_from_slice(&(size as u16).to_le_bytes());
-        out.extend_from_slice(&(nl as u16).to_le_bytes());
-        for u in e.name.encode_utf16() {
-            out.extend_from_slice(&u.to_le_bytes());
-        }
-        out.extend_from_slice(&0u16.to_le_bytes()); // NUL terminator
-        out.extend_from_slice(&(dl as u16).to_le_bytes());
-        for u in e.dir.encode_utf16() {
-            out.extend_from_slice(&u.to_le_bytes());
-        }
-        out.extend_from_slice(&0u16.to_le_bytes()); // NUL terminator
-        out.extend_from_slice(&e.tail);
+        write_record(&mut out, &e.name, &e.dir, &e.tail);
     }
     out
 }
@@ -226,5 +353,171 @@ mod tests {
         assert_eq!(e.v1(), 0x0000_3039);
         assert_eq!(e.v2(), 7);
         assert_eq!(e.v3(), 9);
+    }
+
+    fn new_row(name: &str, dir: &str, len: u32, flag: u8, off: u32) -> NewRow {
+        NewRow { name: name.into(), dir: dir.into(), len, flag, off }
+    }
+
+    #[test]
+    fn add_rows_is_identity_when_empty() {
+        let x = idat(
+            PAD_STEAM,
+            vec![
+                entry("_t_a.x", "train\\a", [1, 0, 0, 0, 0, 9, 0, 0, 0]),
+                entry("previewtexture.dir", "rail\\_rlh", [0xff; 9]),
+            ],
+        );
+        let before = serialize(&x);
+        let mut y = x.clone();
+        y.add_rows(&[]).unwrap();
+        assert_eq!(serialize(&y), before, "no rows must round-trip byte-identically");
+        assert_eq!(y, x);
+    }
+
+    #[test]
+    fn add_rows_appends_new_and_synthesizes_the_tail() {
+        let mut x = idat(PAD_STEAM, vec![entry("_t_old.x", "train\\old", [7; 9])]);
+        let old_tail = x.entries[0].tail;
+        x.add_rows(&[new_row("_t_new.x", "train\\new", 12_345, 0, 107_696_939)])
+            .unwrap();
+        assert_eq!(x.entries.len(), 2);
+        // pre-existing row untouched, pad untouched
+        assert_eq!(x.entries[0].tail, old_tail);
+        assert_eq!(x.pad, PAD_STEAM);
+        let n = &x.entries[1];
+        assert_eq!(n.name, "_t_new.x");
+        assert_eq!(n.dir, "train\\new");
+        assert_eq!(n.v1(), 12_345);
+        assert_eq!(n.v2(), 0);
+        assert_eq!(n.v3(), 107_696_939);
+        assert_eq!(n.tail, {
+            let mut t = [0u8; 9];
+            t[0..4].copy_from_slice(&12_345u32.to_le_bytes());
+            t[5..9].copy_from_slice(&107_696_939u32.to_le_bytes());
+            t
+        });
+        // the appended table parses back byte-exactly
+        let ser = serialize(&x);
+        assert_eq!(parse(&ser).unwrap(), x);
+        assert!(x.row("_t_new.x").is_some());
+        assert!(x.row("nope").is_none());
+    }
+
+    #[test]
+    fn add_rows_replaces_an_existing_tail_in_place() {
+        let mut x = idat(
+            PAD_STEAM,
+            vec![
+                entry("_t_van_a.x", "train\\van", [37, 0, 0, 0, 0, 0, 0, 0, 0]),
+                entry("_t_keep.x", "train\\keep", [1, 0, 0, 0, 0, 2, 0, 0, 0]),
+            ],
+        );
+        x.add_rows(&[new_row("_t_van_a.x", "ignored\\dir", 999, 0, 6_000)])
+            .unwrap();
+        assert_eq!(x.entries.len(), 2, "replace does not add a row");
+        let e = &x.entries[0];
+        assert_eq!(e.name, "_t_van_a.x", "name preserved");
+        assert_eq!(e.dir, "train\\van", "dir preserved on replace");
+        assert_eq!(e.v1(), 999);
+        assert_eq!(e.v3(), 6_000);
+        assert_eq!(x.entries[1].tail, [1, 0, 0, 0, 0, 2, 0, 0, 0]);
+    }
+
+    #[test]
+    fn add_rows_refuses_duplicate_names_in_one_call() {
+        let mut x = idat(PAD_DEMO, vec![]);
+        let err = x
+            .add_rows(&[
+                new_row("dup.x", "d", 1, 0, 0),
+                new_row("dup.x", "d", 2, 0, 0),
+            ])
+            .unwrap_err();
+        assert!(err.to_string().contains("two new rows named"), "{err}");
+        assert!(x.entries.is_empty());
+        // empty / NUL names are refused too
+        assert!(x.add_rows(&[new_row("", "d", 1, 0, 0)]).is_err());
+        assert!(x.add_rows(&[new_row("a\0b", "d", 1, 0, 0)]).is_err());
+    }
+
+    #[test]
+    fn new_row_render_matches_the_serializer() {
+        // a row only ever appended (off = |V|) renders EXACTLY like the
+        // equivalent Entry does in serialize()
+        let r = new_row("_t_new.x", "train\\new", 12_345, 0, 64);
+        let eq = entry("_t_new.x", "train\\new", r.tail());
+        assert_eq!(r.to_bytes(), serialize(&idat(PAD_DEMO, vec![eq]))[0x1c..].to_vec());
+        // and the full-image append path round-trips
+        let mut image = serialize(&idat(PAD_STEAM, vec![entry("_t_van_a.x", "train\\van", [37, 0, 0, 0, 0, 0, 0, 0, 0])]));
+        let appended = render_rows(&[r.clone()]);
+        let vanilla_len = image.len();
+        bump_count(&mut image, 1).unwrap();
+        image.extend_from_slice(&appended);
+        let back = parse(&image).unwrap();
+        assert_eq!(back.entries.len(), 2);
+        assert_eq!(back.entries[1].name, "_t_new.x");
+        assert_eq!(back.entries[1].dir, "train\\new");
+        assert_eq!(back.entries[1].v1(), 12_345);
+        assert_eq!(back.entries[1].v3(), 64);
+        // the record starts exactly at the vanilla image's end
+        assert_eq!(image.len() - vanilla_len, appended.len());
+        assert_eq!(&image[vanilla_len..], &appended[..]);
+    }
+
+    /// The tailgate's override mechanism: a duplicate row APPENDED to a
+    /// decoded i.dat image (no in-place rewrite). The game's master map is a
+    /// std::map operator[]-style insert-or-find (the game's map helper at 0x140315840 returns the
+    /// EXISTING node on a name hit and the loader overwrites its value fields
+    /// unconditionally — so a LATER duplicate WINS. This test renders the
+    /// tailgate's exact bytes and replays that last-wins walk.
+    #[test]
+    fn tailgate_duplicate_row_is_last_wins() {
+        // the shipped image carries `x` at (off 100, len 10)
+        let mut image = serialize(&idat(
+            PAD_STEAM,
+            vec![entry("x", "d", {
+                let mut t = [0u8; 9];
+                t[0..4].copy_from_slice(&10u32.to_le_bytes());
+                t[5..9].copy_from_slice(&100u32.to_le_bytes());
+                t
+            })],
+        ));
+        let vanilla_len = image.len();
+        image.extend_from_slice(&render_rows(&[new_row("x", "d", 20, 0, 200)]));
+        bump_count(&mut image, 1).unwrap();
+
+        // the image now parses as two rows (the duplicate included)
+        let back = parse(&image).unwrap();
+        assert_eq!(back.entries.len(), 2);
+        assert_eq!(image.len() - vanilla_len, new_row("x", "d", 20, 0, 200).to_bytes().len());
+
+        // replay the loader: insert-or-find, value fields overwritten each time
+        let mut map: std::collections::BTreeMap<&str, (u32, u32)> =
+            std::collections::BTreeMap::new();
+        for e in &back.entries {
+            map.insert(e.name.as_str(), (e.v3(), e.v1())); // last wins
+        }
+        assert_eq!(map["x"], (200, 20), "the appended duplicate must win");
+    }
+
+    #[test]
+    fn render_rows_is_the_concatenation_in_order() {        let a = new_row("a.x", "d", 1, 0, 10);
+        let b = new_row("b.x", "d", 2, 0, 20);
+        let blob = render_rows(&[a.clone(), b.clone()]);
+        let mut want = a.to_bytes();
+        want.extend_from_slice(&b.to_bytes());
+        assert_eq!(blob, want);
+        assert_eq!(render_rows(&[]), Vec::<u8>::new());
+    }
+
+    #[test]
+    fn bump_count_wraps_and_rejects_short_images() {
+        let mut img = vec![0u8; 0x1c];
+        img[0x18..0x1c].copy_from_slice(&7u32.to_le_bytes());
+        bump_count(&mut img, 3).unwrap();
+        assert_eq!(u32::from_le_bytes(img[0x18..0x1c].try_into().unwrap()), 10);
+        bump_count(&mut img, u32::MAX).unwrap();
+        assert_eq!(u32::from_le_bytes(img[0x18..0x1c].try_into().unwrap()), 9);
+        assert!(bump_count(&mut [0u8; 0x1b], 1).is_err());
     }
 }

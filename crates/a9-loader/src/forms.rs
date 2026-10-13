@@ -6,6 +6,12 @@
 //!   form id.
 //! - allow-list txt: one FORM name per line, `#` comments, trimmed; matching
 //!   is exact and case-sensitive (like the C).
+//!
+//! M5 W3 adds [`compose_filter`]: several mods may each declare a `train_list`
+//! contribution and the loader composes them into ONE keep-bitmap instead of
+//! letting a single mod own the filter.
+
+use a9_mod::manifest::ListMode;
 
 /// Parse the raw UTF-16 FORM list (may include the trailing NUL; parsing stops
 /// at the first NUL). Entry order = form-id order.
@@ -81,6 +87,71 @@ pub fn build_bitmap(forms: &[String], allowed: &[String]) -> BitmapReport {
     }
 }
 
+/// The keep-bit for form id `id` in a filter bitmap (out-of-range ids are
+/// always "not kept", matching `my_filter`).
+#[inline]
+pub fn kept(bitmap: &[u8; FORMS_MAX / 8], id: usize) -> bool {
+    id < FORMS_MAX && bitmap[id >> 3] & (1u8 << (id & 7)) != 0
+}
+
+/// A bitmap keeping every id in `0..forms_len` (capped at [`FORMS_MAX`]).
+pub fn all_forms(forms_len: usize) -> Box<[u8; FORMS_MAX / 8]> {
+    let mut bm = Box::new([0u8; FORMS_MAX / 8]);
+    for i in 0..forms_len.min(FORMS_MAX) {
+        bm[i >> 3] |= 1u8 << (i & 7);
+    }
+    bm
+}
+
+/// Compose every mod's `train_list` contribution into the ONE keep-bitmap the
+/// filter serves (M5 W3 — additive composition across mods).
+///
+/// The **base** is the layer below the contributions:
+/// - if any `Allow` contribution exists, the base is the **union of the allow
+///   lists** — an allow mod declares which forms are offered; with a single
+///   allow mod this is byte-identical to the pre-W3 filter (the shipped
+///   `trainnames` mod);
+/// - else if any `Add` contribution exists, the base is the **shipped purchase
+///   whitelist** (`vanilla`) — a new-train mod says "offer my forms **in
+///   addition to** what the game ships";
+/// - else (only `Deny`) the base is **all** valid forms (the pre-W3 deny
+///   semantics).
+///
+/// Every `Allow`/`Add` list is then unioned into the base and every `Deny`
+/// list is subtracted last, so a `Deny` always wins over an `Allow`/`Add` of
+/// the same form. Order-independent on purpose: a priority tie between two
+/// mods must not change which trains are offered.
+pub fn compose_filter(
+    forms_len: usize,
+    vanilla: &[u8; FORMS_MAX / 8],
+    contribs: &[(ListMode, &[u8; FORMS_MAX / 8])],
+) -> Box<[u8; FORMS_MAX / 8]> {
+    let has_allow = contribs.iter().any(|(m, _)| *m == ListMode::Allow);
+    let has_add = contribs.iter().any(|(m, _)| *m == ListMode::Add);
+    let mut keep = if has_allow {
+        Box::new([0u8; FORMS_MAX / 8])
+    } else if has_add {
+        Box::new(*vanilla)
+    } else {
+        all_forms(forms_len)
+    };
+    for (mode, bm) in contribs {
+        if matches!(mode, ListMode::Allow | ListMode::Add) {
+            for i in 0..keep.len() {
+                keep[i] |= bm[i];
+            }
+        }
+    }
+    for (mode, bm) in contribs {
+        if *mode == ListMode::Deny {
+            for i in 0..keep.len() {
+                keep[i] &= !bm[i];
+            }
+        }
+    }
+    keep
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -136,5 +207,100 @@ mod tests {
         let rep = build_bitmap(&forms, &allowed);
         assert_eq!(rep.matched, 1);
         assert_eq!(rep.unmatched, 2);
+    }
+
+    /// A synthetic bitmap with the listed ids set.
+    fn bm(ids: &[usize]) -> Box<[u8; FORMS_MAX / 8]> {
+        let mut b = Box::new([0u8; FORMS_MAX / 8]);
+        for &i in ids {
+            b[i >> 3] |= 1u8 << (i & 7);
+        }
+        b
+    }
+
+    #[test]
+    fn compose_single_allow_is_exactly_its_list() {
+        // pre-W3 parity: a lone allow mod keeps ONLY its forms
+        let allow = bm(&[3, 7]);
+        let got = compose_filter(10, &bm(&[0, 1, 2]), &[(ListMode::Allow, &*allow)]);
+        assert_eq!(got, allow);
+    }
+
+    #[test]
+    fn compose_two_allows_union() {
+        let a = bm(&[3]);
+        let b = bm(&[5]);
+        let got = compose_filter(10, &bm(&[]), &[(ListMode::Allow, &*a), (ListMode::Allow, &*b)]);
+        assert!(kept(&got, 3) && kept(&got, 5));
+        assert!(!kept(&got, 4), "unlisted forms stay out");
+    }
+
+    #[test]
+    fn compose_add_seeds_from_the_shipped_whitelist() {
+        // a lone `add` mod offers the shipped whitelist + its form
+        let vanilla = bm(&[0, 1, 2]);
+        let add = bm(&[9]);
+        let got = compose_filter(10, &vanilla, &[(ListMode::Add, &*add)]);
+        for i in [0, 1, 2, 9] {
+            assert!(kept(&got, i), "id {i} must be kept");
+        }
+        assert!(!kept(&got, 5));
+        // and it composes with an allow mod: the allow list is the base and
+        // the add is unioned in — the vanilla whitelist is NOT forced back in,
+        // because an allow mod owns the offered set
+        let allow = bm(&[4]);
+        let got = compose_filter(10, &vanilla, &[(ListMode::Allow, &*allow), (ListMode::Add, &*add)]);
+        for i in [4, 9] {
+            assert!(kept(&got, i), "id {i} must be kept");
+        }
+        for i in [0, 1, 2] {
+            assert!(!kept(&got, i), "the allow layer supersedes the vanilla base");
+        }
+    }
+
+    #[test]
+    fn compose_deny_only_keeps_everything_else() {
+        // pre-W3 parity: a lone deny mod keeps all forms but the listed ones
+        let deny = bm(&[2]);
+        let got = compose_filter(5, &bm(&[0, 1]), &[(ListMode::Deny, &*deny)]);
+        for i in [0, 1, 3, 4] {
+            assert!(kept(&got, i));
+        }
+        assert!(!kept(&got, 2));
+        // out-of-range ids are never kept
+        assert!(!kept(&got, FORMS_MAX));
+    }
+
+    #[test]
+    fn compose_deny_beats_allow_and_add() {
+        let allow = bm(&[3, 4]);
+        let add = bm(&[9]);
+        let deny = bm(&[4, 9]);
+        let got = compose_filter(10, &bm(&[0, 1]), &[
+            (ListMode::Allow, &*allow),
+            (ListMode::Add, &*add),
+            (ListMode::Deny, &*deny),
+        ]);
+        assert!(kept(&got, 3));
+        assert!(!kept(&got, 4), "deny removes an allow");
+        assert!(!kept(&got, 9), "deny removes an add");
+    }
+
+    #[test]
+    fn compose_is_order_independent() {
+        let a = bm(&[1, 2]);
+        let b = bm(&[5]);
+        let d = bm(&[2]);
+        let one = compose_filter(8, &bm(&[0]), &[
+            (ListMode::Allow, &*a),
+            (ListMode::Add, &*b),
+            (ListMode::Deny, &*d),
+        ]);
+        let two = compose_filter(8, &bm(&[0]), &[
+            (ListMode::Deny, &*d),
+            (ListMode::Add, &*b),
+            (ListMode::Allow, &*a),
+        ]);
+        assert_eq!(one, two);
     }
 }

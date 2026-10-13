@@ -52,6 +52,35 @@ impl PackServing {
     }
 }
 
+/// How `[[asset]]` new assets (family-A host packs + the `i.dat` index) serve
+/// their content (a9loader.toml `asset_serving`, default "tailgate"):
+/// - `tailgate`: the M5 in-place append — the loader splices the game's one
+///   family-A LZSS decode funnel (vp/tp/i.dat call sites, one same-image relay
+///   cave) and appends the payloads / index rows straight into the shared
+///   workspace's decoded image right after the decode. No re-encode, no cache
+///   file, nothing on disk. (`pack_serving = "inject"` is orthogonal: it only
+///   routes `[[pack]]` family-B effects.)
+/// - `merge`: the M5 W1 cache overlay — decode → append → re-encode the host
+///   pack to `<mods_dir>/cache/` and redirect its `CFile::Open`. The automatic
+///   FALLBACK whenever the tailgate cannot be used (missing anchor/expect
+///   bytes, a failed splice, an unreadable declared size, or a host whose
+///   payloads do not fit the workspace slack).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum AssetServing {
+    Tailgate,
+    Merge,
+}
+
+impl AssetServing {
+    fn parse(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "tailgate" => Some(Self::Tailgate),
+            "merge" => Some(Self::Merge),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Config {
     pub log_level: LogLevel,
@@ -75,6 +104,17 @@ pub struct Config {
     /// default) = the M4 window-scoped famb injector (loader memory, no cache
     /// file), "merge" = the M3 cache overlay
     pub pack_serving: PackServing,
+    /// how [[asset]] new assets serve (see [`AssetServing`]); "tailgate" (the
+    /// default) = the M5 in-place decode append, "merge" = the M5 W1 cache
+    /// overlay
+    pub asset_serving: AssetServing,
+    /// M5-T: the family-A decode workspace's OUT size in MiB. `0` (default) =
+    /// AUTO — replace the game's 200 MB buffer only when the planned family-A
+    /// content (vanilla declared size + appended payloads) does not fit it;
+    /// a value forces that size (the "as much as the machine can take" soft
+    /// limit). The new buffer comes from the game's own `_aligned_malloc` so
+    /// its teardown frees it cleanly, and the out CAP is raised with it.
+    pub workspace_out_mb: u32,
 }
 
 impl Default for Config {
@@ -90,6 +130,8 @@ impl Default for Config {
             warnings: Vec::new(),
             probe_fetch: false,
             pack_serving: PackServing::Inject,
+            asset_serving: AssetServing::Tailgate,
+            workspace_out_mb: 0,
         }
     }
 }
@@ -159,6 +201,18 @@ pub fn read(path: &Path) -> Config {
                 Some(m) => cfg.pack_serving = m,
                 None => cfg.warnings.push(format!(
                     "pack_serving must be merge|inject, got {val:?}"
+                )),
+            },
+            "asset_serving" => match val.as_str().and_then(AssetServing::parse) {
+                Some(m) => cfg.asset_serving = m,
+                None => cfg.warnings.push(format!(
+                    "asset_serving must be tailgate|merge, got {val:?}"
+                )),
+            },
+            "workspace_out_mb" => match val.as_integer() {
+                Some(n) if (0..=3584).contains(&n) => cfg.workspace_out_mb = n as u32,
+                _ => cfg.warnings.push(format!(
+                    "workspace_out_mb must be an integer 0..=3584 (MiB; 0 = auto), got {val:?}"
                 )),
             },
             "disabled" => match val.as_array() {
@@ -279,6 +333,28 @@ jp-liveries = 10
         let cfg = read(&path);
         assert_eq!(cfg.pack_serving, PackServing::Inject); // default on bad value
         assert!(cfg.warnings.iter().any(|w| w.contains("pack_serving")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parses_asset_serving() {
+        let dir = std::env::temp_dir().join("a9ml-cfg-test-asset-serving");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("a9loader.toml");
+        // default is tailgate
+        let cfg = Config::default();
+        assert_eq!(cfg.asset_serving, AssetServing::Tailgate);
+        std::fs::write(&path, "asset_serving = \"merge\"\n").unwrap();
+        let cfg = read(&path);
+        assert_eq!(cfg.asset_serving, AssetServing::Merge);
+        assert!(cfg.warnings.is_empty());
+        std::fs::write(&path, "asset_serving = \"TAILGATE\"\n").unwrap();
+        let cfg = read(&path);
+        assert_eq!(cfg.asset_serving, AssetServing::Tailgate);
+        std::fs::write(&path, "asset_serving = \"yes\"\n").unwrap();
+        let cfg = read(&path);
+        assert_eq!(cfg.asset_serving, AssetServing::Tailgate); // default on bad value
+        assert!(cfg.warnings.iter().any(|w| w.contains("asset_serving")));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
