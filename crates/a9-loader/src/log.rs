@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 
 const MAX_BYTES: u64 = 1_000_000;
 
+#[derive(Clone)]
 pub struct Logger {
     path: PathBuf,
     rotate_pending: bool,

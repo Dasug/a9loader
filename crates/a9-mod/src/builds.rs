@@ -122,6 +122,34 @@ mod tests {
             fc.expect_bytes().unwrap(),
             vec![0xcc; 16]
         );
+        // the M5 tailgate anchors (the family-A decode funnel + its cave)
+        let dec = b.anchor("pack_lzss_decode").unwrap();
+        assert_eq!(dec.rva, 0x314BF0);
+        assert_eq!(
+            dec.expect_bytes().unwrap(),
+            vec![0x41, 0x54, 0x41, 0x56, 0x41, 0x57, 0xb8, 0x60, 0x10, 0x00, 0x00]
+        );
+        let vp = b.anchor("pack_lzss_vp_call").unwrap();
+        assert_eq!(vp.rva, 0x3F1434);
+        assert_eq!(vp.expect_bytes().unwrap(), vec![0xe8, 0xb7, 0x37, 0xf2, 0xff]);
+        let tp = b.anchor("pack_lzss_tp_call").unwrap();
+        assert_eq!(tp.rva, 0x3F0F4D);
+        assert_eq!(tp.expect_bytes().unwrap(), vec![0xe8, 0x9e, 0x3c, 0xf2, 0xff]);
+        let idat = b.anchor("pack_lzss_idat_call").unwrap();
+        assert_eq!(idat.rva, 0x31516F);
+        assert_eq!(idat.expect_bytes().unwrap(), vec![0xe8, 0x7c, 0xfa, 0xff, 0xff]);
+        let mcp = b.anchor("pack_lzss_mcp_call").unwrap();
+        assert_eq!(mcp.rva, 0x3EE93A);
+        assert_eq!(mcp.expect_bytes().unwrap(), vec![0xe8, 0xb1, 0x62, 0xf2, 0xff]);
+        let ep = b.anchor("pack_lzss_ep_call").unwrap();
+        assert_eq!(ep.rva, 0x3EFC16);
+        assert_eq!(ep.expect_bytes().unwrap(), vec![0xe8, 0xd5, 0x4f, 0xf2, 0xff]);
+        let cp = b.anchor("pack_lzss_cp_call").unwrap();
+        assert_eq!(cp.rva, 0x3EF326);
+        assert_eq!(cp.expect_bytes().unwrap(), vec![0xe8, 0xc5, 0x58, 0xf2, 0xff]);
+        let cav = b.anchor("pack_lzss_cave").unwrap();
+        assert_eq!(cav.rva, 0x5A1D13);
+        assert_eq!(cav.expect_bytes().unwrap(), vec![0xcc; 16]);
     }
 
     #[test]

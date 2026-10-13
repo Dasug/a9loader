@@ -41,6 +41,11 @@ mod patch; // VirtualProtect write helpers + patch recipes
 mod probe; // M4: the runtime fetch probe (probe_fetch = true diagnostics)
 #[cfg(target_os = "windows")]
 mod sys; // minimal hand-declared Win32 + readability guards
+#[cfg(target_os = "windows")]
+mod tailgate; // M5: the family-A in-place decode append ([[asset]] serving)
+
+#[cfg(target_os = "windows")]
+mod workspace; // M5-T: the family-A decode workspace swap (capacity ceiling)
 
 #[cfg(target_os = "windows")]
 #[unsafe(no_mangle)]

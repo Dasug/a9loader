@@ -15,6 +15,9 @@
 //!   (entry-table stream), `tools/repack.py` semantics.
 //! - [`container`] — the two family-B container shapes: image packs
 //!   (`rebuild_livery_packs.py`) and the 0x204 CSV variant (`build_csvp_ascii.py`).
+//! - [`csv`] — the UTF-16 CSV tables inside `csvp`: verbatim-preserving parse
+//!   plus the row-level merge (row identity = the first column) that lets two
+//!   mods edit one table without whole-table conflicts (M5 W2).
 //! - [`idat`] — the `i.dat` master index (`tools/i_parse.py`, verified
 //!   byte-identical round-trip).
 //! - [`savegame`] — plaintext zlib members of `.a9d`/`.a9d5` saves
@@ -26,6 +29,7 @@ pub mod add;
 pub mod overlay;
 pub mod container;
 pub mod crypt;
+pub mod csv;
 pub mod idat;
 pub mod lzss;
 pub mod pack;

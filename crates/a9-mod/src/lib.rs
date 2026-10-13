@@ -10,6 +10,7 @@
 pub mod buildid;
 pub mod builds;
 pub mod config;
+pub mod dirindex;
 pub mod hex;
 pub mod manifest;
 pub mod resolve;

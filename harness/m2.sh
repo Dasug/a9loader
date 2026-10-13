@@ -147,11 +147,33 @@ check "filter bytes untouched" "unchanged (PASS)"            "$scen_dir/out.txt"
 check "unknown build refused"   "unknown build 5.00.9999"     "$scen_dir/mods/a9loader.log"
 check "no memory effects"       "no memory effects"           "$scen_dir/mods/a9loader.log"
 
-echo "== S5: overlap -> later mod refused, first keeps target"
-new_scen s5-overlap host.exe kept
-mod aa-first \
-    'id = "aa-first"' \
-    'name = "First"' \
+echo "== S5: train_list add — offer a form ON TOP of the shipped whitelist"
+new_scen s5-add host.exe kept
+# the harness host's whitelist table carries the two real entries the address
+# book fingerprints (95 = FORM_AR3, 187 = FORM_AR9X); an `add` contribution
+# seeds from that shipped table, so the result is baseline ∪ list.
+mod addone \
+    'id = "addone"' \
+    'name = "Add one"' \
+    'version = "1.0.0"' \
+    'author = "test"' \
+    '' \
+    '[[hook]]' \
+    'target = "train_list_filter"' \
+    'handler = "train_list"' \
+    'mode = "add"' \
+    'list = "add.txt"'
+printf 'FORM_0\n' > "$scen_dir/mods/addone/add.txt"
+run_host
+check "shipped whitelist + FORM_0 (kept 4)" "kept 4 / 1024"           "$scen_dir/out.txt"
+check "add composition journaled"          "add baseline = the shipped whitelist: 3 forms" "$scen_dir/mods/a9loader.log"
+check "contribution journaled"             "train_list contribution 'addone': mode=add" "$scen_dir/mods/a9loader.log"
+
+echo "== S5b: two train_list mods compose (allow ∪ allow, no overlap)"
+new_scen s5b-two-allow host.exe kept
+mod allowa \
+    'id = "allowa"' \
+    'name = "Allow A"' \
     'version = "1.0.0"' \
     'author = "test"' \
     'priority = 10' \
@@ -159,11 +181,12 @@ mod aa-first \
     '[[hook]]' \
     'target = "train_list_filter"' \
     'handler = "train_list"' \
-    'list = "atrain9_filter_model.txt"'
-cp "$GAME_DIR/atrain9_filter_model.txt" "$scen_dir/mods/aa-first/"
-mod bb-second \
-    'id = "bb-second"' \
-    'name = "Second"' \
+    'mode = "allow"' \
+    'list = "a.txt"'
+printf 'FORM_0\n' > "$scen_dir/mods/allowa/a.txt"
+mod allowb \
+    'id = "allowb"' \
+    'name = "Allow B"' \
     'version = "1.0.0"' \
     'author = "test"' \
     'priority = 20' \
@@ -171,12 +194,74 @@ mod bb-second \
     '[[hook]]' \
     'target = "train_list_filter"' \
     'handler = "train_list"' \
-    'list = "atrain9_filter.txt"'
-cp "$GAME_DIR/atrain9_filter.txt" "$scen_dir/mods/bb-second/"
+    'mode = "allow"' \
+    'list = "b.txt"'
+printf 'FORM_113\n' > "$scen_dir/mods/allowb/b.txt"
 run_host
-check "first mod wins (kept 341)" "kept 341 / 1024"        "$scen_dir/out.txt"
-check "overlap reported"          "overlap on hook:train_list_filter" "$scen_dir/mods/a9loader.log"
-check "loser refused"             "refused (overlap loser)"  "$scen_dir/mods/a9loader.log"
+check "union of both allow lists (kept 2)" "kept 2 / 1024"  "$scen_dir/out.txt"
+check "two contributions composed"         "composed 2 contribution(s)" "$scen_dir/mods/a9loader.log"
+checkf "no false overlap" sh -c "! grep -q 'overlap on hook:train_list_filter' '$scen_dir/mods/a9loader.log'"
+
+echo "== S5c: an add composes with an allow (allow owns the set, add unions in)"
+new_scen s5c-add-allow host.exe kept
+mod allowc \
+    'id = "allowc"' \
+    'name = "Allow C"' \
+    'version = "1.0.0"' \
+    'author = "test"' \
+    'priority = 10' \
+    '' \
+    '[[hook]]' \
+    'target = "train_list_filter"' \
+    'handler = "train_list"' \
+    'mode = "allow"' \
+    'list = "c.txt"'
+printf 'FORM_113\n' > "$scen_dir/mods/allowc/c.txt"
+mod addc \
+    'id = "addc"' \
+    'name = "Add C"' \
+    'version = "1.0.0"' \
+    'author = "test"' \
+    'priority = 20' \
+    '' \
+    '[[hook]]' \
+    'target = "train_list_filter"' \
+    'handler = "train_list"' \
+    'mode = "add"' \
+    'list = "d.txt"'
+printf 'FORM_0\n' > "$scen_dir/mods/addc/d.txt"
+run_host
+check "allow ∪ add (kept 2, whitelist superseded)" "kept 2 / 1024" "$scen_dir/out.txt"
+
+echo "== S5d: a train_list and a nop still conflict on the seam (one writer)"
+new_scen s5d-seam-conflict host.exe kept
+mod tled \
+    'id = "tled"' \
+    'name = "TL"' \
+    'version = "1.0.0"' \
+    'author = "test"' \
+    'priority = 10' \
+    '' \
+    '[[hook]]' \
+    'target = "train_list_filter"' \
+    'handler = "train_list"' \
+    'mode = "allow"' \
+    'list = "e.txt"'
+printf 'FORM_0\n' > "$scen_dir/mods/tled/e.txt"
+mod noper \
+    'id = "noper"' \
+    'name = "Nop"' \
+    'version = "1.0.0"' \
+    'author = "test"' \
+    'priority = 20' \
+    '' \
+    '[[hook]]' \
+    'target = "train_list_filter"' \
+    'handler = "nop"'
+run_host
+check "first (train_list) keeps the seam" "kept 1 / 1024"                    "$scen_dir/out.txt"
+check "overlap reported"                  "overlap on hook:train_list_filter" "$scen_dir/mods/a9loader.log"
+check "nop refused"                       "refused (overlap loser)"          "$scen_dir/mods/a9loader.log"
 
 echo "== S6: requires / conflicts resolution"
 new_scen s6-deps host.exe nop
