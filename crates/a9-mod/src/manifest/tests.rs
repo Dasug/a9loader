@@ -80,22 +80,40 @@ fn unknown_fields_refuse_the_mod() {
     let err = parse(&bad).unwrap_err().to_string();
     assert!(err.contains("unknown field"), "{err}");
     // [native] (mods that ship code) lands post-M4 — unknown field here
-    // (the scan path adds the milestone pointer)
+    // (Manifest::parse adds the milestone pointer)
     let bad = GOOD.to_owned() + "\n[native]\nabi = 1\n";
     let err = parse(&bad).unwrap_err().to_string();
     assert!(err.contains("unknown field `native`"), "{err}");
     // the M3 sections are supported now and must parse
     let m3 = GOOD.to_owned()
         + "\n[[pack]]\npack = \"mtentr0\"\n\n[[pack.entry]]\nname = \"_d_x.dds\"\nwidth = 1\nheight = 2\nfile = \"e/x.dds\"\n"
-        + "\n[[csv]]\nname = \"train_form.csv\"\nfile = \"csv/train_form.csv\"\n"
-        + "\n[[file]]\ndest = \"data/texture/x.dds\"\nfile = \"files/x.dds\"\n";
+        + "\n[[csv]]\nname = \"train_form.csv\"\nfile = \"csv/train_form.csv\"\n";
     let m = parse(&m3).unwrap();
     m.validate().unwrap();
     assert_eq!(m.pack.len(), 1);
     assert_eq!(m.pack[0].entry.len(), 1);
     assert_eq!(m.pack[0].entry[0].width, 1);
     assert_eq!(m.csv.len(), 1);
-    assert_eq!(m.file.len(), 1);
+}
+
+#[test]
+fn retired_file_section_refuses_with_a_pointer() {
+    // The strict schema (deny_unknown_fields) still refuses the section …
+    let bad = GOOD.to_owned()
+        + "\n[[file]]\ndest = \"data/texture/x.dds\"\nfile = \"files/x.dds\"\n";
+    assert!(parse(&bad).is_err(), "raw toml must refuse the retired section");
+    // … and Manifest::parse names it, points at the replacements, and says
+    // the loader no longer writes into the game folder.
+    let err = Manifest::parse(&bad).unwrap_err().to_string();
+    assert!(err.contains("[[file]] is retired"), "{err}");
+    assert!(err.contains("no longer writes into the game folder"), "{err}");
+    assert!(err.contains("[[asset]]"), "{err}");
+    assert!(err.contains("[[loose_asset]]"), "{err}");
+    // [native] keeps its own milestone pointer through the same path
+    let native = Manifest::parse(&(GOOD.to_owned() + "\n[native]\nabi = 1\n"))
+        .unwrap_err()
+        .to_string();
+    assert!(native.contains("lands with M4+"), "{native}");
 }
 
 #[test]
@@ -133,14 +151,6 @@ fn m3_section_validation_rejects_the_expected_classes() {
     assert!(parse("\nid=\"x\"\nname=\"X\"\nversion=\"1.0.0\"\nauthor=\"a\"\n[[csv]]\nname=\"t.csv\"\nfile=\"f\"\nmode=\"cells\"\n").is_err());
     // `row_keys` is derived state — authoring it is refused (skipped field)
     assert!(parse("\nid=\"x\"\nname=\"X\"\nversion=\"1.0.0\"\nauthor=\"a\"\n[[csv]]\nname=\"t.csv\"\nfile=\"f\"\nrow_keys=[\"R1\"]\n").is_err());
-    // file dest escaping the game dir (TOML needs \\ for a literal backslash)
-    for dest in ["/abs/x.dds", "C:\\\\x.dds", "data/../../x.dds"] {
-        let m = parse(&format!("\nid=\"x\"\nname=\"X\"\nversion=\"1.0.0\"\nauthor=\"a\"\n[[file]]\ndest=\"{dest}\"\nfile=\"f\"\n")).unwrap();
-        assert!(m.validate().is_err(), "dest {dest} must be refused");
-    }
-    // duplicate file dests
-    let m = parse("\nid=\"x\"\nname=\"X\"\nversion=\"1.0.0\"\nauthor=\"a\"\n[[file]]\ndest=\"data/x.dds\"\nfile=\"f\"\n[[file]]\ndest=\"data/x.dds\"\nfile=\"g\"\n").unwrap();
-    assert!(m.validate().unwrap_err().to_string().contains("two [[file]]"));
 }
 
 #[test]

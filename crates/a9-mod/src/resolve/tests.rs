@@ -140,7 +140,7 @@
 
     #[test]
     fn train_list_hooks_compose_without_overlap() {
-        // two train_list contributions are composable (M5 W3): no overlap, so
+        // two train_list contributions are composable: no overlap, so
         // the engine folds both into one filter install
         let a = tl_on("a", "allow", "a.txt");
         let b = tl_on("b", "add", "b.txt");
@@ -180,15 +180,11 @@
         );
         let res = resolve(&vec![b2, a], &ResolveConfig::default());
         assert!(res.overlaps.is_empty());
-        // csv + file dests overlap too
+        // csv table dests overlap too
         let c1 = build("c1", 10, "[[csv]]\nname = \"t.csv\"\nfile = \"t.csv\"\n");
         let c2 = build("c2", 20, "[[csv]]\nname = \"t.csv\"\nfile = \"u.csv\"\n");
         let res = resolve(&vec![c2, c1], &ResolveConfig::default());
         assert_eq!(res.overlaps[0].key, "csv:t.csv");
-        let f1 = build("f1", 10, "[[file]]\ndest = \"data/x.dds\"\nfile = \"x.dds\"\n");
-        let f2 = build("f2", 20, "[[file]]\ndest = \"data/x.dds\"\nfile = \"y.dds\"\n");
-        let res = resolve(&vec![f2, f1], &ResolveConfig::default());
-        assert_eq!(res.overlaps[0].key, "file:data/x.dds");
         // two mods adding the same NEW asset name: overlap, earlier wins,
         // no hard error (the loser's op is skipped by the engine)
         let a1 = build("a1", 10, "[[asset]]\nname=\"_t_dup_a.x\"\ndir=\"train\\\\dup\"\nhost=\"vp\"\nfile=\"x.x\"\n");

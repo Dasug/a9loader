@@ -20,7 +20,7 @@
 //! [`build_gate`], [`scan_and_resolve`], [`apply_memory_effects`], the
 //! [`PlanBuilder`] data plan, [`install_inject`], [`install_overlay`],
 //! [`install_probe`] — and the tailgate/listing planning lives in
-//! [`tailgate_plan`], the journal + final count line in [`report`].
+//! [`tailgate_plan`], the final count line in [`report`].
 
 mod plan;
 mod report;
@@ -94,23 +94,17 @@ pub unsafe fn boot(hinst: sys::HMODULE) {
     let (applied, refused) =
         unsafe { apply_memory_effects(&manifests, &dirs, &res, &build_id, &entry, base, &logger) };
 
-    // ---- data effects (M3/M4): [[pack]]/[[csv]] serving + [[file]] boot copies
+    // ---- data effects (M3/M4): [[pack]]/[[csv]] serving
     // pack_serving == "inject" routes family-B [[pack]] effects through the
     // M4 window-scoped injector instead of the merge overlay; [[csv]] keeps
-    // the M3 merge mechanism in both modes; [[file]] copies are unaffected.
+    // the M3 merge mechanism in both modes.
     let inject_mode = cfg.pack_serving == a9_mod::config::PackServing::Inject;
     let mut builder = PlanBuilder::new(&res, &build_id, inject_mode, &logger);
     for &i in &res.order {
         builder.add_mod(i, &manifests[i], &dirs[i]);
     }
-    let (mut plan, mut inject_plan, file_copies, refused_data) = builder.finish();
+    let (mut plan, mut inject_plan, refused_data) = builder.finish();
     let refused = refused + refused_data;
-
-    // [[file]] copies — genuinely-new files, before the game enumerates
-    // anything (we run before main); idempotent, never overwrites
-    for (mod_id, f, mod_dir) in &file_copies {
-        report::copy_file_effect(mod_id, f, mod_dir, &exe_dir, &mods_dir, &logger);
-    }
 
     note_asset_serving(&cfg, &plan, &logger);
 
@@ -169,7 +163,7 @@ pub unsafe fn boot(hinst: sys::HMODULE) {
         install_save_probe(&entry, base, &mods_dir, &logger);
     }
 
-    logger.line(&report::result_line(applied, refused, file_copies.len()));
+    logger.line(&report::result_line(applied, refused));
 }
 
 /// The `config:` log line (mods dir, conflicts mode, log level, serving modes).
@@ -249,7 +243,7 @@ fn scan_and_resolve(
             }
             Ok(m) => {
                 logger.line(&format!(
-                    "mod: {} v{} by {} ({} patch, {} hook, {} pack entr{}, {} csv, {} asset, {} file, {} loose)",
+                    "mod: {} v{} by {} ({} patch, {} hook, {} pack entr{}, {} csv, {} asset, {} loose)",
                     m.id,
                     m.version,
                     m.author,
@@ -263,7 +257,6 @@ fn scan_and_resolve(
                     },
                     m.csv.len(),
                     m.asset.len(),
-                    m.file.len(),
                     m.loose_asset.len()
                 ));
                 manifests.push(m.clone());

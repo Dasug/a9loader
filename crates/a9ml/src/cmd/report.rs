@@ -263,7 +263,7 @@ fn print_mod(
     let classify_rows = classify::classify_manifest(m);
     if classify_rows.is_empty() {
         if m.loose_asset.is_empty() {
-            println!("    classify: (no [[pack]]/[[csv]]/[[asset]]/[[file]]/[[loose_asset]] data effects)");
+            println!("    classify: (no [[pack]]/[[csv]]/[[asset]]/[[loose_asset]] data effects)");
         }
     } else {
         println!(
@@ -491,9 +491,6 @@ fn print_mod_verbose(
                 CsvMode::Rows => "rows",
             }
         );
-    }
-    for f in &m.file {
-        println!("    [[file]] {} <- {}", f.dest, f.file);
     }
     for l in &m.loose_asset {
         println!("    [[loose_asset]] match \"{}\" <- {}", l.match_, l.file);

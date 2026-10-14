@@ -338,8 +338,8 @@ fn load_manifest(mod_dir: &Path) -> Result<Manifest> {
     let manifest_path = mod_dir.join("mod.toml");
     let text = std::fs::read_to_string(&manifest_path)
         .with_context(|| format!("reading {}", manifest_path.display()))?;
-    let mut m: Manifest =
-        toml::from_str(&text).with_context(|| format!("parsing {}", manifest_path.display()))?;
+    let mut m: Manifest = Manifest::parse(&text)
+        .map_err(|e| anyhow::anyhow!("{}: {e}", manifest_path.display()))?;
     m.validate().map_err(|e| anyhow::anyhow!("{}: {e}", manifest_path.display()))?;
     a9_mod::scan::expand_asset_folders(&mut m, mod_dir)
         .map_err(|e| anyhow::anyhow!("{}: {e}", manifest_path.display()))?;

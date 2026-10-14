@@ -221,7 +221,7 @@ fn apply_conflicts(
 
 /// Step 6 — overlaps: same target key written by two enabled mods
 /// (memory effects: anchors/raw targets; data effects: pack entries,
-/// csv tables, file destinations). `train_list` hooks are the one
+/// csv tables). `train_list` hooks are the one
 /// composable effect: several mods may contribute forms and the loader
 /// composes them (M5 W3), so a group made ONLY of train_list hooks is
 /// not an overlap. A train_list vs a `nop` (or two `nop`s) still is.
@@ -260,9 +260,6 @@ fn collect_overlaps(res: &mut Resolution, enabled: &[usize], mods: &[Manifest]) 
             } else {
                 own(format!("csv:{}", c.name), i, false);
             }
-        }
-        for f in &mods[i].file {
-            own(format!("file:{}", f.dest), i, false);
         }
         for l in &mods[i].loose_asset {
             // the effect key lowercases the pattern: the same pattern from two

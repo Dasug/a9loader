@@ -59,7 +59,7 @@ fn write_entry_payload(out: &Path, e: &ImageEntry) -> Result<(PackEntry, usize)>
     ))
 }
 
-/// Write `mod.toml` for a generated mod (empty `[[asset]]`/`[[file]]` etc.).
+/// Write `mod.toml` for a generated mod (empty `[[asset]]`/`[[loose_asset]]` etc.).
 fn write_mod(
     out: &Path,
     id: &str,
@@ -87,7 +87,6 @@ fn write_mod(
         pack,
         csv,
         asset: Vec::new(),
-        file: Vec::new(),
         loose_asset: Vec::new(),
     };
     m.validate().map_err(|e| anyhow::anyhow!("generated manifest invalid: {e}"))?;
