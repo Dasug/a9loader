@@ -1927,7 +1927,33 @@ static int mode_rows(const char *scen)
  * accessor, print the composed-filter verdict for its reserved id, open
  * data\csvp.bin through the (hooked) CFile::Open so the overlay merges the
  * derived rows, and dump the merged tables. */
-static int mode_train(const char *scen)
+/* M7-2 retry scenario: mark the FORM_KH32 donor row valid with the lane shape
+ * the clone fix exercises. A live boot showed the builder is called more than
+ * once per boot and the FIRST call happens before the CSV pipeline populates
+ * the rows, so the loader must defer and retry — the `train_retry` mode below
+ * fires phase 1 with this helper deliberately NOT yet called. */
+static void train_populate_donor(void)
+{
+    int id = form_id_of(L"FORM_KH32");
+    if (id >= 0 && id < (int)ROWS_TABLE_N) {
+        unsigned char *r = g_rows_base + (size_t)id * ROWS_ROW_STRIDE;
+        static wchar_t djp[] = L"DONOR_JP";
+        static wchar_t den[] = L"DONOR_EN";
+        static wchar_t dfn[] = L"FORM_KH32";
+        r[0] = 1;
+        r[0x38] = 1;
+        *(void **)(r + ROWS_NAME_JP) = djp;
+        *(void **)(r + ROWS_NAME_EN) = den;
+        *(void **)(r + ROWS_NAME_JP + 2 * 8) = djp;
+        *(void **)(r + ROWS_NAMEALT) = djp;
+        *(void **)(r + ROWS_PFORMNAME) = dfn;
+        printf("train: donor row %d (FORM_KH32) populated\n", id);
+    } else {
+        printf("train: WARN: FORM_KH32 not found in the FORM list\n");
+    }
+}
+
+static int mode_train(const char *scen, int retry)
 {
     HMODULE v = GetModuleHandleA("version.dll");
     if (!v) { printf("FAIL: version.dll not loaded\n"); return 1; }
@@ -1937,35 +1963,22 @@ static int mode_train(const char *scen)
     m7dump_fn dump = (m7dump_fn)(void *)GetProcAddress(v, "a9loader_m7_dump");
     if (!kept || !dump) { printf("FAIL: the M7-2 exports are missing\n"); return 1; }
 
-    /* the donor row must be populated BEFORE the injection (the FORM list is
-     * mapped now, after the load) — mark the FORM_KH32 row valid with the lane
-     * shape the clone-fix exercises. */
-    {
-        int id = form_id_of(L"FORM_KH32");
-        if (id >= 0 && id < (int)ROWS_TABLE_N) {
-            unsigned char *r = g_rows_base + (size_t)id * ROWS_ROW_STRIDE;
-            static wchar_t djp[] = L"DONOR_JP";
-            static wchar_t den[] = L"DONOR_EN";
-            static wchar_t dfn[] = L"FORM_KH32";
-            r[0] = 1;
-            r[0x38] = 1;
-            *(void **)(r + ROWS_NAME_JP) = djp;
-            *(void **)(r + ROWS_NAME_EN) = den;
-            *(void **)(r + ROWS_NAME_JP + 2 * 8) = djp;
-            *(void **)(r + ROWS_NAMEALT) = djp;
-            *(void **)(r + ROWS_PFORMNAME) = dfn;
-            printf("train: donor row %d (FORM_KH32) populated\n", id);
-        } else {
-            printf("train: WARN: FORM_KH32 not found in the FORM list\n");
-        }
-    }
-
     BYTE *m = (BYTE *)g_base + RVA_MGR;
     void *vec = m + 0x18;
 
     /* fire the injection by calling the site (the loader hooked it) */
     typedef void (*tlb_fn)(void *);
-    ((tlb_fn)(g_base + RVA_TLB))((void *)m);
+    if (retry) {
+        /* the live shape: the first call happens before the rows are filled */
+        ((tlb_fn)(g_base + RVA_TLB))((void *)m);
+        printf("train: retry phase 1 fired with the donor unpopulated\n");
+        train_populate_donor();
+        ((tlb_fn)(g_base + RVA_TLB))((void *)m);
+        printf("train: retry phase 2 fired with the donor populated\n");
+    } else {
+        train_populate_donor();
+        ((tlb_fn)(g_base + RVA_TLB))((void *)m);
+    }
     printf("train: builder calls=%u clone_ref calls=%u\n", g_tlb_calls, g_clone_calls);
 
     unsigned char *b = *(unsigned char **)vec;
@@ -2300,7 +2313,8 @@ int main(int argc, char **argv)
     if (!strcmp(mode, "save")) return mode_save();
     if (!strcmp(mode, "clamp")) return mode_clamp();
     if (!strncmp(mode, "rows", 4)) return mode_rows(mode);
-    if (!strcmp(mode, "train") || !strcmp(mode, "train-nodump")) return mode_train(mode);
+    if (!strcmp(mode, "train") || !strcmp(mode, "train-nodump")) return mode_train(mode, 0);
+    if (!strcmp(mode, "train_retry")) return mode_train(mode, 1);
     if (!strcmp(mode, "inject")) return mode_inject();
     if (!strcmp(mode, "tailgate") || !strcmp(mode, "tailgate-mismatch")
         || !strcmp(mode, "tailgate-ws"))

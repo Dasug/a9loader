@@ -523,6 +523,10 @@ struct TrainState {
     rows: Vec<(usize, TrainRow)>,
     tramp: Option<patch::Trampoline>,
     done: bool,
+    /// how many `train_list_builder` calls have been seen, and whether the
+    /// "not ready yet" warning has been emitted (once per boot)
+    attempts: u32,
+    warned: bool,
 }
 
 static TG: OnceLock<Mutex<TrainState>> = OnceLock::new();
@@ -622,6 +626,8 @@ pub unsafe fn install_trains(
             rows,
             tramp: None,
             done: false,
+            attempts: 0,
+            warned: false,
         }));
         let m = TG.get().unwrap();
         let mut g = m.lock().map_err(|_| "train state lock poisoned".to_string())?;
@@ -644,6 +650,16 @@ pub unsafe fn install_trains(
 
 /// The `train_list_builder` hook: inject once (fail-open), then run the
 /// original so it walks the grown vector through the composed keep-set.
+///
+/// The builder is called more than once per boot, and the FIRST call happens
+/// before the CSV pipeline has populated the spec rows — a live boot proved it
+/// (`donor row 195 (FORM_KH32) is not populated yet (bValid == 0)`), which the
+/// harness could not see because its fake host only ever calls the site once
+/// with the rows already populated. So a refusal is treated as "not ready yet":
+/// it is logged once at warn level and RETRIED at the next call, and the
+/// injection lands on the first call whose list build can actually include the
+/// row. Structural failures therefore cost a warning per boot rather than a
+/// silent nothing.
 unsafe extern "system" fn my_train_list_builder(manager: *mut u8) {
     unsafe {
         // inject once, WITHOUT the lock held across the original
@@ -651,24 +667,33 @@ unsafe extern "system" fn my_train_list_builder(manager: *mut u8) {
             let Some(m) = TG.get() else { return };
             let Ok(mut g) = m.lock() else { return };
             if !g.done {
-                // only inject when the vector is still exactly 421 rows AND the
-                // donor row is populated (the pipeline's fill loop has run)
+                g.attempts += 1;
                 match inject_trains_locked(&g) {
                     Ok(n) => {
                         g.done = true;
                         let logger = g.logger.clone();
+                        let attempts = g.attempts;
                         logger.line(&format!(
                             "train injection: grew the spec vector by {n} row(s) and \
-                             wrote the reserved rows through the game's own realloc"
+                             wrote the reserved rows through the game's own realloc \
+                             (attempt {attempts} of the builder hook)"
                         ));
                     }
                     Err(e) => {
-                        g.done = true; // do not retry every call
                         let logger = g.logger.clone();
-                        logger.err(&format!(
-                            "train injection refused: {e} — the spec vector is \
-                             untouched (fail-open)"
+                        logger.debug(&format!(
+                            "train injection: not ready at builder call {}: {e} — will \
+                             retry at the next call",
+                            g.attempts
                         ));
+                        if !g.warned {
+                            g.warned = true;
+                            logger.warn(&format!(
+                                "train injection deferred: {e} — retrying at the next \
+                                 train_list_builder call; if the reserved rows never \
+                                 appear, no call found the spec rows populated"
+                            ));
+                        }
                     }
                 }
             }
