@@ -1,12 +1,12 @@
-//! The M5 family-A **tailgate** — disk-free serving of `[[asset]]` new
+//! The family-A **tailgate** — disk-free serving of `[[asset]]` new
 //! assets. Instead of decode → append → re-encode a host pack into a cache
-//! file and redirect its open (the M5 W1 merge), the tailgate splices the
+//! file and redirect its open (the merge route), the tailgate splices the
 //! game's ONE family-A LZSS decode funnel and appends our bytes into the
 //! shared workspace's decoded image **right after the decode**, so the
 //! consumers (which run immediately after in the same boot window) see them.
 //! No re-encode, no cache file, nothing on disk.
 //!
-//! # Machine facts this stub is built on (RE doc `/tmp/opencode/m5-round3/family-a-serving.md`)
+//! # Machine facts this stub is built on
 //!
 //! * the funnel is `pack_lzss_decode` (builds.toml `pack_lzss_decode`,
 //!   ABI `RCX=dest, RDX=&u32 cap-in/len-out, R8=src (inBuf+0x14), R9D=srclen`,
@@ -14,7 +14,7 @@
 //! * the family-A loaders we serve (`vp`, `tp`, `mcp`, `ep`, `cp`, `i.dat`)
 //!   each reach it through one `E8` (the `pack_lzss_*_call` sites in
 //!   builds.toml); the splice rewrites that `E8`'s rel32 to a same-image relay
-//!   cave (one cave, `FF 25` + imm64) that jumps into our dll — exactly the M4
+//!   cave (one cave, `FF 25` + imm64) that jumps into our dll — the same
 //!   famb splice, via [`crate::patch`];
 //! * nothing validates the decoded length against the declared-size word
 //!   (`inBuf+0x10`), nothing re-scans, and no loader ever reads that word — so
@@ -49,9 +49,9 @@
 //!
 //! The game's decoder decodes the staged input to EXHAUSTION, so it normally
 //! produces a few bytes MORE than the declared size (measured live: vp +119,
-//! tp +45, i.dat +21 — a deterministic per-file delta, memory #312). Those
+//! tp +45, i.dat +21 — a deterministic per-file delta). Those
 //! trailing bytes are decoder junk: they sit past every i.dat row's
-//! `(off, len)` window (the M1 row sweep proved every row fits inside the
+//! `(off, len)` window (a sweep of the real file proved every row fits inside the
 //! declared size), so no consumer ever reads them. The stub therefore appends
 //! at the **declared** base — which is exactly what the rows say — and simply
 //! overwrites that junk (it logs the delta). Appending at the runtime end
@@ -80,7 +80,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// `pack_lzss_decode` ABI: `(dest, &cap, src, srclen) -> AL`.
 type DecodeFn = unsafe extern "system" fn(*mut u8, *mut u32, *const u8, u32) -> u8;
 
-/// `DAT_144f86088` — the shared decode workspace's OUT pointer (200 MB). The
+/// 0x144f86088 — the shared decode workspace's OUT pointer (200 MB). The
 /// loaders re-read it right before each decode; the stub checks the `dest` it
 /// was handed is that workspace before writing.
 const WORKSPACE_OUT_RVA: usize = 0x4F86088;
@@ -275,6 +275,23 @@ unsafe extern "system" fn tailgate_stub(
         if hp.failed.load(Ordering::Relaxed) {
             return al;
         }
+        append_host(inner, hp, dest, cap, src, al)
+    }
+}
+
+/// The post-decode validation: the decoded length must reach the plan's
+/// declared base, the destination must be the shared workspace, and the whole
+/// append range must be live — then commit. Total: every refusal logs and
+/// returns the decoder's own `AL`.
+unsafe fn append_host(
+    inner: &Inner,
+    hp: &HostPlan,
+    dest: *mut u8,
+    cap: *mut u32,
+    src: *const u8,
+    al: u8,
+) -> u8 {
+    unsafe {
         // the decoded length is now in *cap; the plan used the vanilla
         // declared size. They must agree or the i.dat rows would dangle.
         if cap.is_null() {
@@ -284,9 +301,9 @@ unsafe extern "system" fn tailgate_stub(
         // The plan's append base is the vanilla DECLARED size. The game's
         // decoder decodes the staged input to EXHAUSTION, so it normally
         // produces a few bytes MORE than declared (live vp +119, tp +45,
-        // i.dat +21 — memory #312): those extra bytes are decoder tail junk
-        // that sits past every i.dat row's (off, len) window (the M1 row
-        // sweep proved every row fits inside `declared`), so nothing reads
+        // i.dat +21): those extra bytes are decoder tail junk
+        // that sits past every i.dat row's (off, len) window (a sweep of the real file
+        // proved every row fits inside `declared`), so nothing reads
         // them and the append simply overwrites them. A decode SHORTER than
         // the plan is the unexpected case — refuse, the tail could reach past
         // what the loader produced.
@@ -340,7 +357,20 @@ unsafe extern "system" fn tailgate_stub(
                 al,
             );
         }
+        commit_append(inner, hp, dest, decoded, al)
+    }
+}
 
+/// Commit the append: the host's parts at `dest+|V|`, then (i.dat) the count
+/// bump, then the journal line. Returns the decoder's own `AL`.
+unsafe fn commit_append(
+    inner: &Inner,
+    hp: &HostPlan,
+    dest: *mut u8,
+    decoded: usize,
+    al: u8,
+) -> u8 {
+    unsafe {
         // commit: append the parts at dest+|V|, then (i.dat) bump the count
         let mut off = hp.declared;
         for part in &hp.parts {

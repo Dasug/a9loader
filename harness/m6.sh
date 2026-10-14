@@ -19,6 +19,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 REPO="$(pwd)"
+source "$(dirname "$0")/lib.sh"
 
 RUN="$REPO/harness/run/m6"
 PREFIX="$REPO/harness/run/.prefix"
@@ -32,14 +33,6 @@ cargo build --release --bin a9ml
 DLL="$REPO/target/x86_64-pc-windows-gnu/release/version.dll"
 A9ML="$REPO/target/release/a9ml"
 
-py_mk() { # py_mk <file> <size> <seed> — a deterministic ramp payload
-    python3 - "$1" "$2" "$3" <<'EOF'
-import sys
-path, size, seed = sys.argv[1], int(sys.argv[2], 0), int(sys.argv[3], 0)
-open(path, "wb").write(bytes((seed + i) & 0xff for i in range(size)))
-EOF
-}
-
 echo "== building the fixtures"
 mkdir -p "$RUN/data"
 py_mk "$RUN/globby.bin"   48 0x11   # the *.adk\fe01.bin payload
@@ -48,62 +41,12 @@ py_mk "$RUN/van_fy01.bin" 24 0xA0   # the VANILLA data\bmf\fy01.bin (different)
 py_mk "$RUN/data/mtfake.bin" 40 0x55 # the non-matching path's vanilla bytes
 printf 'FORM_DUMMY\x00' > "$RUN/form_list.bin"  # the host only needs a file here
 
-FAILED=0
-scen_dir=""
-
-new_scen() {
-    scen_dir="$RUN/$1"
-    rm -rf "$scen_dir"
+# debug so the per-match line is emitted (the boot line is info-level)
+DEFAULT_CFG='log_level = "debug"\n'
+scen_fixtures() {
     mkdir -p "$scen_dir/data/bmf"
-    cp "$RUN/host.exe" "$scen_dir/"
-    cp "$DLL" "$scen_dir/version.dll"
-    cp "$RUN/form_list.bin" "$scen_dir/"
     cp "$RUN/data/mtfake.bin" "$scen_dir/data/"
     cp "$RUN/van_fy01.bin" "$scen_dir/data/bmf/fy01.bin"
-    # debug so the per-match line is emitted (the boot line is info-level)
-    printf 'log_level = "debug"\n' > "$scen_dir/a9loader.toml"
-}
-
-run_host() {
-    ( cd "$scen_dir" && WINEPREFIX="$PREFIX" WINEDEBUG=-all timeout 60 wine host.exe form_list.bin "$1" ) > "$scen_dir/out.txt" 2>&1 || true
-}
-
-check() { # check <label> <needle> <file>
-    if grep -q "$2" "$3"; then
-        echo "   [ ok ] $1"
-    else
-        echo "   [FAIL] $1 (missing: $2 in $3)"
-        FAILED=$((FAILED + 1))
-    fi
-}
-
-checkf() { # checkf <label> <cmd...>
-    local label="$1"; shift
-    if "$@" >/dev/null 2>&1; then
-        echo "   [ ok ] $label"
-    else
-        echo "   [FAIL] $label"
-        FAILED=$((FAILED + 1))
-    fi
-}
-
-checkq() { # checkq <label> <needle> <file> — assert the needle is ABSENT
-    if grep -q "$2" "$3"; then
-        echo "   [FAIL] $1 (unexpected: $2 in $3)"
-        FAILED=$((FAILED + 1))
-    else
-        echo "   [ ok ] $1"
-    fi
-}
-
-mod() { # mod <dir> <manifest-body...>
-    mkdir -p "$scen_dir/mods/$1"
-    printf '%s\n' "${@:2}" > "$scen_dir/mods/$1/mod.toml"
-}
-
-pay() { # pay <mod> <relpath> <runfile>
-    mkdir -p "$(dirname "$scen_dir/mods/$1/$2")"
-    cp "$RUN/$3" "$scen_dir/mods/$1/$2"
 }
 
 echo "== S1: a GLOB over an absolute per-boot temp path (the motivating case)"
@@ -254,10 +197,4 @@ check "exactly one loose asset served" '1 loose asset'                "$LOG"
 check "winner's redirect taken"     'loose abs: used=mods.cache.loose' "$scen_dir/out.txt"
 checkf "absolute read == the WINNER's payload" cmp -s "$scen_dir/read_abs.bin" "$RUN/globby.bin"
 
-echo
-if [ "$FAILED" = 0 ]; then
-    echo "M6 HARNESS: ALL SCENARIOS GREEN"
-else
-    echo "M6 HARNESS: $FAILED FAILURE(S)"
-fi
-exit "$FAILED"
+harness_done "M6 HARNESS"

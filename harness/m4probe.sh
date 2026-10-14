@@ -11,6 +11,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 REPO="$(pwd)"
+source "$(dirname "$0")/lib.sh"
 
 RUN="$REPO/harness/run/m4probe"
 PREFIX="$REPO/harness/run/.prefix"
@@ -41,37 +42,12 @@ open(sys.argv[2], 'wb').write(b''.join(u.to_bytes(2, 'little') for u in units) +
 print(f"   {len(units)} units -> {sys.argv[2]}")
 EOF
 
-FAILED=0
-scen_dir=""
-
-new_scen() { # new_scen <name> — probe OFF by default
-    scen_dir="$RUN/$1"
-    rm -rf "$scen_dir"
-    mkdir -p "$scen_dir"
-    cp "$RUN/host.exe" "$scen_dir/"
-    cp "$DLL" "$scen_dir/version.dll"
-    cp "$RUN/form_list.bin" "$scen_dir/"
-}
-
-run_host() {
-    ( cd "$scen_dir" && WINEPREFIX="$PREFIX" WINEDEBUG=-all timeout 60 wine host.exe form_list.bin probe ) > "$scen_dir/out.txt" 2>&1 || true
-}
-
+# m4probe's needles carry regex metacharacters — match them as FIXED strings
 check() { # check <label> <needle> <file>
     if grep -qF -- "$2" "$3"; then
         echo "   [ ok ] $1"
     else
         echo "   [FAIL] $1 (missing: $2 in $3)"
-        FAILED=$((FAILED + 1))
-    fi
-}
-
-checkf() { # checkf <label> <cmd...>
-    local label="$1"; shift
-    if "$@" >/dev/null 2>&1; then
-        echo "   [ ok ] $label"
-    else
-        echo "   [FAIL] $label"
         FAILED=$((FAILED + 1))
     fi
 }
@@ -91,7 +67,7 @@ EOF
 
 echo "== P1: probe off (default) — no probe lines, no hooks"
 new_scen p1-off
-run_host
+run_host probe
 checkf "boot log exists"    test -f "$scen_dir/mods/a9loader.log"
 check "boot built identity" "exe build id 5.00.5634"                "$scen_dir/mods/a9loader.log"
 if grep -q "probe: " "$scen_dir/mods/a9loader.log" 2>/dev/null; then
@@ -105,7 +81,7 @@ echo "== P2: probe on (probe_fetch = true) — 4 hook installs + 4 call lines"
 new_scen p2-on
 quiet_mod
 printf 'probe_fetch = true\n' > "$scen_dir/a9loader.toml"
-run_host
+run_host probe
 LOG="$scen_dir/mods/a9loader.log"
 check "probe enabled line"        "probe: fetch hooks on (diagnostic)"    "$LOG"
 check "pack hook installed"        "probe: pack_fetch hook installed rva=0x306e20 expect=verified" "$LOG"
@@ -129,10 +105,4 @@ else
     FAILED=$((FAILED + 1))
 fi
 
-echo
-if [ "$FAILED" = 0 ]; then
-    echo "M4 PROBE HARNESS: ALL SCENARIOS GREEN"
-else
-    echo "M4 PROBE HARNESS: $FAILED FAILURE(S)"
-fi
-exit "$FAILED"
+harness_done "M4 PROBE HARNESS"

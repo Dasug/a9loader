@@ -96,9 +96,10 @@ pub struct Config {
     pub priorities: BTreeMap<String, i64>,
     /// human-visible complaints (unknown keys, bad values)
     pub warnings: Vec<String>,
-    /// M4 diagnostic: hook the four runtime fetch anchors trampoline-only
-    /// and log one line per fetch call (obj / composed key). Diagnostics
-    /// only — no serving behavior changes; fail-open per anchor.
+    /// M4 diagnostic — **OFF BY DEFAULT, not part of normal operation**: see
+    /// `probe.rs`. When true the loader hooks the four runtime fetch anchors
+    /// trampoline-only and logs one line per fetch call (obj / composed key).
+    /// Diagnostics only — no serving behavior changes; fail-open per anchor.
     pub probe_fetch: bool,
     /// how [[pack]] image effects serve (see [`PackServing`]); "inject" (the
     /// default) = the M4 window-scoped famb injector (loader memory, no cache
@@ -145,10 +146,6 @@ impl Config {
             disabled: self.disabled.clone(),
             allow_conflicts: self.allow_conflicts,
         }
-    }
-
-    pub fn log_enabled(&self, level: LogLevel) -> bool {
-        level <= self.log_level
     }
 }
 

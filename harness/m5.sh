@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# M5 W1 harness — the i.dat family-A row model: [[asset]] payloads appended to
+# The [[asset]] harness — the i.dat family-A row model: [[asset]] payloads appended to
 # a family-A host pack's decoded stream + the matching merged i.dat rows.
 #
 # The host fakes the game's CFile::Open (exactly like m3) and opens
@@ -18,6 +18,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 REPO="$(pwd)"
+source "$(dirname "$0")/lib.sh"
 
 RUN="$REPO/harness/run/m5"
 PREFIX="$REPO/harness/run/.prefix"
@@ -31,83 +32,24 @@ cargo build --release --bin a9ml
 DLL="$REPO/target/x86_64-pc-windows-gnu/release/version.dll"
 A9ML="$REPO/target/release/a9ml"
 
-py_mk() { # py_mk <file> <size> <seed> — a deterministic ramp payload
-    python3 - "$1" "$2" "$3" <<'EOF'
-import sys
-path, size, seed = sys.argv[1], int(sys.argv[2], 0), int(sys.argv[3], 0)
-open(path, "wb").write(bytes((seed + i) & 0xff for i in range(size)))
-EOF
-}
-
 echo "== building the fixtures (a 64 B family-A vp + a one-row i.dat)"
 mkdir -p "$RUN/data"
 py_mk "$RUN/vbase.bin" 64 0x10    # the vanilla vp decoded stream V (64 bytes)
 py_mk "$RUN/probe.x"   96 0x80    # asset payload P1 (96 bytes)
 py_mk "$RUN/probe2.x"  96 0x40    # asset payload P2 (96 bytes)
-py_mk "$RUN/lpay1.bin" 64 0x70    # M5-U: a preview asset payload
-py_mk "$RUN/lpay2.bin" 64 0x90    # M5-U: a second preview asset payload
-py_mk "$RUN/ovr.bin"   32 0x33    # M5-U: a vanilla-row override payload
-py_mk "$RUN/treenew.bin" 40 0x55  # M5-U: a non-name-keyed group asset
+py_mk "$RUN/lpay1.bin" 64 0x70    # a preview asset payload
+py_mk "$RUN/lpay2.bin" 64 0x90    # a second preview asset payload
+py_mk "$RUN/ovr.bin"   32 0x33    # a vanilla-row override payload
+py_mk "$RUN/treenew.bin" 40 0x55  # a non-name-keyed group asset
 printf 'FORM_DUMMY\x00' > "$RUN/form_list.bin"   # the host only needs a file here
 "$A9ML" mkpack --container a    --out "$RUN/data/vp.bin" "$RUN/vbase.bin"
 "$A9ML" mkpack --container idat --out "$RUN/data/i.dat" '_t_van_a.x=train\van:37:0'
 
-FAILED=0
-scen_dir=""
-
-new_scen() {
-    scen_dir="$RUN/$1"
-    rm -rf "$scen_dir"
-    mkdir -p "$scen_dir/data"
-    cp "$RUN/host.exe" "$scen_dir/"
-    cp "$DLL" "$scen_dir/version.dll"
-    cp "$RUN/form_list.bin" "$scen_dir/"
+# the S1–S6 scenarios are the MERGE regression: pin both mechanisms so the
+# loader's default (tailgate) does not change what they assert
+DEFAULT_CFG='pack_serving = "merge"\nasset_serving = "merge"\n'
+scen_fixtures() {
     cp "$RUN/data/vp.bin" "$RUN/data/i.dat" "$scen_dir/data/"
-    # the S1–S6 scenarios are the MERGE regression: pin both mechanisms so the
-    # loader's default (tailgate) does not change what they assert
-    printf 'pack_serving = "merge"\nasset_serving = "merge"\n' > "$scen_dir/a9loader.toml"
-}
-
-run_host() {
-    ( cd "$scen_dir" && WINEPREFIX="$PREFIX" WINEDEBUG=-all timeout 60 wine host.exe form_list.bin "$1" ) > "$scen_dir/out.txt" 2>&1 || true
-}
-
-check() { # check <label> <needle> <file>
-    if grep -q "$2" "$3"; then
-        echo "   [ ok ] $1"
-    else
-        echo "   [FAIL] $1 (missing: $2 in $3)"
-        FAILED=$((FAILED + 1))
-    fi
-}
-
-checkf() { # checkf <label> <cmd...>
-    local label="$1"; shift
-    if "$@" >/dev/null 2>&1; then
-        echo "   [ ok ] $label"
-    else
-        echo "   [FAIL] $label"
-        FAILED=$((FAILED + 1))
-    fi
-}
-
-checkq() { # checkq <label> <needle> <file> — assert the needle is ABSENT
-    if grep -q "$2" "$3"; then
-        echo "   [FAIL] $1 (unexpected: $2 in $3)"
-        FAILED=$((FAILED + 1))
-    else
-        echo "   [ ok ] $1"
-    fi
-}
-
-mod() { # mod <dir> <manifest-body...>
-    mkdir -p "$scen_dir/mods/$1"
-    printf '%s\n' "${@:2}" > "$scen_dir/mods/$1/mod.toml"
-}
-
-pay() { # pay <mod> <relpath> <runfile>
-    mkdir -p "$(dirname "$scen_dir/mods/$1/$2")"
-    cp "$RUN/$3" "$scen_dir/mods/$1/$2"
 }
 
 echo "== S1: [[asset]] appends to vp + writes the i.dat row (default inject -> still merge)"
@@ -298,7 +240,7 @@ check "refusal says AMBIGUOUS"    "is AMBIGUOUS"               "$scen_dir/mods/a
 check "i.dat serves vanilla"      "path=data.i.dat"            "$scen_dir/out.txt"
 checkf "no merged index written"  test ! -f                   "$scen_dir/mods/cache/i.dat"
 
-# ---- M5 tailgate: [[asset]] served in place at the family-A decode -------------
+# ---- Tailgate: [[asset]] served in place at the family-A decode -------------
 # The host fakes pack_lzss_decode at its real RVA, the vp/i.dat call sites with
 # their address-book expect bytes, and the relay cave; it calls the (spliced)
 # sites with the loader's stack shape and dumps the post-decode workspace.
@@ -460,7 +402,7 @@ checkq "no tailgate machinery" "asset tailgate:" "$LOG"
 checkf "merge cache built"   test -f "$scen_dir/mods/cache/vp.bin"
 
 # ===========================================================================
-# M5-U: auto-merged `.dir` group listings + overrides on the tailgate path
+# Auto-merged `.dir` group listings + overrides on the tailgate path
 # ===========================================================================
 # A `.dir` row is a flat run of NUL-terminated UTF-16LE names (no count, no
 # stride; the row's `len` is the only bound). The loader derives each mod's
@@ -781,13 +723,13 @@ checkf "merged mcp == V ++ new asset ++ explicit override listing" cmp -s "$scen
     "tree_new.x=tree:$TN:$MCP_DECL"
 checkf "merged i.dat == tree.dir row rewritten + the new row" cmp -s "$scen_dir/mods/cache/i.dat" "$scen_dir/expected-i.dat"
 
-echo "== T5: M5-T workspace swap — the game's 200 MB buffer is replaced (cap raised, old freed)"
+echo "== T5: the workspace swap — the game's 200 MB buffer is replaced (cap raised, old freed)"
 new_scen t5-workspace
 printf 'asset_serving = "tailgate"\nworkspace_out_mb = 256\n' > "$scen_dir/a9loader.toml"
 run_host workspace
 LOG="$scen_dir/mods/a9loader.log"
-check "swap armed at the alloc tail" "M5-T workspace: swap armed at rva=0x31981a" "$LOG"
-check "the OUT buffer grew"          "M5-T workspace: OUT buffer 200 MiB -> 256 MiB" "$LOG"
+check "swap armed at the alloc tail" "workspace swap: swap armed at rva=0x31981a" "$LOG"
+check "the OUT buffer grew"          "workspace swap: OUT buffer 200 MiB -> 256 MiB" "$LOG"
 check "the shim reached the pinned callee (RAX flowed back)" \
       "callee rax=0xdeadbeef (PASS)" "$scen_dir/out.txt"
 check "allocated through the game's own allocator" \
@@ -801,7 +743,7 @@ new_scen t6-workspace-fail
 printf 'asset_serving = "tailgate"\nworkspace_out_mb = 256\n' > "$scen_dir/a9loader.toml"
 run_host workspace-fail
 LOG="$scen_dir/mods/a9loader.log"
-check "swap armed"                  "M5-T workspace: swap armed" "$LOG"
+check "swap armed"                  "workspace swap: swap armed" "$LOG"
 check "the alloc failure is loud" \
       "_aligned_malloc(256 MiB) failed — keeping the game's 200 MiB buffer" "$LOG"
 check "nothing was swapped"         "(unchanged)" "$scen_dir/out.txt"
@@ -809,7 +751,7 @@ check "the shipped cap is untouched" "cap=209715200" "$scen_dir/out.txt"
 check "nothing was freed"           "free calls=0" "$scen_dir/out.txt"
 check "the callee still ran"        "callee rax=0xdeadbeef (PASS)" "$scen_dir/out.txt"
 
-echo "== T7: M5-T + tailgate together — the grow re-decides and the tailgate stands (regression)"
+echo "== T7: workspace swap + tailgate together — the grow re-decides and the tailgate stands (regression)"
 new_scen t7-workspace-tailgate
 printf 'asset_serving = "tailgate"\npack_serving = "merge"\nworkspace_out_mb = 256\n' > "$scen_dir/a9loader.toml"
 tg_fixtures
@@ -827,17 +769,11 @@ mod tgasset \
 pay tgasset "assets/probe.x" probe.x
 run_host tailgate-ws
 LOG="$scen_dir/mods/a9loader.log"
-check "the workspace swap armed"  "M5-T workspace: swap armed at rva=0x31981a" "$LOG"
+check "the workspace swap armed"  "workspace swap: swap armed at rva=0x31981a" "$LOG"
 check "the tailgate decision stands" "asset serving: tailgate" "$LOG"
 checkq "the grow did NOT knock the tailgate into merge" "no host pack could be tailgated" "$LOG"
 checkq "no second cave install refusal" "relay cave bytes differ" "$LOG"
 check "vp splice installed"  "asset tailgate: vp splice installed rva=0x3f1434 expect=verified" "$LOG"
 check "the append still happened" "asset tailgate: vp appended 1 payload (96 B) at +64" "$LOG"
 
-echo
-if [ "$FAILED" = 0 ]; then
-    echo "M5 HARNESS: ALL SCENARIOS GREEN"
-else
-    echo "M5 HARNESS: $FAILED FAILURE(S)"
-fi
-exit "$FAILED"
+harness_done "M5 HARNESS"

@@ -14,6 +14,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 REPO="$(pwd)"
+source "$(dirname "$0")/lib.sh"
 
 RUN="$REPO/harness/run/m3"
 PREFIX="$REPO/harness/run/.prefix"
@@ -74,53 +75,10 @@ mk csv2 'C2\nC2\n'
 "$A9ML" mkpack --container csvs --out "$RUN/data/csvp.bin" \
     "t1.csv=$RUN/csv1"
 
-FAILED=0
-scen_dir=""
-
-new_scen() {
-    scen_dir="$RUN/$1"
-    rm -rf "$scen_dir"
-    mkdir -p "$scen_dir/data"
-    cp "$RUN/host.exe" "$scen_dir/"
-    cp "$DLL" "$scen_dir/version.dll"
-    cp "$RUN/form_list.bin" "$scen_dir/"
+# M3 is the MERGE harness — pin merge explicitly (inject is the default now)
+DEFAULT_CFG='pack_serving = "merge"\n'
+scen_fixtures() {
     cp "$RUN/data/mtfake.bin" "$RUN/data/csvp.bin" "$scen_dir/data/"
-    # M3 is the MERGE harness — pin merge explicitly (inject is the default now)
-    printf 'pack_serving = "merge"\n' > "$scen_dir/a9loader.toml"
-    SCEN_NAME="$1"
-}
-
-run_host() {
-    ( cd "$scen_dir" && WINEPREFIX="$PREFIX" WINEDEBUG=-all timeout 60 wine host.exe form_list.bin "$1" ) > "$scen_dir/out.txt" 2>&1 || true
-}
-
-check() { # check <label> <needle> <file>
-    if grep -q "$2" "$3"; then
-        echo "   [ ok ] $1"
-    else
-        echo "   [FAIL] $1 (missing: $2 in $3)"
-        FAILED=$((FAILED + 1))
-    fi
-}
-
-checkf() { # checkf <label> <cmd...>
-    local label="$1"; shift
-    if "$@" >/dev/null 2>&1; then
-        echo "   [ ok ] $label"
-    else
-        echo "   [FAIL] $label"
-        FAILED=$((FAILED + 1))
-    fi
-}
-
-mod() { # mod <dir> <manifest-body...>
-    mkdir -p "$scen_dir/mods/$1"
-    printf '%s\n' "${@:2}" > "$scen_dir/mods/$1/mod.toml"
-}
-
-pay() { # pay <mod> <relpath> <file>
-    mkdir -p "$(dirname "$scen_dir/mods/$1/$2")"
-    cp "$RUN/$3" "$scen_dir/mods/$1/$2"
 }
 
 echo "== S1: passthrough (no mods — no hook installed)"
@@ -443,10 +401,4 @@ check "one replaced, one added"  "2 row patch(es) (1 replaced, 1 added" "$scen_d
 "$A9ML" mkpack --container csvs --out "$scen_dir/expected.bin" "t1.csv=$RUN/exp_u1.csv"
 checkf "cache == expected utf8-row-merged csvp" cmp -s "$scen_dir/mods/cache/csvp.bin" "$scen_dir/expected.bin"
 
-echo
-if [ "$FAILED" = 0 ]; then
-    echo "M3 HARNESS: ALL SCENARIOS GREEN"
-else
-    echo "M3 HARNESS: $FAILED FAILURE(S)"
-fi
-exit "$FAILED"
+harness_done "M3 HARNESS"

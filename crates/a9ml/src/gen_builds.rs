@@ -12,9 +12,14 @@
 //!   a9ml gen-builds --exe ATrain9v5.exe --out builds.toml   # write it
 //!   a9ml gen-builds --exe ATrain9v5.exe --out builds.toml --check
 //!     # verify the existing book matches the exe exactly (update-day check)
+//!
+//! [`run`] resolves the exe identity, then either [`check_book`] (the
+//! update-day check) or [`emit_book`] (the generated text, written or printed).
 
 use anyhow::{bail, Context, Result};
 use std::path::Path;
+
+use crate::util::civil_stamp;
 
 /// the anchor core set, keyed by build id.
 struct CoreAnchor {
@@ -95,31 +100,6 @@ fn fingerprint(d: &[u8], a: &CoreAnchor) -> Result<(usize, String, String)> {
     Ok((off, hex, format!("file {off:#x} in {sec}")))
 }
 
-fn civil_stamp() -> String {
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let days = (secs / 86_400) as i64;
-    let sod = (secs % 86_400) as u32;
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = if m <= 2 { y + 1 } else { y };
-    format!(
-        "{y:04}-{m:02}-{d:02} {:02}:{:02}:{:02}",
-        sod / 3600,
-        (sod % 3600) / 60,
-        sod % 60
-    )
-}
-
 pub fn run(exe: &Path, out: Option<&Path>, check: bool) -> Result<()> {
     let d = std::fs::read(exe).context("reading the exe")?;
     let build =
@@ -131,6 +111,36 @@ pub fn run(exe: &Path, out: Option<&Path>, check: bool) -> Result<()> {
     let md5 = a9_formats::crypt::md5(&d);
     let hash: String = md5[..4].iter().map(|x| format!("{x:02x}")).collect();
 
+    if check {
+        let path = out.ok_or_else(|| anyhow::anyhow!("--check needs --out"))?;
+        return check_book(path, &d, &id, &anchors, exe);
+    }
+
+    let full = emit_book(&d, &build, &id, &hash, &anchors, exe)?;
+    match out {
+        Some(path) => {
+            std::fs::write(path, &full)?;
+            println!(
+                "wrote {}: build {id} with {} core anchors",
+                path.display(),
+                anchors.len()
+            );
+        }
+        None => print!("{full}"),
+    }
+    Ok(())
+}
+
+/// The full `builds.toml` text: the provenance header + the generated core
+/// anchors.
+fn emit_book(
+    d: &[u8],
+    build: &a9_mod::buildid::BuildId,
+    id: &str,
+    hash: &str,
+    anchors: &[CoreAnchor],
+    exe: &Path,
+) -> Result<String> {
     let mut t = String::new();
     t.push_str("# a9loader build address book — one entry per supported game build.\n");
     t.push_str("# Anchors are named; mod manifests reference anchor names, never raw RVAs\n");
@@ -153,93 +163,79 @@ pub fn run(exe: &Path, out: Option<&Path>, check: bool) -> Result<()> {
     t.push_str("# RE-derived anchors beyond this set are manually appended to this file.\n\n");
 
     let mut body = String::new();
-    for a in &anchors {
-        let (off, hex, where_note) = fingerprint(&d, a)?;
+    for a in anchors {
+        let (off, hex, where_note) = fingerprint(d, a)?;
         let _ = (off, where_note);
         body.push_str(&format!(
             "[build.{id:?}.anchors.{}]\nrva = {:#x}  # {}\nexpect = \"{hex}\"\n\n",
             a.name, a.rva, a.note
         ));
     }
-    let full = t + &body;
+    Ok(t + &body)
+}
 
-    if check {
-        let path = out.ok_or_else(|| anyhow::anyhow!("--check needs --out"))?;
-        let cur = std::fs::read_to_string(path)
-            .with_context(|| format!("reading {}", path.display()))?;
+/// The update-day check: verify the generated CORE anchors against the book at
+/// `path`. The book also carries hand-appended RE anchors the generator does
+/// not know about, so a whole-file comparison always differs — only the core
+/// anchors are compared (same rva, same expect bytes, case-insensitive).
+fn check_book(path: &Path, d: &[u8], id: &str, anchors: &[CoreAnchor], exe: &Path) -> Result<()> {
+    let cur = std::fs::read_to_string(path)
+        .with_context(|| format!("reading {}", path.display()))?;
 
-        // The book also carries hand-appended RE anchors the generator does not
-        // know about, so a whole-file comparison always differs. Verify only the
-        // generated CORE anchors: each must be present with the same rva and the
-        // same expect bytes (case-insensitive) as the live exe.
-        let field = |section: &str, key: &str| -> Option<String> {
-            section.lines().find_map(|l| {
-                let l = l.trim().strip_prefix(key)?.trim_start();
-                let l = l.strip_prefix('=')?.trim();
-                let v = l.split('#').next().unwrap_or(l).trim();
-                Some(v.trim_matches('"').to_string())
-            })
+    let field = |section: &str, key: &str| -> Option<String> {
+        section.lines().find_map(|l| {
+            let l = l.trim().strip_prefix(key)?.trim_start();
+            let l = l.strip_prefix('=')?.trim();
+            let v = l.split('#').next().unwrap_or(l).trim();
+            Some(v.trim_matches('"').to_string())
+        })
+    };
+    let mut problems: Vec<String> = Vec::new();
+    let mut seen = 0usize;
+    for a in anchors {
+        let (_, hex, _) = fingerprint(d, a)?;
+        let want = hex.to_ascii_lowercase().replace(' ', "");
+        let header = format!("[build.{id:?}.anchors.{}]", a.name);
+        let Some(pos) = cur.find(&header) else {
+            problems.push(format!("{}: section missing", a.name));
+            continue;
         };
-        let mut problems: Vec<String> = Vec::new();
-        let mut seen = 0usize;
-        for a in &anchors {
-            let (_, hex, _) = fingerprint(&d, a)?;
-            let want = hex.to_ascii_lowercase().replace(' ', "");
-            let header = format!("[build.{id:?}.anchors.{}]", a.name);
-            let Some(pos) = cur.find(&header) else {
-                problems.push(format!("{}: section missing", a.name));
-                continue;
-            };
-            seen += 1;
-            let section = &cur[pos + header.len()..];
-            let section = section.split("\n[").next().unwrap_or(section);
-            let got_rva = field(section, "rva")
-                .and_then(|v| u64::from_str_radix(v.trim_start_matches("0x").trim_start_matches("0X"), 16).ok());
-            let got_expect = field(section, "expect")
-                .map(|v| v.to_ascii_lowercase().replace(' ', ""));
-            if got_rva != Some(a.rva as u64) {
-                problems.push(format!(
-                    "{}: rva mismatch (book {:?}, generated {:#x})",
-                    a.name,
-                    field(section, "rva").unwrap_or_default(),
-                    a.rva
-                ));
-            } else if got_expect.as_deref() != Some(want.as_str()) {
-                problems.push(format!("{}: expect bytes differ from the exe", a.name));
-            }
+        seen += 1;
+        let section = &cur[pos + header.len()..];
+        let section = section.split("\n[").next().unwrap_or(section);
+        let got_rva = field(section, "rva")
+            .and_then(|v| u64::from_str_radix(v.trim_start_matches("0x").trim_start_matches("0X"), 16).ok());
+        let got_expect = field(section, "expect")
+            .map(|v| v.to_ascii_lowercase().replace(' ', ""));
+        if got_rva != Some(a.rva as u64) {
+            problems.push(format!(
+                "{}: rva mismatch (book {:?}, generated {:#x})",
+                a.name,
+                field(section, "rva").unwrap_or_default(),
+                a.rva
+            ));
+        } else if got_expect.as_deref() != Some(want.as_str()) {
+            problems.push(format!("{}: expect bytes differ from the exe", a.name));
         }
-        if !problems.is_empty() {
-            for p in &problems {
-                println!("MISMATCH: {p}");
-            }
-            bail!(
-                "{}: {} of {} core anchor(s) do not match {}",
-                path.display(),
-                problems.len(),
-                anchors.len(),
-                exe.display()
-            );
+    }
+    if !problems.is_empty() {
+        for p in &problems {
+            println!("MISMATCH: {p}");
         }
-        let total = cur.matches(&format!("[build.{id:?}.anchors.")).count();
-        println!(
-            "check ok: {} core anchor(s) verified against {}; {} hand-appended anchor(s) retained (not generated)",
-            seen,
-            exe.display(),
-            total.saturating_sub(seen)
+        bail!(
+            "{}: {} of {} core anchor(s) do not match {}",
+            path.display(),
+            problems.len(),
+            anchors.len(),
+            exe.display()
         );
-        return Ok(());
     }
-
-    match out {
-        Some(path) => {
-            std::fs::write(path, &full)?;
-            println!(
-                "wrote {}: build {id} with {} core anchors",
-                path.display(),
-                anchors.len()
-            );
-        }
-        None => print!("{full}"),
-    }
+    let total = cur.matches(&format!("[build.{id:?}.anchors.")).count();
+    println!(
+        "check ok: {} core anchor(s) verified against {}; {} hand-appended anchor(s) retained (not generated)",
+        seen,
+        exe.display(),
+        total.saturating_sub(seen)
+    );
     Ok(())
 }
