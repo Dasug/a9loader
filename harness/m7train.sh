@@ -254,4 +254,42 @@ OUT="$scen_dir/out.txt"; LOG="$scen_dir/mods/a9loader.log"
 check "collision refused" "train '02': the allocated FORM name FORM_DUMMY_02 is a SHIPPED catalog name" "$LOG"
 check "nothing injected"  "train: vector rows after injection = 421" "$OUT"
 
+echo "== T5: train-retry — the builder's first call happens BEFORE the rows are filled"
+# The live shape that the harness missed: train_list_builder is called more than
+# once per boot, and the first call predates the CSV pipeline's row fill, so the
+# donor is still bValid==0. The loader must defer (warn once) and retry at the
+# next call instead of giving up.
+new_scen t5-retry
+mod trainmod \
+    'id = "trainmod"' \
+    'name = "Train mod"' \
+    'version = "1.0.0"' \
+    'author = "test"' \
+    '' \
+    '[[train]]' \
+    'key = "sample"' \
+    'name = "サンプル気動車"' \
+    'name_en = "Sample Railcar"' \
+    'price = 42000000' \
+    'capacity = 88' \
+    'running_cost = 24000' \
+    'cruise_speed = 70' \
+    'fare = 250'
+for n in f s s_1; do
+    pay trainmod "assets/form_trainmod_sample_$n.dds" "form_trainmod_sample_$n.dds"
+done
+run_host train_retry
+OUT="$scen_dir/out.txt"; LOG="$scen_dir/mods/a9loader.log"
+check  "phase 1 fired unpopulated" "train: retry phase 1 fired with the donor unpopulated" "$OUT"
+check  "phase 2 fired populated"   "train: retry phase 2 fired with the donor populated" "$OUT"
+check  "deferred, not refused"     "train injection deferred: train 'FORM_TRAINMOD_SAMPLE': donor row " "$LOG"
+check  "deferral is a warn"        "WARN: train injection deferred" "$LOG"
+checkq "no refusal ERR"            "train injection refused" "$LOG"
+check  "retried and injected"      "train injection: grew the spec vector by 1 row(s)" "$LOG"
+check  "injected at attempt 2"     "(attempt 2 of the builder hook)" "$LOG"
+check  "builder called twice"      "train: builder calls=2 clone_ref calls=4" "$OUT"
+check  "vector grown exactly once" "train: vector rows after injection = 422" "$OUT"
+check  "injected fields"           "train: injected row 421 bValid=1 special=0 cruise=70 fare=250 carCount=1" "$OUT"
+check  "reserved id admitted"      "train: reserved id 421 kept by the composed filter = 1" "$OUT"
+
 harness_done "M7-2 TRAIN HARNESS"
