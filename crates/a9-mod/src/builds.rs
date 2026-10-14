@@ -194,6 +194,40 @@ mod tests {
         let scrc = b.anchor("save_car_read_cave").unwrap();
         assert_eq!(scrc.rva, 0x66790);
         assert_eq!(scrc.expect_bytes().unwrap(), vec![0xcc; 16]);
+        // the M7-1 direct spec-row injection anchors
+        let sr = b.anchor("spec_table_resize").unwrap();
+        assert_eq!(sr.rva, 0x19F150);
+        assert_eq!(
+            sr.expect_bytes().unwrap(),
+            vec![
+                0x48, 0x89, 0x5c, 0x24, 0x08, 0x48, 0x89, 0x74, 0x24, 0x10, 0x57, 0x48, 0x83,
+                0xec, 0x30, 0x4c, 0x8b, 0x41, 0x08
+            ]
+        );
+        let rr = b.anchor("spec_table_realloc").unwrap();
+        assert_eq!(rr.rva, 0x19FC50);
+        assert_eq!(
+            rr.expect_bytes().unwrap(),
+            vec![
+                0x41, 0x56, 0x48, 0x83, 0xec, 0x40, 0x48, 0xc7, 0x44, 0x24, 0x30, 0xfe, 0xff,
+                0xff, 0xff, 0x48, 0x89, 0x5c, 0x24, 0x50
+            ]
+        );
+        let ra = b.anchor("spec_table_row_accessor").unwrap();
+        assert_eq!(ra.rva, 0x1AACB0);
+        assert_eq!(
+            ra.expect_bytes().unwrap(),
+            vec![0x48, 0x8d, 0x04, 0x92, 0x48, 0xc1, 0xe0, 0x06, 0x48, 0x03, 0x01, 0xc3]
+        );
+        let nc = b.anchor("row_name_ctor").unwrap();
+        assert_eq!(nc.rva, 0x372F0);
+        assert_eq!(
+            nc.expect_bytes().unwrap(),
+            vec![
+                0x48, 0x89, 0x54, 0x24, 0x10, 0x4c, 0x89, 0x44, 0x24, 0x18, 0x4c, 0x89, 0x4c,
+                0x24, 0x20, 0x48, 0x83, 0xec, 0x28
+            ]
+        );
     }
 
     #[test]

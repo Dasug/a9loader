@@ -383,3 +383,62 @@ expect = "e8,90,6f,2a,00"
 [build."5.00.5634".anchors.save_car_read_cave]
 rva = 0x66790               # 16-byte CC run in .text (file 0x65b90)
 expect = "cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc"
+
+# ---------------------------------------------------------------------------
+# M7-1 — DIRECT SPEC-ROW INJECTION (the mechanism; NOT wired into the boot
+# engine — M7-2 does that). Harness-driven through the `a9loader_m7_rows`
+# export; the fake manager/spec-table pages live in harness/host.c.
+#
+# The route (PLAN §M7): leave the FORM name literal and the boot-time matcher
+# alone; grow the spec vector AFTER `spec_table_resize` has re-pinned it, and
+# write extra rows cloned from a shipped template row. Four anchors:
+#
+#  * `spec_table_resize` 0x14019f150 — `std::vector<A9_SpecRow_140>::resize(421)`.
+#    Its body pins the vector to EXACTLY 421 (`mov ebx,0x1a5`), so a growth done
+#    before it is silently undone. The mechanism hooks it (trampoline-only) and
+#    injects AFTER the original returns, which is what makes the ordering safe.
+#    ABI: rcx = &vec (the vector object = manager+0x18 = 0x140e14528).
+#    Prologue 19 B: 2 home stores + push rdi + sub rsp,0x30 + mov r8,[rcx+8]
+#    (all position-independent: RSP-relative + register-relative).
+#
+#  * `spec_table_realloc` 0x14019fc50 — `(rcx = &vec, rdx = new_total_rows)`.
+#    Allocates a new block with the GAME's allocator (0x14040a838), copies the
+#    existing rows into it, destroys + frees the old block (0x14040a884), and
+#    sets cap = new_total, end = old_count, begin = new block. This is exactly
+#    the "grow the vector with the game's allocator so its teardown frees it
+#    cleanly" primitive (the M5-T lesson) — the vector destructor then frees the
+#    block with the same allocator family. Prologue 20 B: push r14 + sub rsp,0x40
+#    + a 9-B home store + mov [rsp+0x50],rbx.
+#
+#  * `spec_table_row_accessor` 0x1401aacb0 — `(rcx = &vec, rdx = id) -> row*`
+#    = `*(vec) + id*0x140` (pure index math, NO bounds check; 62 callers). The
+#    mechanism resolves every row address through it (so the id→row contract is
+#    the engine's own). Whole function is 12 B: lea/shl/add/ret.
+#
+#  * `row_name_ctor` 0x1400372f0 — the engine's own formatted-name constructor,
+#    the one `train_list_builder`'s tail uses to auto-name rows 417-420
+#    (`&row->pFormName, L"form_id_%d", id` at 0x14019d312). ABI:
+#    `(rcx = dest string field, rdx = wide format, r8 = arg)` — variadic, one
+#    integer arg. Used to build the injected row's unique `pFormName` and its
+#    JP/EN display lanes as VALID A9_RcStr blocks (refcount header at data-0x18;
+#    a zero-filled reserved row crashes `save_train_group_restore`'s blank path).
+#    Prologue 19 B: 3 home stores + sub rsp,0x28.
+#
+# Row stride is 0x140; ids are u16 in the save, so the reserved range must stay
+# ≤ 65535, and (M7-1 choice) under forms.rs `FORMS_MAX` = 1024 so the composed
+# keep-set can still admit the loader's own trains.
+[build."5.00.5634".anchors.spec_table_resize]
+rva = 0x19F150              # std::vector<A9_SpecRow_140>::resize(421) (file 0x19e550)
+expect = "48,89,5c,24,08,48,89,74,24,10,57,48,83,ec,30,4c,8b,41,08"
+
+[build."5.00.5634".anchors.spec_table_realloc]
+rva = 0x19FC50              # the vector's reallocate (game allocator) (file 0x19f050)
+expect = "41,56,48,83,ec,40,48,c7,44,24,30,fe,ff,ff,ff,48,89,5c,24,50"
+
+[build."5.00.5634".anchors.spec_table_row_accessor]
+rva = 0x1AACB0              # vec.begin + id*0x140 (no bounds check) (file 0x1aa0b0)
+expect = "48,8d,04,92,48,c1,e0,06,48,03,01,c3"
+
+[build."5.00.5634".anchors.row_name_ctor]
+rva = 0x372F0               # the builder's auto-name ctor (file 0x366f0)
+expect = "48,89,54,24,10,4c,89,44,24,18,4c,89,4c,24,20,48,83,ec,28"

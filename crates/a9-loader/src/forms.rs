@@ -303,4 +303,17 @@ mod tests {
         ]);
         assert_eq!(one, two);
     }
+
+    /// M7-1: the reserved spec-row range is kept UNDER `FORMS_MAX` so the
+    /// composed keep-set can admit the loader's own trains. `kept()` is the
+    /// bound the three list surfaces apply, so a reserved id must be
+    /// admittable (and the next power-of-two boundary must not be).
+    #[test]
+    fn reserved_ids_below_forms_max_are_admittable() {
+        let reserved = bm(&[421, 1023]);
+        assert!(kept(&reserved, 421), "a reserved id under FORMS_MAX is admittable");
+        assert!(kept(&reserved, 1023));
+        assert!(!kept(&reserved, 1024), "FORMS_MAX is the hard admission ceiling");
+        assert!(!kept(&reserved, 65535));
+    }
 }
