@@ -1198,6 +1198,8 @@ static int setup_rows_pages(void)
  *     recorded prologue over it, exactly like the other fakes. */
 #define RVA_TLB          0x19D9C0u   /* train_list_builder (injection site) */
 #define RVA_CLONEREF     0x1D7D0u    /* wstr_clone_ref (called) */
+#define RVA_ANNOT_BOUND  0x3B0A7Fu   /* preview_form_list_annotator: CMP EBP,0x1a1 */
+static const unsigned char g_annot_orig[6] = { 0x81, 0xfd, 0xa1, 0x01, 0x00, 0x00 };
 
 static const unsigned char g_tlb_orig[17] = {
     0x40,0x53,0x56,0x57,0x48,0x83,0xec,0x20,0x48,0x8b,0x41,0x30,0x48,0x89,0x6c,0x24,0x48
@@ -1313,8 +1315,22 @@ static int setup_train_pages(void)
     }
     g_clone_calls = 0;
     g_tlb_calls = 0;
-    printf("fake: train pages mapped (tlb 0x%lx, clone_ref 0x%lx)\n",
-           (unsigned long)RVA_TLB, (unsigned long)RVA_CLONEREF);
+    /* the preview annotator's 417-row loop bound: plain bytes the loader rewrites
+     * in place (no hook). The 0x3b0000 block is inside the reserved fake image
+     * but not committed, so commit it (the earlier read-back crashed until it
+     * was). */
+    {
+        BYTE *blk = (BYTE *)g_base + 0x3B0000u;
+        if (!map_fixed((UINT_PTR)blk, 0x1000, PAGE_EXECUTE_READWRITE)) {
+            printf("WARN: could not commit the annotator bound block 0x%lx\n",
+                   (unsigned long)(UINT_PTR)blk);
+        } else {
+            memcpy(blk + (RVA_ANNOT_BOUND - 0x3B0000u), g_annot_orig, sizeof(g_annot_orig));
+        }
+    }
+    printf("fake: train pages mapped (tlb 0x%lx, clone_ref 0x%lx, annot_bound 0x%lx)\n",
+           (unsigned long)RVA_TLB, (unsigned long)RVA_CLONEREF,
+           (unsigned long)RVA_ANNOT_BOUND);
     return 1;
 }
 
@@ -1985,6 +2001,9 @@ static int mode_train(const char *scen, int retry)
     unsigned char *e = *(unsigned char **)((char *)vec + 8);
     printf("train: vector rows after injection = %lu\n",
            (unsigned long)((e - b) / ROWS_ROW_STRIDE));
+    /* the annotator bound the loader rewrote (its immediate follows the 2-byte opcode) */
+    printf("train: annotator bound now = %u (was 417)\n",
+           *(unsigned int *)((BYTE *)g_base + RVA_ANNOT_BOUND + 2));
 
     typedef unsigned char *(*acc_fn)(const unsigned char *, unsigned long);
     acc_fn acc = (acc_fn)(g_base + RVA_ROWS_ACCESSOR);

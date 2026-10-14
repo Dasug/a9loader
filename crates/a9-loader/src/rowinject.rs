@@ -477,6 +477,11 @@ pub unsafe extern "system" fn a9loader_m7_rows(op: u32) -> u64 {
 
 /// The purchase-list builder — the M7-2 injection site (see above).
 pub const ANCHOR_TLB: &str = "train_list_builder";
+/// The preview annotator's loop bound (0x1403B0A7F, `CMP EBP,0x1a1`). Widening
+/// its immediate to the live row count is what lets an injected row get a
+/// rolling-stock list icon at all: the annotator composes the preview names for
+/// every valid row it walks, and the shipped literal stops at 417.
+pub const ANCHOR_ANNOT_BOUND: &str = "preview_annotator_bound";
 /// `CString` field clone (refcount bump) — the name-pointer clone fix.
 pub const ANCHOR_CLONE_REF: &str = "wstr_clone_ref";
 /// The shipped FORM-name literal (donor name -> id resolution).
@@ -519,6 +524,9 @@ struct TrainState {
     accessor: usize,
     name_ctor: usize,
     clone_ref: usize,
+    /// the preview annotator's bound site (optional: a missing anchor or a byte
+    /// mismatch only costs the injected rows their list icon)
+    annot_bound: Option<u32>,
     /// one resolved (donor_id, TrainRow) per train, in allocation order
     rows: Vec<(usize, TrainRow)>,
     tramp: Option<patch::Trampoline>,
@@ -616,6 +624,28 @@ pub unsafe fn install_trains(
                 tlb_expect.len()
             ));
         }
+        // Optional: the preview annotator's 417-row loop bound. A missing anchor
+        // (an older address book) or a byte mismatch only costs the icons, so it
+        // never refuses the injection.
+        let annot_bound = match entry.anchor(ANCHOR_ANNOT_BOUND) {
+            Some(a) => match verify_anchor(entry, base as usize, ANCHOR_ANNOT_BOUND) {
+                Ok(()) => Some(a.rva),
+                Err(e) => {
+                    logger.warn(&format!(
+                        "train injection: {ANCHOR_ANNOT_BOUND} failed its byte check ({e}) — \
+                         injected rows will show a blank list icon"
+                    ));
+                    None
+                }
+            },
+            None => {
+                logger.warn(&format!(
+                    "train injection: the address book carries no {ANCHOR_ANNOT_BOUND} anchor — \
+                     injected rows will show a blank list icon"
+                ));
+                None
+            }
+        };
         let _ = TG.set(Mutex::new(TrainState {
             logger: logger.clone(),
             base: base as usize,
@@ -623,6 +653,7 @@ pub unsafe fn install_trains(
             accessor: base as usize + accessor.rva as usize,
             name_ctor: base as usize + ctor.rva as usize,
             clone_ref: base as usize + clone_ref.rva as usize,
+            annot_bound,
             rows,
             tramp: None,
             done: false,
@@ -983,6 +1014,42 @@ unsafe fn inject_trains_locked(g: &TrainState) -> Result<usize, String> {
             }
             core::ptr::copy_nonoverlapping(s.as_ptr(), row, ROW_STRIDE);
         }
+
+        // Widen the preview annotator's loop bound to the new row count, so the
+        // rows we just wrote get their `form_<pFormName>_*.dds` preview names
+        // composed. The annotator's sole caller is train_csv_pipeline_builder at
+        // 0x14019d630 — 42 bytes after the builder call we hooked — so this lands
+        // before it runs. Costs only the icons if it cannot be applied.
+        if let Some(rva) = g.annot_bound {
+            let site = (g.base + rva as usize) as *mut u8;
+            let total = count + n;
+            let expect = [0x81u8, 0xfd, 0xa1, 0x01, 0x00, 0x00];
+            let mut got = [0u8; 6];
+            if sys::is_readable(site as *const c_void, 6) {
+                core::ptr::copy_nonoverlapping(site, got.as_mut_ptr(), 6);
+            }
+            if got != expect {
+                g.logger.warn(&format!(
+                    "train injection: unexpected bytes {got:02x?} at the preview annotator \
+                     bound — the injected rows keep a blank list icon"
+                ));
+            } else if patch::write_bytes(
+                site.add(2),
+                &(total as u32).to_le_bytes(),
+                sys::PAGE_EXECUTE_READWRITE,
+            ) {
+                g.logger.line(&format!(
+                    "train injection: preview annotator bound widened to {total} rows (was 417) \
+                     so the injected rows get their list icons"
+                ));
+            } else {
+                g.logger.warn(
+                    "train injection: could not make the preview annotator bound writable — \
+                     the injected rows keep a blank list icon",
+                );
+            }
+        }
+
         Ok(n)
     }
 }
