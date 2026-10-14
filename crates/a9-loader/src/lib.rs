@@ -24,6 +24,8 @@
 pub mod forms; // pure: FORM list / allow-list parsing + bitmap (host-testable)
 
 #[cfg(target_os = "windows")]
+mod clamp; // M7-0: the always-on save-id clamp guard (notes/62)
+#[cfg(target_os = "windows")]
 mod engine; // the M2 boot engine (config, build gate, scan, resolve, execute)
 #[cfg(target_os = "windows")]
 mod forward; // the 10 forwarded VERSION.dll exports
@@ -41,6 +43,8 @@ mod overlay; // M3: the CFile::Open redirect + merge cache
 mod patch; // VirtualProtect write helpers + patch recipes
 #[cfg(target_os = "windows")]
 mod probe; // M4: the runtime fetch probe (probe_fetch = true diagnostics)
+#[cfg(target_os = "windows")]
+mod probe_save; // M7-2: the save-path writer probe (probe_save = true diagnostics)
 #[cfg(target_os = "windows")]
 mod probe_window; // M7: the purchase-window list dump (probe_window = true diagnostics)
 #[cfg(target_os = "windows")]

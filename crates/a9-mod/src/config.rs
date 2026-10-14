@@ -109,6 +109,16 @@ pub struct Config {
     /// way out of every call that CHANGES a size — the observable of the
     /// notes/23 type-cycle quirk. Diagnostics only; no behaviour change.
     pub probe_window: bool,
+    /// M7-2 diagnostic — **OFF BY DEFAULT, not part of normal operation**: see
+    /// `probe_save.rs`. When true the loader hooks the four save-side mmf
+    /// helpers (`mmf_paged_write` / `mmf_paged_write_bulk` /
+    /// `save_mmf_write_block` / `mmf_read_u32_vector`) trampoline-only and logs
+    /// the caller RVA + size + first bytes of every save-path write (capped),
+    /// plus a per-distinct-caller map and a size histogram — the observable
+    /// that says whether a formation's car block is one bulk `0xf8` write or
+    /// ten `0x18` writes, and which caller RVA is the group-record writer.
+    /// Diagnostics only; no behaviour change.
+    pub probe_save: bool,
     /// how [[pack]] image effects serve (see [`PackServing`]); "inject" (the
     /// default) = the M4 window-scoped famb injector (loader memory, no cache
     /// file), "merge" = the M3 cache overlay
@@ -139,6 +149,7 @@ impl Default for Config {
             warnings: Vec::new(),
             probe_fetch: false,
             probe_window: false,
+            probe_save: false,
             pack_serving: PackServing::Inject,
             asset_serving: AssetServing::Tailgate,
             workspace_out_mb: 0,
@@ -208,6 +219,12 @@ pub fn read(path: &Path) -> Config {
                 None => cfg
                     .warnings
                     .push(format!("probe_window must be a bool, got {val:?}")),
+            },
+            "probe_save" => match val.as_bool() {
+                Some(b) => cfg.probe_save = b,
+                None => cfg
+                    .warnings
+                    .push(format!("probe_save must be a bool, got {val:?}")),
             },
             "pack_serving" => match val.as_str().and_then(PackServing::parse) {
                 Some(m) => cfg.pack_serving = m,
@@ -310,6 +327,22 @@ jp-liveries = 10
         assert_eq!(cfg.priorities.get("jp-liveries"), Some(&10));
         assert!(!cfg.probe_fetch);
         assert!(cfg.warnings.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parses_probe_save_flag() {
+        let dir = std::env::temp_dir().join("a9ml-cfg-test-probe-save");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("a9loader.toml");
+        std::fs::write(&path, "probe_save = true\n").unwrap();
+        let cfg = read(&path);
+        assert!(cfg.probe_save);
+        assert!(cfg.warnings.is_empty());
+        std::fs::write(&path, "probe_save = \"yes\"\n").unwrap();
+        let cfg = read(&path);
+        assert!(!cfg.probe_save);
+        assert!(cfg.warnings.iter().any(|w| w.contains("probe_save")));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

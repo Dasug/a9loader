@@ -268,3 +268,118 @@ expect = "48,8b,c4,48,89,48,08,55,53,56,57,41,54,41,55,41,56,41,57"
 
 [build."5.00.5634".anchors.train_spec_manager]
 rva = 0xE14510
+
+# The save-path probe's anchors (probe_save = true diagnostics; notes/62-B §4.2):
+# the four save-side mmf helpers every save field flows through. Hooking the
+# callee of the two u32-vector vtable thunks (0x140115f70 write /
+# 0x140115f80 read) rather than the thunks themselves: each thunk is a 9-byte
+# `LEA RDX,[RCX+0x10]` + `JMP rel32` body, too short for the 12-byte hook write
+# (install_trampoline re-enters at entry + expect.len(), which would land in the
+# INT3 padding or the adjacent thunk). All four prologues are position-
+# independent (RSP-relative home stores + one push), so the trampoline's saved
+# prologue re-enters cleanly:
+#  - mmf_paged_write      prologue 17 B: 3 mov [rsp+..],reg + push r14
+#  - mmf_paged_write_bulk prologue 17 B: 3 mov [rsp+..],reg + push r14
+#  - save_mmf_write_block prologue 16 B: 3 mov [rsp+..],reg + push rdi
+#  - mmf_read_u32_vector  prologue 16 B: 3 mov [rsp+..],reg + push rdi
+# (each record ends at the first instruction boundary >= 16, machine-verified
+# with objdump against the live exe; file offsets in the comments)
+[build."5.00.5634".anchors.mmf_paged_write]
+rva = 0x308FE0              # the byte-level save writer (file 0x3083e0)
+expect = "48,89,6c,24,10,48,89,74,24,18,48,89,7c,24,20,41,56"
+
+[build."5.00.5634".anchors.mmf_paged_write_bulk]
+rva = 0x308E20              # the bulk save writer (file 0x308220)
+expect = "48,89,5c,24,10,48,89,74,24,18,48,89,7c,24,20,41,56"
+
+[build."5.00.5634".anchors.save_mmf_write_block]
+rva = 0x41500               # the u32-vector block writer (file 0x40900);
+                            # the 0x140115f70 thunk's JMP target
+expect = "48,89,6c,24,18,48,89,74,24,20,48,89,4c,24,08,57"
+
+[build."5.00.5634".anchors.mmf_read_u32_vector]
+rva = 0x41820               # the u32-vector block READER (file 0x40c20);
+                            # the 0x140115f80 thunk's JMP target (READ-SIDE)
+expect = "48,89,5c,24,10,48,89,74,24,18,48,89,4c,24,08,57"
+
+# ---------------------------------------------------------------------------
+# M7-0 — the SAVE-ID CLAMP GUARD (always on; a safety fix, not a diagnostic).
+#
+# A saved formation's form id is used as a spec-row index with NO bounds check
+# (corpus notes/62 §5), so an id past the vector's length (DAT_140e14528,
+# stride 0x140) reads past the heap block — a garbage train, or a crash for
+# larger ids. This is reachable today whenever a save is loaded without the mod
+# that made it, and becomes routine once M7 admits mod trains past row 421.
+#
+# Two choke points cover every saved id that reaches the spec table:
+#
+#  1. the GROUP HEAD — the u32 id in `save_train_group_restore` 0x1401b6d10,
+#     after the legacy remap (sub==0x16) and immediately before the row test:
+#       1401b6f0c: 49 63 c6              movsxd rax,r14d
+#       1401b6f0f: 48 8d 0c 80           lea    rcx,[rax+rax*4]
+#       1401b6f13: 48 c1 e1 06           shl    rcx,0x6
+#       1401b6f17: 48 8b 05 .. .. .. ..  mov    rax,[0x140e14528]
+#       1401b6f1e: 80 3c 01 00           cmp    byte [rcx+rax],0     ; row[0] bValid
+#       1401b6f22: 0f 85 .. .. .. ..     jne    0x1401b7050          ; NORMAL path
+#       1401b6f28: 80 bc 01 9e 00 00 00 02   cmp byte [rcx+rax+0x9e],2
+#       1401b6f30: 0f 84 .. .. .. ..     je     0x1401b7050          ; NORMAL path
+#       1401b6f36: 48 8b 8c 01 38 01 00  mov rcx,[rcx+rax+0x138]     ; BLANK path
+#     The 7 bytes at 0x1401b6f0c (movsxd+lea) are rewritten to
+#     `E8 rel32; 90 90` — a `call` to the relay cave below; a naked shim in
+#     version.dll clamps r14d, reproduces the two overwritten instructions and
+#     `ret`s to 0x1401b6f11 (the 2 nops) → 0x1401b6f13. RSP ≡ 0 (mod 16) at the
+#     site (8 pushes + sub rsp,0x118), so the shim sees the ABI's RSP ≡ 8.
+#     An out-of-range head id becomes 417 — the engine's own auto-named invalid
+#     row (`form_id_417`, built by train_list_builder's tail 0x14019d2dd):
+#     bValid==0, bSpecialFlag==0 and a valid pFormName, so the BLANK path runs
+#     and clones that name (a zero-filled row would crash there, notes/62 §1.4).
+#     417 is never a CSV row and never a mod slot, so it can never be repurposed.
+#
+#  2. the PER-CAR ids — the fixed 0xf8 car block `FUN_140061ee0` bulk-reads into
+#     the consist object at 0x140061f8b (`call mmf_paged_read 0x140308f20`, the
+#     destination `lea rdx,[rbp+0x2c]` = consist+0x50c). Every per-car u16 id
+#     (10 rows, stride 0x18) comes from that block, so clamping the block right
+#     after the read covers `train_row_car_wiring` 0x1401ab990 (reads
+#     `PTR_140e14528[id].aModelIdx[aux-1]`), `custom_dat_parser` 0x140061260
+#     (its `0x1a0 < id` gate short-circuits bValid but the block still reads
+#     `(base+id)->bSpecialFlag` → OOB) and `train_form_readout_update`
+#     0x140061650 — both of the latter are called from INSIDE FUN_140061ee0
+#     after the read, and `roster_row_builder`/`train_row_car_wiring` later read
+#     the same (now-clamped) block. The site's `E8` is spliced to the cave; the
+#     stub calls the original reader, clamps, and returns its own result.
+#     An out-of-range car id becomes 160 = FORM_DUMMY_03 (有効=OFF ⇒ bValid==0;
+#     a fully-initialised row whose model is the shipped `dummy/_t_dummy_a_.x`
+#     placeholder). A car row MUST be fully initialised — row 417-420's
+#     `aModelIdx` is raw `operator new` memory (spec_table_realloc 0x14019fc50
+#     never zeroes), so clamping a CAR id there would index the model table with
+#     garbage. 160 is not the slot the shipped `new-train-template` repurposes
+#     (FORM_DUMMY_02 = 62).
+#
+# Both clamps read the LIVE vector length ([0x140e14530]-[0x140e14528])/0x140,
+# so they stay correct after M7 grows the vector. Inert for every in-range id.
+[build."5.00.5634".anchors.save_group_head]
+rva = 0x1B6F0C              # the head id's row-offset math in save_train_group_restore
+                            # (file 0x1b630c): movsxd rax,r14d; lea rcx,[rax+rax*4]
+expect = "49,63,c6,48,8d,0c,80"
+
+# The M7-0 head relay cave: a 16-byte CC run in .text preceded by the
+# `8b c1 48 83 c4 30 5d c3` (mov eax,ecx; add rsp,0x30; pop rbp; ret) epilogue,
+# fresh — the M4 famb cave 0x59a071, the M5 tailgate cave 0x5a1d13, the M5-T
+# workspace cave 0x592363, the M7 tab cave 0x5b1e96 and the M7b form cave
+# 0x5b2015 are consumed already (and their 64K host blocks are taken).
+[build."5.00.5634".anchors.save_group_head_cave]
+rva = 0x5D28F0              # 16-byte CC run in .text (file 0x5d1cf0)
+expect = "cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc"
+
+[build."5.00.5634".anchors.save_car_read]
+rva = 0x61F8B               # FUN_140061ee0's 0xf8 car-block read — the per-car
+                            # choke point (file 0x6138b): call mmf_paged_read
+                            # 0x140308f20 with rdx = consist+0x50c
+expect = "e8,90,6f,2a,00"
+
+# The M7-0 car relay cave: a 16-byte CC run in .text preceded by the
+# `00 07 80 e8 f0 78 fb ff` (a call's tail) bytes, fresh. It shares the car
+# site's 64K host block (0x60000), so the harness maps that block once.
+[build."5.00.5634".anchors.save_car_read_cave]
+rva = 0x66790               # 16-byte CC run in .text (file 0x65b90)
+expect = "cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc"
