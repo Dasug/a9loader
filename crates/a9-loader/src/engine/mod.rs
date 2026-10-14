@@ -130,6 +130,14 @@ pub unsafe fn boot(hinst: sys::HMODULE) {
         install_probe(&entry, base, &mods_dir, &logger);
     }
 
+    // ---- M7 purchase-window probe (opt-in diagnostics; trampoline-only,
+    // fail-open): dumps the spec-table manager's three index vectors on the
+    // window's entry/exit whenever a size changes — the observable of the
+    // notes/23 type-cycle quirk. No behaviour change.
+    if cfg.probe_window {
+        install_window_probe(&entry, base, &mods_dir, &logger);
+    }
+
     logger.line(&report::result_line(applied, refused, file_copies.len()));
 }
 
@@ -388,6 +396,13 @@ unsafe fn apply_mod_effects(
 
 /// Install the ONE composed `train_list` filter: read the FORM list length for
 /// the log, install, and report the outcome. Returns `(applied, refused)`.
+///
+/// On a successful install this also arms the M7 type-tab rebuild fix
+/// (`crate::tabrebuild`): the purchase window rebuilds its list on every type
+/// tab (re)build through a function that hard-codes the vanilla whitelist, so
+/// without the fix every composed row that is not in the vanilla 97 vanishes on
+/// the first cycle (notes/23). A failed fix install is fail-open — the filter
+/// still works, only the cycle quirk remains — and is logged loudly.
 unsafe fn install_composed_train_list(
     train_list: &[handlers::Contribution],
     entry: &builds::BuildEntry,
@@ -404,6 +419,25 @@ unsafe fn install_composed_train_list(
     match unsafe { handlers::install_train_list(train_list, entry, base, forms_len, logger) } {
         Ok(journal) => {
             logger.line(&journal);
+            // M7: the type-tab cycle fix (only meaningful with a composed
+            // filter installed — that is exactly this branch)
+            match unsafe { crate::tabrebuild::install(entry, base) } {
+                Ok(line) => logger.line(&line),
+                Err(e) => logger.err(&format!(
+                    "tab cycle fix: {e} — the purchase-list filter cycle keeps \
+                     its vanilla behaviour (fail-open)"
+                )),
+            }
+            // M7: the custom-train-form editor's candidate list rebuilds
+            // through a second hard-coded vanilla-whitelist scan (notes/23);
+            // the same composed keep-set gates it. Fail-open like the tab fix.
+            match unsafe { crate::formreadout::install(entry, base) } {
+                Ok(line) => logger.line(&line),
+                Err(e) => logger.err(&format!(
+                    "form readout fix: {e} — the custom-train editor keeps its \
+                     vanilla behaviour (fail-open)"
+                )),
+            }
             (1, 0)
         }
         Err(e) => {
@@ -768,6 +802,35 @@ fn install_probe(
         )
     } {
         logger.err(&format!("probe: {e} — remaining boot unaffected"));
+    }
+}
+
+/// The M7 purchase-window probe (opt-in diagnostics): hook the type-tab
+/// rebuild entry and the big list window entry trampoline-only and dump the
+/// spec-table manager's index vectors on entry/exit whenever a size changes
+/// (notes/23). A failure logs loudly and leaves the boot vanilla.
+fn install_window_probe(
+    entry: &builds::BuildEntry,
+    base: *const u8,
+    mods_dir: &Path,
+    logger: &log::Logger,
+) {
+    logger.line("probe: window hooks on (diagnostic)");
+    match unsafe {
+        crate::probe_window::install(
+            log::Logger::new(&mods_dir.join("a9loader.log")),
+            base,
+            entry,
+        )
+    } {
+        Ok(lines) => {
+            for l in lines {
+                logger.line(&l);
+            }
+        }
+        Err(e) => logger.err(&format!(
+            "probe refused: window: {e} — remaining boot unaffected"
+        )),
     }
 }
 

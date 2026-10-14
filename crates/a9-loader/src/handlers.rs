@@ -21,11 +21,21 @@ const FORMS_SCAN_LIMIT: usize = 16384;
 const FORMS_MAX: usize = forms::FORMS_MAX;
 
 static G_ALLOWED: OnceLock<Box<[u8; FORMS_MAX / 8]>> = OnceLock::new();
+
 /// per-call trace logger for the installed filter (the list windows call it
 /// on every rebuild — the trace shows the INPUT list each time, which is
 /// the observable of "trains disappear after cycling the type filter":
 /// shrinking inputs = rows being invalidated between rebuilds)
 static G_TRACE: OnceLock<log::Logger> = OnceLock::new();
+
+/// The composed keep-bitmap the `train_list` filter serves (M5 W3) — `None`
+/// when no mod declared a `train_list` contribution (the filter hook was never
+/// installed and the game's own 97-entry whitelist filter is in force). The M7
+/// type-tab rebuild fix (`crate::tabrebuild`) re-derives tab membership from
+/// exactly this set, so the purchase list survives a filter cycle intact.
+pub fn composed_allowed() -> Option<&'static [u8; FORMS_MAX / 8]> {
+    G_ALLOWED.get().map(|b| &**b)
+}
 
 type FilterFn =
     unsafe extern "system" fn(*mut c_void, *mut u32, *mut u32, *mut c_void) -> *mut c_void;

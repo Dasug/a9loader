@@ -575,8 +575,204 @@ static int setup_probe_pages(void)
     return probe_ok;
 }
 
-/* ---- M5 tailgate fakes (same page set as the inject pages). The family-A
- * decode entry carries a movabs+branch shim to the plain C decoder; the
+/* ---- M7 purchase-window type-cycle fakes (builds.toml train_list_tab_*).
+ * The tab rebuild entry carries its real 17-byte prologue + an undo thunk into
+ * a plain C body; the scan site carries the 25 real bytes the fix rewrites; the
+ * cave page stays 0xCC (the fix's expect bytes). The fake spec-table manager +
+ * rows live in host-owned storage (the probe reads them). */
+#define RVA_TAB_SCAN 0x19E7EEu   /* the vanilla-whitelist scan the fix rewrites */
+#define RVA_TAB      0x19E760u   /* FUN_14019e760 type-tab rebuild entry */
+#define RVA_TAB_CAVE 0x5B1E96u   /* the fix's relay cave */
+#define RVA_WINDOW   0x2CA400u   /* train_list_big_list_window */
+#define RVA_MGR      0xE14510u   /* DAT_140e14510 spec-table manager */
+#define MGR_ROWS_N   400u
+#define MGR_VEC_CAP  512u
+
+/* M7b: the custom-train-form editor's SECOND vanilla-whitelist scan
+ * (builds.toml train_form_scan + train_form_cave). Both live inside the
+ * 0x190000 / 0x5B1000 pages setup_tab_pages already maps. */
+#define RVA_FORM_SCAN 0x19E9DFu  /* the scan FUN_14019e950 the fix rewrites */
+#define RVA_FORM_CAVE 0x5B2015u  /* the fix's relay cave */
+#define FORM_FOUND_OFF 0x73u     /* 0x14019ea52 — the primary admit path */
+
+static const unsigned char g_tab_scan_orig[25] = {
+    0x48,0x8d,0x05,0xcb,0xd9,0x55,0x00,0x39,0x38,0x74,0x0e,0x48,0x83,0xc0,0x04,
+    0x49,0x3b,0xc5,0x7c,0xf3,0xe9,0x9c,0x00,0x00,0x00
+};
+static const unsigned char g_form_scan_orig[20] = {
+    0x48,0x8d,0x05,0xda,0xd7,0x55,0x00,0x39,0x18,0x74,0x68,
+    0x48,0x83,0xc0,0x04,0x48,0x3b,0xc1,0x7c,0xf3
+};
+static const unsigned char g_tab_orig[17] = {
+    0x40,0x53,0x57,0x41,0x54,0x41,0x56,0x41,0x57,0x48,0x83,0xEC,0x20,0x48,0x8B,0x41,0x48
+};
+static const unsigned char g_window_orig[19] = {
+    0x48,0x8B,0xC4,0x48,0x89,0x48,0x08,0x55,0x53,0x56,0x57,0x41,0x54,0x41,0x55,0x41,0x56,0x41,0x57
+};
+
+static unsigned *g_mgr_rows;   /* MGR_ROWS_N * 0x140 bytes, heap (image-size neutral) */
+static unsigned *g_vec_unf, *g_vec_flt, *g_vec_typ;
+
+extern void tab_undo_thunk(void);
+extern void window_undo_thunk(void);
+
+__asm__(
+    ".globl tab_undo_thunk\n"
+    "tab_undo_thunk:\n"
+    "addq $0x20, %rsp\n"
+    "popq %r15\n"
+    "popq %r14\n"
+    "popq %r12\n"
+    "popq %rdi\n"
+    "popq %rbx\n"
+    "jmp tab_body\n"
+    ".globl window_undo_thunk\n"
+    "window_undo_thunk:\n"
+    "popq %r15\n"
+    "popq %r14\n"
+    "popq %r13\n"
+    "popq %r12\n"
+    "popq %rdi\n"
+    "popq %rsi\n"
+    "popq %rbx\n"
+    "popq %rbp\n"
+    "jmp window_body\n");
+
+/* M7b: run the rewritten custom-train-form scan with the game's stack shape.
+ * The scan is reached by fall-through in the game with RSP == 0 (mod 16), so
+ * the thunk pushes rbx (RSP 8 -> 0) and jumps — the scan's own `call cave`
+ * then presents the ABI's RSP == 8 at the composed-keep stub. The branch
+ * markers pop rbx back and return, so the C caller reads the decision in eax. */
+void *g_form_scan_ptr = 0;   /* set by mode_formfix; the thunk jumps here */
+extern unsigned form_scan_call(unsigned id);
+__asm__(
+    ".text\n"
+    ".globl form_scan_call\n"
+    "form_scan_call:\n"
+    "  pushq %rbx\n"
+    "  movl %ecx, %ebx\n"   /* Win64: the first integer arg is in RCX */
+    "  jmpq *g_form_scan_ptr(%rip)\n");
+
+__attribute__((used, noinline)) void tab_body(void *manager, const int *tab)
+{
+    /* replicate the PATCHED FUN_14019e760: valid row + composed membership
+     * (through the loader's relay cave) + tab type match -> append to +0x48 */
+    if (*(BYTE *)(g_base + RVA_TAB_SCAN) != 0x4D) {
+        printf("tab_body: fix not installed — no-op\n");
+        return;
+    }
+    typedef unsigned char (*mem_fn)(unsigned);
+    mem_fn mem = (mem_fn)(g_base + RVA_TAB_CAVE);
+    BYTE *m = (BYTE *)manager;
+    BYTE *rows = *(BYTE **)(m + 0x18);
+    BYTE *rows_end = *(BYTE **)(m + 0x20);
+    unsigned nrows = (unsigned)((rows_end - rows) / 0x140);
+    unsigned *out = *(unsigned **)(m + 0x48);
+    *(void **)(m + 0x50) = out;
+    for (unsigned i = 0; i < nrows; i++) {
+        BYTE *row = rows + (size_t)i * 0x140;
+        if (!row[0]) continue;
+        if (!mem(i)) continue;
+        int ty = *(int *)(row + 4), ok = 0;
+        for (int k = 0; k < 10; k++) {
+            if (tab[k] == -1) break;
+            if (tab[k] == ty) { ok = 1; break; }
+        }
+        if (!ok) continue;
+        *out++ = i;
+    }
+    *(void **)(m + 0x50) = out;
+    printf("tab_body: called (composed rebuild)\n");
+}
+__attribute__((used, noinline)) void window_body(void *obj)
+{
+    (void)obj;
+    printf("window_body: called\n");
+}
+
+/* map the M7 fake pages and lay down the expect bytes + undo thunks. Called
+ * before the proxy loads, like every other fake page. */
+static int setup_tab_pages(void)
+{
+    struct { UINT_PTR page; UINT_PTR span; const char *label; } prooms[] = {
+        { 0x190000, 0x10000, "0x190000" },  /* tab rebuild + scan */
+        { 0x5B1000, 0x10000, "0x5b1000" },  /* the relay cave */
+        { 0x2C0000, 0x10000, "0x2c0000" },  /* the window */
+        { 0xE14000, 0x10000, "0xe14000" },  /* the manager */
+    };
+    for (unsigned i = 0; i < sizeof(prooms) / sizeof(prooms[0]); i++) {
+        if (!map_fixed((UINT_PTR)g_base + prooms[i].page, prooms[i].span, PAGE_EXECUTE_READWRITE)) {
+            printf("WARN: could not map tab page at RVA %s err=%lu\n",
+                   prooms[i].label, (unsigned long)GetLastError());
+            return 0;
+        }
+        memset((BYTE *)g_base + prooms[i].page, 0xCC, prooms[i].span);
+    }
+    /* the fake manager's rows + index vectors: heap, so the host image size
+     * stays below the M4 inject fake runner (RVA 0x504c0) */
+    g_mgr_rows = (unsigned *)VirtualAlloc(NULL, (SIZE_T)MGR_ROWS_N * 0x140,
+                                          MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    g_vec_unf = (unsigned *)VirtualAlloc(NULL, MGR_VEC_CAP * 4, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    g_vec_flt = (unsigned *)VirtualAlloc(NULL, MGR_VEC_CAP * 4, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    g_vec_typ = (unsigned *)VirtualAlloc(NULL, MGR_VEC_CAP * 4, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (!g_mgr_rows || !g_vec_unf || !g_vec_flt || !g_vec_typ) {
+        printf("WARN: could not allocate the fake manager storage\n");
+        return 0;
+    }
+    memcpy((BYTE *)g_base + RVA_TAB_SCAN, g_tab_scan_orig, sizeof(g_tab_scan_orig));    memcpy((BYTE *)g_base + RVA_TAB, g_tab_orig, sizeof(g_tab_orig));
+    {
+        BYTE *t = (BYTE *)g_base + RVA_TAB + sizeof(g_tab_orig);
+        intptr_t rel = (intptr_t)&tab_undo_thunk - (intptr_t)(t + 5);
+        t[0] = 0xE9;
+        memcpy(t + 1, &rel, 4);
+    }
+    memcpy((BYTE *)g_base + RVA_WINDOW, g_window_orig, sizeof(g_window_orig));
+    {
+        BYTE *w = (BYTE *)g_base + RVA_WINDOW + sizeof(g_window_orig);
+        intptr_t rel = (intptr_t)&window_undo_thunk - (intptr_t)(w + 5);
+        w[0] = 0xE9;
+        memcpy(w + 1, &rel, 4);
+    }
+    /* M7b: the custom-train-form scan + the two branch-target markers the
+     * rewritten scan reaches: +0x14 (fall-through = not kept) and +0x73
+     * (found = kept). `mov eax,N; pop rbx; ret` — pop rbx undoes the call
+     * thunk's push, so the host reads the scan's own decision. */
+    memcpy((BYTE *)g_base + RVA_FORM_SCAN, g_form_scan_orig, sizeof(g_form_scan_orig));
+    {
+        BYTE *fall = (BYTE *)g_base + RVA_FORM_SCAN + sizeof(g_form_scan_orig);
+        BYTE *found = (BYTE *)g_base + RVA_FORM_SCAN + FORM_FOUND_OFF;
+        fall[0] = 0xB8; fall[1] = 2; fall[2] = 0; fall[3] = 0; fall[4] = 0; fall[5] = 0x5B; fall[6] = 0xC3;
+        found[0] = 0xB8; found[1] = 1; found[2] = 0; found[3] = 0; found[4] = 0; found[5] = 0x5B; found[6] = 0xC3;
+    }
+    return 1;
+}
+
+/* the fake spec-table manager: 400 valid rows (all type 0) + the three index
+ * vectors. +0x48 is pre-seeded with the composed keep-set the loader's filter
+ * would have produced (ids 4/16/42 are vanilla-whitelisted, 329 is not). */
+static void mgr_setup(void)
+{
+    BYTE *m = (BYTE *)g_base + RVA_MGR;
+    for (unsigned i = 0; i < MGR_ROWS_N; i++) {
+        BYTE *row = (BYTE *)g_mgr_rows + (size_t)i * 0x140;
+        row[0] = 1;
+        *(int *)(row + 4) = 0;
+    }
+    *(void **)(m + 0x18) = g_mgr_rows;
+    *(void **)(m + 0x20) = (BYTE *)g_mgr_rows + MGR_ROWS_N * 0x140;
+    *(void **)(m + 0x30) = g_vec_unf;
+    *(void **)(m + 0x38) = g_vec_unf;
+    *(void **)(m + 0x40) = g_vec_unf + MGR_VEC_CAP;
+    g_vec_flt[0] = 4; g_vec_flt[1] = 16; g_vec_flt[2] = 42; g_vec_flt[3] = 329;
+    *(void **)(m + 0x48) = g_vec_flt;
+    *(void **)(m + 0x50) = g_vec_flt + 4;
+    *(void **)(m + 0x58) = g_vec_flt + MGR_VEC_CAP;
+    *(void **)(m + 0x60) = g_vec_typ;
+    *(void **)(m + 0x68) = g_vec_typ;
+    *(void **)(m + 0x70) = g_vec_typ + MGR_VEC_CAP;
+}
+
+/* ---- M5 tailgate fakes (same page set as the inject pages). The family-A * decode entry carries a movabs+branch shim to the plain C decoder; the
  * vp/tp/i.dat call sites carry the address book's E8 expect bytes followed by
  * a clean `ret` continuation the spliced stub returns into; the relay cave
  * page stays 0xCC (the cave expect bytes). */
@@ -917,6 +1113,87 @@ static int mode_probe(void)
     return 0;
 }
 
+/* the M7 fix evidence: with a train_list mod, the loader rewrote the vanilla
+ * whitelist scan to call its composed-keep test through the relay cave. The
+ * host calls the CAVE directly with a few ids (the patched scan's exact call
+ * shape) and reads back the patched site's bytes. */
+static int mode_tabfix(void)
+{
+    mgr_setup();
+    if (*(BYTE *)(g_base + RVA_TAB_SCAN) != 0x4D) {
+        printf("tabfix: site NOT patched (byte=0x%02x) — skipping the cave call\n",
+               *(BYTE *)(g_base + RVA_TAB_SCAN));
+        return 1;
+    }
+    typedef unsigned char (*mem_fn)(unsigned);
+    mem_fn mem = (mem_fn)(g_base + RVA_TAB_CAVE);
+    unsigned ids[] = { 4, 16, 42, 329, 1, 999 };
+    printf("tabfix: cave results:");
+    for (unsigned i = 0; i < sizeof(ids) / sizeof(ids[0]); i++) {
+        printf(" %u->%u", ids[i], mem(ids[i]));
+    }
+    printf("\n");
+    printf("tabfix: site[0]=0x%02x site[15]=0x%02x site[24]=0x%02x\n",
+           *(BYTE *)(g_base + RVA_TAB_SCAN),
+           *(BYTE *)(g_base + RVA_TAB_SCAN + 15),
+           *(BYTE *)(g_base + RVA_TAB_SCAN + 24));
+    printf("tabfix: done\n");
+    return 0;
+}
+
+/* the M7b custom-train-form fix evidence: check the site was rewritten, call
+ * the composed-keep cave for a few ids, and (through the rewritten scan's own
+ * two branch markers) read the keep/drop decision end-to-end. */
+static int mode_formfix(void)
+{
+    if (*(BYTE *)(g_base + RVA_FORM_SCAN) != 0x89) {
+        printf("formfix: site NOT patched (byte=0x%02x) — skipping the cave call\n",
+               *(BYTE *)(g_base + RVA_FORM_SCAN));
+        return 1;
+    }
+    typedef unsigned char (*mem_fn)(unsigned);
+    mem_fn mem = (mem_fn)(g_base + RVA_FORM_CAVE);
+    unsigned ids[] = { 4, 16, 42, 329, 1, 999 };
+    printf("formfix: cave results:");
+    for (unsigned i = 0; i < sizeof(ids) / sizeof(ids[0]); i++) {
+        printf(" %u->%u", ids[i], mem(ids[i]));
+    }
+    printf("\n");
+    {
+        BYTE *s = (BYTE *)g_base + RVA_FORM_SCAN;
+        printf("formfix: site bytes:");
+        for (int i = 0; i < 20; i++) printf(" %02x", s[i]);
+        printf("\n");
+    }
+    /* end-to-end: run the rewritten scan itself and read its branch decision
+     * (1 = the primary admit path was taken, 2 = the not-found fall-through) */
+    g_form_scan_ptr = (void *)(g_base + RVA_FORM_SCAN);
+    printf("formfix: scan branch: 329->%u 4->%u 1->%u 999->%u (1=kept path, 2=drop path)\n",
+           form_scan_call(329), form_scan_call(4), form_scan_call(1), form_scan_call(999));
+    printf("formfix: done\n");
+    return 0;
+}
+
+/* the M7 probe evidence: call the (possibly hooked) window + tab-rebuild
+ * entries so the diagnostic dumps the manager lists; shrink +0x48 between
+ * calls so the delta line fires. */
+static int mode_window(void)
+{
+    mgr_setup();
+    static int tabdesc[11] = { 0, 1, -1, 0, 0, 0, 0, 0, 0, 0, 0 };
+    typedef void (*win_fn)(void *);
+    typedef void (*tab_fn)(void *, const int *);
+    printf("window: call 1 (frame)\n");
+    ((win_fn)(g_base + RVA_WINDOW))(NULL);
+    printf("window: call 2 (frame; +0x48 shrunk to 3)\n");
+    *(void **)((BYTE *)g_base + RVA_MGR + 0x50) = g_vec_flt + 3;
+    ((win_fn)(g_base + RVA_WINDOW))(NULL);
+    printf("window: tab rebuild call\n");
+    ((tab_fn)(g_base + RVA_TAB))((void *)((BYTE *)g_base + RVA_MGR), tabdesc);
+    printf("window: done\n");
+    return 0;
+}
+
 /* the M4 inject scenario host path: (1) open the pack through the
  * (possibly hooked) CFile::Open — the injector's capture seam fires
  * INSIDE that open for planned packs; (2) fill the fake pool the
@@ -1146,6 +1423,7 @@ int main(int argc, char **argv)
     if (!setup_filter_pages()) return 3;
     if (!setup_cfile_page()) return 3;
     g_probe_ok = setup_probe_pages();
+    setup_tab_pages();
     setup_inject_pages(mode);
 
     /* real FORM list bytes -> the mapped region (NUL-terminated UTF-16) */
@@ -1186,6 +1464,9 @@ int main(int argc, char **argv)
     if (!strcmp(mode, "overlaytp")) return mode_overlaytp();
     if (!strcmp(mode, "loose")) return mode_loose();
     if (!strcmp(mode, "probe")) return mode_probe();
+    if (!strcmp(mode, "tabfix")) return mode_tabfix();
+    if (!strcmp(mode, "formfix")) return mode_formfix();
+    if (!strcmp(mode, "window")) return mode_window();
     if (!strcmp(mode, "inject")) return mode_inject();
     if (!strcmp(mode, "tailgate") || !strcmp(mode, "tailgate-mismatch")
         || !strcmp(mode, "tailgate-ws"))

@@ -131,7 +131,7 @@ pub unsafe fn install(logger: log::Logger, base: *const u8, specs: &[Spec]) -> R
 }
 
 /// Read a wide string at `p` (bounded), requiring its pages readable.
-fn wide_str(p: *const u16) -> Option<String> {
+pub(crate) fn wide_str(p: *const u16) -> Option<String> {
     if p.is_null() {
         return None;
     }
@@ -169,7 +169,7 @@ fn wide_str(p: *const u16) -> Option<String> {
 /// pointer's low word (its high byte is rarely 0 and the unit pair almost
 /// never decodes as a long printable run), so the bounded read + one
 /// printable check separates the encodings well enough for a diagnostic.
-fn wide_str_indirect(p: *const c_void) -> Option<String> {
+pub(crate) fn wide_str_indirect(p: *const c_void) -> Option<String> {
     if p.is_null() {
         return None;
     }

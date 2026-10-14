@@ -101,6 +101,14 @@ pub struct Config {
     /// trampoline-only and logs one line per fetch call (obj / composed key).
     /// Diagnostics only — no serving behavior changes; fail-open per anchor.
     pub probe_fetch: bool,
+    /// M7 diagnostic — **OFF BY DEFAULT, not part of normal operation**: see
+    /// `probe_window.rs`. When true the loader hooks the big purchase/list
+    /// window (`train_list_big_list_window`) trampoline-only and dumps the
+    /// spec-table manager's three index vectors (+0x30 unfiltered / +0x48 the
+    /// list the UI reads / +0x60 the type-group list) on the way in and on the
+    /// way out of every call that CHANGES a size — the observable of the
+    /// notes/23 type-cycle quirk. Diagnostics only; no behaviour change.
+    pub probe_window: bool,
     /// how [[pack]] image effects serve (see [`PackServing`]); "inject" (the
     /// default) = the M4 window-scoped famb injector (loader memory, no cache
     /// file), "merge" = the M3 cache overlay
@@ -130,6 +138,7 @@ impl Default for Config {
             priorities: BTreeMap::new(),
             warnings: Vec::new(),
             probe_fetch: false,
+            probe_window: false,
             pack_serving: PackServing::Inject,
             asset_serving: AssetServing::Tailgate,
             workspace_out_mb: 0,
@@ -193,6 +202,12 @@ pub fn read(path: &Path) -> Config {
                 None => cfg
                     .warnings
                     .push(format!("probe_fetch must be a bool, got {val:?}")),
+            },
+            "probe_window" => match val.as_bool() {
+                Some(b) => cfg.probe_window = b,
+                None => cfg
+                    .warnings
+                    .push(format!("probe_window must be a bool, got {val:?}")),
             },
             "pack_serving" => match val.as_str().and_then(PackServing::parse) {
                 Some(m) => cfg.pack_serving = m,
@@ -311,6 +326,22 @@ jp-liveries = 10
         let cfg = read(&path);
         assert!(!cfg.probe_fetch);
         assert!(cfg.warnings.iter().any(|w| w.contains("probe_fetch")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parses_probe_window_flag() {
+        let dir = std::env::temp_dir().join("a9ml-cfg-test-probe-window");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("a9loader.toml");
+        std::fs::write(&path, "probe_window = true\n").unwrap();
+        let cfg = read(&path);
+        assert!(cfg.probe_window);
+        assert!(cfg.warnings.is_empty());
+        std::fs::write(&path, "probe_window = \"yes\"\n").unwrap();
+        let cfg = read(&path);
+        assert!(!cfg.probe_window);
+        assert!(cfg.warnings.iter().any(|w| w.contains("probe_window")));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

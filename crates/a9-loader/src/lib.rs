@@ -28,6 +28,8 @@ mod engine; // the M2 boot engine (config, build gate, scan, resolve, execute)
 #[cfg(target_os = "windows")]
 mod forward; // the 10 forwarded VERSION.dll exports
 #[cfg(target_os = "windows")]
+mod formreadout; // M7: the custom-train-form editor list fix (notes/23, 2nd scan)
+#[cfg(target_os = "windows")]
 mod handlers; // effect handlers: train_list, nop, [[patch]] executor
 #[cfg(target_os = "windows")]
 mod injector; // M4: pack_serving = inject — the famb window-scoped splice
@@ -40,7 +42,11 @@ mod patch; // VirtualProtect write helpers + patch recipes
 #[cfg(target_os = "windows")]
 mod probe; // M4: the runtime fetch probe (probe_fetch = true diagnostics)
 #[cfg(target_os = "windows")]
+mod probe_window; // M7: the purchase-window list dump (probe_window = true diagnostics)
+#[cfg(target_os = "windows")]
 mod sys; // minimal hand-declared Win32 + readability guards
+#[cfg(target_os = "windows")]
+mod tabrebuild; // M7: the type-tab rebuild fix (notes/23 purchase-list quirk)
 #[cfg(target_os = "windows")]
 mod tailgate; // M5: the family-A in-place decode append ([[asset]] serving)
 

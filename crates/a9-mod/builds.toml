@@ -181,3 +181,90 @@ expect = "48,83,ec,28,48,85,c9,74,0d,48,83,e1,f8,48,8b,49"
 [build."5.00.5634".anchors.workspace_cave]
 rva = 0x592363              # 19-byte CC run in .text (file 0x591763)
 expect = "cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc"
+
+# ---------------------------------------------------------------------------
+# M7 — the purchase-window TYPE-TAB cycle (corpus notes/23).
+#
+# train_list_big_list_window (0x1402ca400) rebuilds manager+0x48 on EVERY type
+# tab (re)build by calling FUN_14019e760 with the tab's type list (the 0x2c-
+# stride descriptor table 0x14068e950). That function re-derives membership by
+# linear-scanning the VANILLA 97-entry whitelist — it never consults the filter
+# the loader replaces (train_list_filter 0x1a13b0, used only by the boot-time
+# builder). So every row the composed filter admitted that is not in the
+# vanilla 97 vanishes on the first cycle.
+#
+# The fix rewrites that scan (25 bytes, 0x14019e7ee..0x14019e807) to call the
+# loader's composed-keep test instead of scanning the vanilla table:
+#   mov r13,r8; mov ecx,edi; call <relay cave>; mov r8,r13; test al,al;
+#   jnz <found>; jmp <skip>; nops
+# (R13 is dead after this site — the original's whitelist-end value is only
+# read by the scan being replaced; R8 is the rows base, live across the call,
+# so it is parked in callee-saved R13.) The relay cave holds the FF 25 +
+# imm64 thunk into version.dll; the original still does its own vector append
+# and growth, so no grow helper is involved.
+[build."5.00.5634".anchors.train_list_tab_scan]
+rva = 0x19E7EE              # the vanilla-whitelist scan inside FUN_14019e760 (file 0x19dbee)
+expect = "48,8d,05,cb,d9,55,00,39,38,74,0e,48,83,c0,04,49,3b,c5,7c,f3,e9,9c,00,00,00"
+
+# The M7 relay cave: a 16-byte CC run in .text preceded by the
+# `41 5e 41 5c 5f c3` (pop r14/r12/rdi; ret) epilogue, fresh — the M4 famb
+# cave 0x59a071, the M5 tailgate cave 0x5a1d13 and the M5-T workspace cave
+# 0x592363 are consumed already.
+[build."5.00.5634".anchors.train_list_tab_cave]
+rva = 0x5B1E96              # 16-byte CC run in .text (file 0x5b1296)
+expect = "cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc"
+
+# ---------------------------------------------------------------------------
+# M7b — the custom-train-form editor's SECOND vanilla-whitelist scan.
+#
+# FUN_14019e950 (0x14019e950), called from train_form_readout_refresh
+# (0x1401f3ec0), rebuilds the 0x18-stride candidate vector at manager+0x34e8
+# (manager = DAT_140e14510 -> the vector at 0x140e179f8) that the custom
+# train-form editor window (ui_mode_apply case 0xb, DAT_140e24d50) renders for
+# its 全て/オリジナル/インポート sub-tabs. For the base-form sub-views it walks
+# the 0x140-byte spec rows and admits a valid row only if it is in the VANILLA
+# 97-entry purchase whitelist (or, on the fallback path, has 特殊車両フラグ
+# row+0x9e >= 2). It never consults the filter the loader replaces, so mod
+# trains vanish from the editor's base-train list.
+#
+# The fix rewrites that scan (20 bytes, 0x14019e9df..0x14019e9f3) to call the
+# loader's composed-keep test instead of scanning the vanilla table:
+#   mov ecx,ebx; call <relay cave>; xor r11d,r11d; test al,al;
+#   jnz <found>; nops
+# (R11 is 0 here and is read by the primary admit path at 0x14019ea52; RBX/RDI
+# are callee-saved and survive the call. The fall-through — not found — lands
+# exactly at the original 0x14019e9f3 fallback path.) RSP is 16-aligned at the
+# site, so the call presents the ABI's RSP == 8 at the callee.
+[build."5.00.5634".anchors.train_form_scan]
+rva = 0x19E9DF              # the vanilla-whitelist scan inside FUN_14019e950 (file 0x19dddf)
+expect = "48,8d,05,da,d7,55,00,39,18,74,68,48,83,c0,04,48,3b,c1,7c,f3"
+
+# The M7b relay cave: a 17-byte CC run in .text preceded by the
+# `48 f7 d9 1b c0 83 e0 01 c3` (neg/sbb/and/ret) tail, fresh — the M4 famb
+# cave 0x59a071, the M5 tailgate cave 0x5a1d13, the M5-T workspace cave
+# 0x592363 and the M7 tab cave 0x5b1e96 are consumed already.
+[build."5.00.5634".anchors.train_form_cave]
+rva = 0x5B2015              # 17-byte CC run in .text (file 0x5b1415)
+expect = "cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc"
+
+# The window probe's anchors (probe_window = true diagnostics):
+#  - the type-tab rebuild entry (17-byte position-independent prologue:
+#    push rbx/rdi/r12/r14/r15; sub rsp,0x20; mov rax,[rcx+0x48]) — the precise
+#    cycle engine, hooked trampoline-only to dump the manager lists in/out;
+#  - the big list window entry (19-byte position-independent prologue:
+#    mov rax,rsp; mov [rax+8],rcx; push rbp/rbx/rsi/rdi/r12/r13/r14/r15) — the
+#    per-frame shell that calls it, hooked to bracket the frame;
+#  - the spec-table manager singleton (DAT_140e14510): +0x18 rows begin /
+#    +0x20 rows end (0x140-byte rows), +0x30/+0x48/+0x60 the three u32 index
+#    vectors (unfiltered / the list the UI reads / the type-group list).
+#    Runtime pointers — no expect bytes (like workspace_globals).
+[build."5.00.5634".anchors.train_list_tab_rebuild]
+rva = 0x19E760              # FUN_14019e760 type-tab rebuild (file 0x19db60)
+expect = "40,53,57,41,54,41,56,41,57,48,83,ec,20,48,8b,41,48"
+
+[build."5.00.5634".anchors.train_list_window_entry]
+rva = 0x2CA400              # train_list_big_list_window (file 0x2c9800)
+expect = "48,8b,c4,48,89,48,08,55,53,56,57,41,54,41,55,41,56,41,57"
+
+[build."5.00.5634".anchors.train_spec_manager]
+rva = 0xE14510
