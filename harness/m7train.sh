@@ -187,7 +187,7 @@ check "vector grown"        "train: vector rows after injection = 422" "$OUT"
 check "injected fields"     "train: injected row 421 bValid=1 special=0 cruise=70 fare=250 carCount=1" "$OUT"
 check "injected jp name"    "train: injected names jp=30b5 30f3 30d7 30eb 6c17 52d5 8eca " "$OUT"
 check "injected en name"    "en=0053 0061 006d 0070 006c 0065 0020 0052 0061 0069 006c 0063 0061 0072 " "$OUT"
-check "injected form name"  "form=0046 004f 0052 004d 005f 0054 0052 0041 0049 004e 004d 004f 0044 005f 0053 0041 004d 0050 004c 0045 " "$OUT"
+check "injected form name"  "form=0066 006f 0072 006d 005f 0074 0072 0061 0069 006e 006d 006f 0064 005f 0073 0061 006d 0070 006c 0065 " "$OUT"
 check "reserved id admitted" "train: reserved id 421 kept by the composed filter = 1" "$OUT"
 # the derived rows in the merged csvp (byte-exact text via extract-csv)
 check "csvp merged"         "4 row patch(es) (0 replaced, 3 added, 11 group-appended)" "$LOG"
