@@ -150,6 +150,9 @@ fn print_config(o: &Offline) {
     if o.cfg.probe_fetch {
         println!("  probe: fetch hooks on (diagnostic)");
     }
+    if o.cfg.probe_window {
+        println!("  probe: window hooks on (diagnostic)");
+    }
 }
 
 /// How `[[pack]]` effects will be served (merge overlay vs. window injection).

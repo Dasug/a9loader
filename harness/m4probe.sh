@@ -105,4 +105,96 @@ else
     FAILED=$((FAILED + 1))
 fi
 
+# ---- M7: the purchase-window type-cycle fix + its opt-in probe -------------
+# a train_list mod whose composed keep-set is exactly {4,16,42,329}: 4/16/42
+# are in the shipped 97-entry whitelist, 329 (FORM_KIHA261_TOK) is not — the
+# vanilla scan would drop it, the fix must keep it.
+trainlist_mod() {
+    mkdir -p "$scen_dir/mods/tablist"
+    cat > "$scen_dir/mods/tablist/mod.toml" <<'EOF'
+id = "tablist"
+name = "Tab cycle fix probe"
+version = "1.0.0"
+author = "test"
+
+[[hook]]
+target = "train_list_filter"
+handler = "train_list"
+mode = "allow"
+list = "forms.txt"
+EOF
+    printf 'FORM_0\nFORM_40\nFORM_205B\nFORM_KIHA261_TOK\n' > "$scen_dir/mods/tablist/forms.txt"
+}
+
+echo "== T1: the type-cycle fix rewrites the vanilla whitelist scan"
+new_scen t1-tabfix
+trainlist_mod
+run_host tabfix
+LOG="$scen_dir/mods/a9loader.log"
+OUT="$scen_dir/out.txt"
+check "fix installed"      "tab cycle fix: scan rva=0x19e7ee"        "$LOG"
+check "cave recorded"      "cave rva=0x5b1e96"                      "$LOG"
+checkf "host ran"          grep -q "tabfix: done"                   "$OUT"
+check "site rewritten"     "site[0]=0x4d"                           "$OUT"
+check "non-vanilla kept"   "329->1"                                 "$OUT"
+check "vanilla kept"       " 4->1"                                  "$OUT"
+check "unlisted dropped"   " 1->0"                                  "$OUT"
+check "out-of-range dropped" "999->0"                               "$OUT"
+
+echo "== F1: the custom-train-form fix rewrites the SECOND vanilla scan"
+new_scen f1-formfix
+trainlist_mod
+run_host formfix
+LOG="$scen_dir/mods/a9loader.log"
+OUT="$scen_dir/out.txt"
+check "fix installed"        "form readout fix: scan rva=0x19e9df"  "$LOG"
+check "cave recorded"        "cave rva=0x5b2015"                   "$LOG"
+checkf "host ran"            grep -q "formfix: done"               "$OUT"
+check "site rewritten"       "formfix: site bytes: 89 d9 e8 2f 36 41 00 45 31 db 84 c0 75 65 90 90 90 90 90 90" "$OUT"
+check "cave keeps non-vanilla" "329->1"                            "$OUT"
+check "cave keeps vanilla"   " 4->1"                               "$OUT"
+check "cave drops unlisted"  " 1->0"                               "$OUT"
+check "cave drops out-of-range" "999->0"                           "$OUT"
+check "scan branch: kept"    "scan branch: 329->1 4->1"            "$OUT"
+check "scan branch: dropped" "1->2 999->2"                         "$OUT"
+
+echo "== W1: window probe off (default) — no window probe lines"
+new_scen w1-off
+trainlist_mod
+run_host window
+checkf "host ran"          grep -q "window: done"                   "$scen_dir/out.txt"
+if grep -q "probe: window\|probe: tab rebuild" "$scen_dir/mods/a9loader.log" 2>/dev/null; then
+    echo "   [FAIL] window probe lines present with probe_window unset"
+    FAILED=$((FAILED + 1))
+else
+    echo "   [ ok ] log clean of window probe lines"
+fi
+
+echo "== W2: window probe on (probe_window = true) — dumps + the evidence line"
+new_scen w2-on
+trainlist_mod
+printf 'probe_window = true\n' > "$scen_dir/a9loader.toml"
+run_host window
+LOG="$scen_dir/mods/a9loader.log"
+OUT="$scen_dir/out.txt"
+check "probe enabled"       "probe: window hooks on (diagnostic)"      "$LOG"
+check "tab hook installed"  "probe: tab rebuild (FUN_14019e760 — the type-cycle engine) hook installed rva=0x19e760 expect=verified" "$LOG"
+check "window hook installed" "probe: window (train_list_big_list_window — the frame bracket) hook installed rva=0x2ca400 expect=verified" "$LOG"
+check "window entry dump"   "probe: window #1 (entry) lists +0x30="   "$LOG"
+check "window change dump"  "probe: window #2 (entry) lists +0x30="   "$LOG"
+check "tab dump"            "probe: tab rebuild #1 lists +0x30="      "$LOG"
+check "delta line"          "probe: tab rebuild   +0x48 delta:"       "$LOG"
+check "per-row dump"        "probe: tab rebuild   +0x48 id="          "$LOG"
+check "evidence line"       "tab rebuild #1 tab=#0 -> +0x48 4 rows kept by the composed keep-set" "$LOG"
+checkf "host ran"           grep -q "window: done"                    "$OUT"
+
+echo "== W3: probe_window on, a9ml surfaces the diagnostic"
+OUT3=$("$A9ML" list --game "$scen_dir" 2>&1 || true)
+if echo "$OUT3" | grep -qF "probe: window hooks on (diagnostic)"; then
+    echo "   [ ok ] a9ml list shows the window probe flag"
+else
+    echo "   [FAIL] a9ml list missing the window probe flag"
+    FAILED=$((FAILED + 1))
+fi
+
 harness_done "M4 PROBE HARNESS"
