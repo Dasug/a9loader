@@ -648,6 +648,82 @@ pub unsafe fn install_trains(
     }
 }
 
+/// DIAGNOSTIC: dump what the loader can see of the spec table at each
+/// `train_list_builder` call.
+///
+/// The live acceptance boot refused twice with "donor row 195 (FORM_KH32) is not
+/// populated yet (bValid == 0)", including at a call that came AFTER the boot had
+/// finished — so either the row index we look up is not the row the game fills,
+/// or the fill happens somewhere we never observe. This prints the vector's real
+/// extent, the validity byte at a few known indices, the first populated index,
+/// the name strings at 195 and 212, and where (if anywhere) a row actually calls
+/// itself FORM_KH32. One boot with this in the log settles it.
+unsafe fn probe_row_map(g: &TrainState, call: u32, mgr: *mut u8) {
+    unsafe {
+        let ours = g.base + MANAGER_RVA;
+        let vec = (ours + MGR_ROWS) as *const usize;
+        let (begin, end) = if sys::is_readable(vec as *const c_void, 0x18) {
+            (*vec, *vec.add(1))
+        } else {
+            (0, 0)
+        };
+        let count = if begin != 0 && end >= begin { (end - begin) / ROW_STRIDE } else { 0 };
+
+        let name_at = |idx: usize| -> String {
+            if idx >= count {
+                return "<oob>".into();
+            }
+            let row = (begin + idx * ROW_STRIDE) as *const u8;
+            if !sys::is_readable(row as *const c_void, ROW_STRIDE) {
+                return "<unreadable>".into();
+            }
+            let p = *(row.add(ROW_PFORMNAME) as *const *const u16);
+            if p.is_null() || !sys::is_readable(p as *const c_void, 2) {
+                return "<null>".into();
+            }
+            let mut s = String::new();
+            for i in 0..24 {
+                let c = *p.add(i);
+                if c == 0 {
+                    break;
+                }
+                s.push(char::from_u32(c as u32).unwrap_or('?'));
+            }
+            s
+        };
+        let b0 = |idx: usize| -> String {
+            if idx >= count {
+                return "<oob>".into();
+            }
+            let row = (begin + idx * ROW_STRIDE) as *const u8;
+            if !sys::is_readable(row as *const c_void, 1) {
+                return "?".into();
+            }
+            (*row).to_string()
+        };
+        let first = (0..count)
+            .find(|&i| b0(i) == "1")
+            .map(|i| i.to_string())
+            .unwrap_or_else(|| "none".into());
+        let found = (0..count)
+            .find(|&i| name_at(i) == "FORM_KH32")
+            .map(|i| i.to_string())
+            .unwrap_or_else(|| "none".into());
+
+        g.logger.debug(&format!(
+            "train probe: call {call} mgr={mgr:p} ours={ours:#x} begin={begin:#x} count={count} \
+             b0[0]={} b0[62]={} b0[195]={} b0[212]={} first_valid={first} \
+             name[195]={:?} name[212]={:?} FORM_KH32_at={found}",
+            b0(0),
+            b0(62),
+            b0(195),
+            b0(212),
+            name_at(195),
+            name_at(212)
+        ));
+    }
+}
+
 /// The `train_list_builder` hook: inject once (fail-open), then run the
 /// original so it walks the grown vector through the composed keep-set.
 ///
@@ -666,8 +742,12 @@ unsafe extern "system" fn my_train_list_builder(manager: *mut u8) {
         {
             let Some(m) = TG.get() else { return };
             let Ok(mut g) = m.lock() else { return };
+            g.attempts += 1;
+            // DIAGNOSTIC: dump the spec-table state at EVERY call, including the
+            // ones after a successful injection, so the log shows how readiness
+            // evolves across the boot.
+            probe_row_map(&g, g.attempts, manager);
             if !g.done {
-                g.attempts += 1;
                 match inject_trains_locked(&g) {
                     Ok(n) => {
                         g.done = true;
