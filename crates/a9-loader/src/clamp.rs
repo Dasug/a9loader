@@ -74,8 +74,14 @@
 //!
 //! # Logging
 //!
-//! * `log_level = info`: **one** summary line per boot, emitted on the first
-//!   clamp — the site, the original id, the target and the vector size.
+//! * `log_level = info`: **one** line per SITE, emitted on the first clamp at
+//!   that site — the site, the original id, the target, the vector size and the
+//!   fact that re-saving now persists the placeholder row. Per-site (not
+//!   per-boot) on purpose: the head clamp and the car clamp are independent
+//!   choke points, and a boot that clamps cars first must not swallow the head
+//!   site's line (the earlier single `summary_logged` flag did exactly that —
+//!   the head path's diagnostics were invisible in a live save that hit the car
+//!   clamp first).
 //! * `log_level = debug`: one line per distinct (site, original id), plus a
 //!   per-site count milestone at 10/100/1000/… clamps, so a save full of bad
 //!   ids cannot flood the log but the total is still recoverable.
@@ -136,7 +142,9 @@ static CFG: OnceLock<Config> = OnceLock::new();
 struct LogState {
     logger: log::Logger,
     debug: bool,
-    summary_logged: bool,
+    /// one info line per site (0 = head, 1 = car), emitted on that site's
+    /// first clamp — per-site, not per-boot (see the module doc)
+    summary_logged: [bool; 2],
     /// clamps seen per site (0 = head, 1 = car)
     counts: [u64; 2],
     /// next count milestone to report per site
@@ -207,12 +215,12 @@ fn note_clamp(site: u8, orig: u32, target: u32, rows: usize) {
         }
         st.next_milestone[s] = st.next_milestone[s].saturating_mul(10);
     }
-    if !st.summary_logged {
-        st.summary_logged = true;
+    if !st.summary_logged[s] {
+        st.summary_logged[s] = true;
         st.logger.line(&format!(
-            "save clamp: out-of-range save id {orig} clamped to {target} at {name} \
-             (spec vector has {rows} rows) — every distinct id is logged at \
-             log_level=debug"
+            "save clamp [{name}]: out-of-range save id {orig} clamped to {target} \
+             (spec vector has {rows} rows); re-saving now persists the placeholder \
+             row — every distinct id is logged at log_level=debug"
         ));
     }
 }
@@ -361,7 +369,7 @@ pub unsafe fn install(
         let _ = LOG.set(Mutex::new(LogState {
             logger,
             debug,
-            summary_logged: false,
+            summary_logged: [false, false],
             counts: [0, 0],
             next_milestone: [10, 10],
             seen: BTreeMap::new(),

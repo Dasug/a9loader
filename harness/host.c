@@ -480,18 +480,22 @@ static int g_probe_ok;
  * loader's address book verifies those bytes at boot and splices the sites.
  * Each helper preserves the original print order (the harness greps them). */
 
-/* the filter fn page + the whitelist/FORM data page */
+/* the filter fn page + the whitelist/FORM data page. The fn page is mapped as
+ * the whole 64K block 0x1A0000..0x1B0000 (VirtualAlloc's granularity): the M7-1
+ * spec-table row accessor 0x1AACB0 lives in that block, so its page must be
+ * mapped too (a 4K mapping at 0x1AA000 would round DOWN to 0x1A0000 and clash
+ * with the filter's own page). */
 static int setup_filter_pages(void)
 {
-    if (!map_fixed((UINT_PTR)g_base + 0x1A1000, 0x1000, PAGE_EXECUTE_READWRITE)) {
-        printf("SKIP: could not map fn page at RVA 0x1A1000\n");
+    if (!map_fixed((UINT_PTR)g_base + 0x1A0000, 0x10000, PAGE_EXECUTE_READWRITE)) {
+        printf("SKIP: could not map fn page at RVA 0x1A0000\n");
         return 0;
     }
     if (!map_fixed((UINT_PTR)g_base + 0x6FC000, 0x10000, PAGE_READWRITE)) {
         printf("SKIP: could not map data page at RVA 0x6FC000\n");
         return 0;
     }
-    memset((BYTE *)g_base + 0x1A1000, 0xCC, 0x1000);
+    memset((BYTE *)g_base + 0x1A0000, 0xCC, 0x10000);
     /* the filter entry carries the real original prologue (expect-verified) */
     memcpy((BYTE *)g_base + RVA_FILTER, g_filter_orig, sizeof(g_filter_orig));
     /* the whitelist table carries its real original entries where recorded */
@@ -994,6 +998,185 @@ __asm__(
     "clamp_car_call:\n"
     "  callq *g_clamp_car_ptr(%rip)\n"
     "  retq\n");
+
+/* ---- M7-1 direct spec-row injection fakes (builds.toml spec_table_resize /
+ * spec_table_realloc / spec_table_row_accessor / row_name_ctor). The three
+ * CALLED helpers carry their real prologues + an E9 into an undo thunk that
+ * reverses the prologue and jumps to a plain C body; the accessor is
+ * position-independent and self-contained (lea/shl/add/ret), so its real 12
+ * bytes run as-is — no fake at all. The resize site is HOOKED by the loader
+ * (trampoline), so its E9 at +19 is reached only through the trampoline. */
+#define RVA_ROWS_RESIZE   0x19F150u  /* std::vector<A9_SpecRow_140>::resize(421) */
+#define RVA_ROWS_REALLOC  0x19FC50u  /* the vector's reallocate (game allocator) */
+#define RVA_ROWS_ACCESSOR 0x1AACB0u  /* vec.begin + id*0x140 (self-contained) */
+#define RVA_ROWS_CTOR     0x372F0u   /* the builder's auto-name ctor */
+#define ROWS_TABLE_N      421u       /* the fake spec-vector row count */
+#define ROWS_TEMPLATE_ID  0u         /* the shipped valid template row */
+#define ROWS_RESERVED_ID  421u       /* the first reserved id (= the live count) */
+#define ROWS_ROW_STRIDE   0x140u
+#define ROWS_PFORMNAME    0x138u
+#define ROWS_NAME_JP      0xa8u
+#define ROWS_NAME_EN      0xb0u
+#define ROWS_MARKER_OFF   0x100u     /* a clone-property marker the host sets */
+#define ROWS_MARKER       0xA9C0DE01u
+
+static const unsigned char g_rows_resize_orig[19] = {
+    0x48,0x89,0x5c,0x24,0x08,0x48,0x89,0x74,0x24,0x10,0x57,0x48,0x83,0xec,0x30,
+    0x4c,0x8b,0x41,0x08
+};
+static const unsigned char g_rows_realloc_orig[20] = {
+    0x41,0x56,0x48,0x83,0xec,0x40,0x48,0xc7,0x44,0x24,0x30,0xfe,0xff,0xff,0xff,
+    0x48,0x89,0x5c,0x24,0x50
+};
+static const unsigned char g_rows_accessor_orig[12] = {
+    0x48,0x8d,0x04,0x92,0x48,0xc1,0xe0,0x06,0x48,0x03,0x01,0xc3
+};
+static const unsigned char g_rows_ctor_orig[19] = {
+    0x48,0x89,0x54,0x24,0x10,0x4c,0x89,0x44,0x24,0x18,0x4c,0x89,0x4c,0x24,0x20,
+    0x48,0x83,0xec,0x28
+};
+
+static unsigned char *g_rows_base;      /* the fake 421-row spec table */
+static unsigned g_rows_resize_calls, g_rows_realloc_calls, g_rows_ctor_calls;
+static unsigned long g_rows_realloc_new;
+static void *g_rows_new_block;
+static int g_rows_ctor_null;            /* the refusal scenario: the ctor returns NULL */
+
+extern void rows_resize_undo(void);
+extern void rows_realloc_undo(void);
+extern void rows_ctor_undo(void);
+
+__asm__(
+    ".globl rows_resize_undo\n"
+    "rows_resize_undo:\n"
+    "addq $0x30, %rsp\n"
+    "popq %rdi\n"
+    "jmp rows_resize_body\n"
+    ".globl rows_realloc_undo\n"
+    "rows_realloc_undo:\n"
+    "addq $0x40, %rsp\n"
+    "popq %r14\n"
+    "jmp rows_realloc_body\n"
+    ".globl rows_ctor_undo\n"
+    "rows_ctor_undo:\n"
+    "addq $0x28, %rsp\n"
+    "jmp rows_ctor_body\n");
+
+/* the fake resize: the real one re-pins the vector to EXACTLY 421 rows, which
+ * is why a growth done before it is silently undone */
+__attribute__((used, noinline)) void rows_resize_body(void *vec)
+{
+    g_rows_resize_calls++;
+    *(void **)vec = g_rows_base;
+    *(void **)((char *)vec + 8) = g_rows_base + (size_t)ROWS_TABLE_N * ROWS_ROW_STRIDE;
+    *(void **)((char *)vec + 0x10) = g_rows_base + (size_t)ROWS_TABLE_N * ROWS_ROW_STRIDE;
+    printf("rows resize_body: re-pinned the vector to %u rows\n", ROWS_TABLE_N);
+}
+
+/* the fake reallocate: allocate (the host's allocator stands in for the game's
+ * 0x14040a838), copy the live rows, set {begin,end,cap} — the same shape as the
+ * real 0x14019fc50 */
+__attribute__((used, noinline)) void rows_realloc_body(void *vec, unsigned long new_count)
+{
+    unsigned char *begin = *(unsigned char **)vec;
+    unsigned char *end = *(unsigned char **)((char *)vec + 8);
+    unsigned long old_count = (unsigned long)((end - begin) / ROWS_ROW_STRIDE);
+    unsigned char *nb = (unsigned char *)VirtualAlloc(NULL, new_count * ROWS_ROW_STRIDE,
+                                                      MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    g_rows_realloc_calls++;
+    g_rows_realloc_new = new_count;
+    g_rows_new_block = nb;
+    if (!nb) { printf("rows realloc_body: alloc FAILED\n"); return; }
+    memcpy(nb, begin, (size_t)old_count * ROWS_ROW_STRIDE);
+    *(void **)vec = nb;
+    *(void **)((char *)vec + 8) = nb + old_count * ROWS_ROW_STRIDE;
+    *(void **)((char *)vec + 0x10) = nb + new_count * ROWS_ROW_STRIDE;
+    printf("rows realloc_body: %lu -> %lu rows (game-allocator stand-in, block=%p)\n",
+           old_count, new_count, (void *)nb);
+}
+
+/* the fake name constructor: the real one builds a valid A9_RcStr from a wide
+ * format + one integer arg (the builder's `form_id_%d`). `g_rows_ctor_null`
+ * models the failure the mechanism must refuse. */
+__attribute__((used, noinline)) void rows_ctor_body(void **dest, const wchar_t *fmt, unsigned id)
+{
+    static wchar_t bufs[8][64];
+    static unsigned n;
+    g_rows_ctor_calls++;
+    if (g_rows_ctor_null) { *dest = NULL; return; }
+    wchar_t *b = bufs[n++ & 7];
+    swprintf(b, 64, fmt ? fmt : L"%u", (int)id);
+    *dest = b;
+    printf("rows ctor_body: fmt=%ls id=%u -> %ls\n", fmt ? fmt : L"(null)", id, b);
+}
+
+/* the shipped valid template row (row 0): bValid=1, a car, three names and a
+ * clone marker the harness reads back from the injected row */
+static void rows_make_template(void)
+{
+    unsigned char *r = g_rows_base + ROWS_TEMPLATE_ID * ROWS_ROW_STRIDE;
+    static wchar_t tname[] = L"FORM_TEMPLATE";
+    static wchar_t jp[] = L"TEMPLATE_JP";
+    static wchar_t en[] = L"TEMPLATE_EN";
+    r[0] = 1;
+    *(unsigned int *)(r + 4) = 0;
+    r[0x38] = 1;
+    *(void **)(r + ROWS_NAME_JP) = jp;
+    *(void **)(r + ROWS_NAME_EN) = en;
+    *(void **)(r + ROWS_PFORMNAME) = tname;
+    *(unsigned int *)(r + ROWS_MARKER_OFF) = ROWS_MARKER;
+}
+
+/* write the fake pages and point the manager's rows vector at the fake 421-row
+ * table. Called by mode_rows AFTER the DLL load: the loader verifies these
+ * anchors at export-call time, not at boot. The 0x1A0000 / 0x190000 / 0xE14000
+ * blocks are already mapped (setup_filter_pages / setup_tab_pages); the
+ * row_name_ctor page (0x30000..0x40000) is free only while SizeOfImage < 0x30000
+ * — the host keeps its big FORM buffer on the heap for exactly that reason. */
+static int setup_rows_pages(void)
+{
+    if (!map_fixed((UINT_PTR)g_base + 0x30000, 0x10000, PAGE_EXECUTE_READWRITE)) {
+        printf("WARN: could not map the rows ctor page at RVA 0x30000 err=%lu\n",
+               (unsigned long)GetLastError());
+        return 0;
+    }
+    memset((BYTE *)g_base + 0x30000, 0xCC, 0x10000);
+    /* the accessor runs as-is (self-contained) */
+    memcpy((BYTE *)g_base + RVA_ROWS_ACCESSOR, g_rows_accessor_orig,
+           sizeof(g_rows_accessor_orig));
+    /* the three called helpers: real prologue + E9 undo thunk */
+    struct { UINT_PTR rva; const unsigned char *orig; size_t len; void *undo; } rfakes[] = {
+        { RVA_ROWS_RESIZE,  g_rows_resize_orig,  sizeof(g_rows_resize_orig),  (void *)&rows_resize_undo },
+        { RVA_ROWS_REALLOC, g_rows_realloc_orig, sizeof(g_rows_realloc_orig), (void *)&rows_realloc_undo },
+        { RVA_ROWS_CTOR,    g_rows_ctor_orig,    sizeof(g_rows_ctor_orig),    (void *)&rows_ctor_undo },
+    };
+    for (unsigned i = 0; i < sizeof(rfakes) / sizeof(rfakes[0]); i++) {
+        memcpy((BYTE *)g_base + rfakes[i].rva, rfakes[i].orig, rfakes[i].len);
+        BYTE *t = (BYTE *)g_base + rfakes[i].rva + rfakes[i].len;
+        intptr_t rel = (intptr_t)rfakes[i].undo - (intptr_t)(t + 5);
+        t[0] = 0xE9;
+        memcpy(t + 1, &rel, 4);
+    }
+    /* the fake spec table: 421 rows, all zero (invalid) except the template */
+    g_rows_base = (unsigned char *)VirtualAlloc(NULL, (SIZE_T)ROWS_TABLE_N * ROWS_ROW_STRIDE,
+                                                MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (!g_rows_base) { printf("WARN: rows table alloc failed\n"); return 0; }
+    memset(g_rows_base, 0, (SIZE_T)ROWS_TABLE_N * ROWS_ROW_STRIDE);
+    rows_make_template();
+    /* the manager's rows vector {begin,end,cap} = the fake table */
+    {
+        BYTE *m = (BYTE *)g_base + RVA_MGR;
+        *(void **)(m + 0x18) = g_rows_base;
+        *(void **)(m + 0x20) = g_rows_base + (size_t)ROWS_TABLE_N * ROWS_ROW_STRIDE;
+        *(void **)(m + 0x28) = g_rows_base + (size_t)ROWS_TABLE_N * ROWS_ROW_STRIDE;
+        *(unsigned int *)(m + 0x90) = 0; /* the display-name lane: JP */
+    }
+    g_rows_resize_calls = g_rows_realloc_calls = g_rows_ctor_calls = 0;
+    g_rows_realloc_new = 0;
+    g_rows_new_block = NULL;
+    g_rows_ctor_null = 0;
+    return 1;
+}
 
 /* ---- M5 tailgate fakes (same page set as the inject pages). The family-A * decode entry carries a movabs+branch shim to the plain C decoder; the
  * vp/tp/i.dat call sites carry the address book's E8 expect bytes followed by
@@ -1499,6 +1682,105 @@ static int mode_clamp(void)
     return 0;
 }
 
+/* the M7-1 direct spec-row injection evidence. The host maps the fake manager
+ * + spec-table pages, then drives the loader's `a9loader_m7_rows` export:
+ *   rows             — op 0 (install the resize hook) then call the resize site;
+ *                      the hook must inject AFTER the original re-pin
+ *   rows-order       — op 1 (inject) BEFORE the resize; the resize re-pins to
+ *                      421, so the pre-resize growth must be silently undone
+ *   rows-refuse      — the name ctor returns NULL: the injection must refuse
+ *   rows-refuse-tmpl — the template row's pFormName is NULL: must refuse
+ *   rows-off         — no export call: the site stays vanilla, count stays 421 */
+typedef unsigned long long (*m7rows_fn)(unsigned);
+
+static int mode_rows(const char *scen)
+{
+    if (!setup_rows_pages()) return 2;
+    HMODULE v = GetModuleHandleA("version.dll");
+    if (!v) { printf("FAIL: version.dll not loaded\n"); return 1; }
+    m7rows_fn op = (m7rows_fn)(void *)GetProcAddress(v, "a9loader_m7_rows");
+    if (!op) { printf("FAIL: the a9loader_m7_rows export is missing\n"); return 1; }
+
+    BYTE *m = (BYTE *)g_base + RVA_MGR;
+    void *vec = m + 0x18;
+    typedef void (*resize_fn)(void *);
+
+    if (!strcmp(scen, "rows-off")) {
+        printf("rows: site[0]=0x%02x (unmodified)\n", *(BYTE *)(g_base + RVA_ROWS_RESIZE));
+        ((resize_fn)(g_base + RVA_ROWS_RESIZE))(vec);
+        printf("rows: count after the vanilla resize = %llu\n", op(2));
+        printf("rows: done\n");
+        return 0;
+    }
+    if (!strcmp(scen, "rows-order")) {
+        unsigned long long n1 = op(1);
+        printf("rows: after a PRE-resize inject count=%llu\n", n1);
+        ((resize_fn)(g_base + RVA_ROWS_RESIZE))(vec);
+        printf("rows: after the resize count=%llu (the pre-resize growth is undone)\n",
+               op(2));
+        printf("rows: done\n");
+        return 0;
+    }
+    if (!strcmp(scen, "rows-refuse")) {
+        g_rows_ctor_null = 1;
+        unsigned long long n = op(1);
+        printf("rows: inject with a NULL name returned %llu, count=%llu, realloc calls=%u\n",
+               n, op(2), g_rows_realloc_calls);
+        printf("rows: done\n");
+        return 0;
+    }
+    if (!strcmp(scen, "rows-refuse-tmpl")) {
+        unsigned char *r = g_rows_base + ROWS_TEMPLATE_ID * ROWS_ROW_STRIDE;
+        *(void **)(r + ROWS_PFORMNAME) = NULL;
+        unsigned long long n = op(1);
+        printf("rows: inject from a NULL-named template returned %llu, count=%llu, realloc calls=%u\n",
+               n, op(2), g_rows_realloc_calls);
+        printf("rows: done\n");
+        return 0;
+    }
+
+    /* rows: the RIGHT order — install the hook, then call the resize site */
+    unsigned long long rc = op(0);
+    printf("rows: install rc=%llu site[0]=0x%02x\n", rc, *(BYTE *)(g_base + RVA_ROWS_RESIZE));
+    ((resize_fn)(g_base + RVA_ROWS_RESIZE))(vec);
+    unsigned long long n = op(2);
+    printf("rows: count after the hooked resize = %llu\n", n);
+
+    /* the consumer: the game's OWN accessor resolves the injected id */
+    typedef unsigned char *(*acc_fn)(const unsigned char *, unsigned long);
+    acc_fn acc = (acc_fn)(g_base + RVA_ROWS_ACCESSOR);
+    unsigned char *row = acc((const unsigned char *)vec, ROWS_RESERVED_ID);
+    printf("rows: accessor(%u)=%p begin=%p stride=%#x\n", ROWS_RESERVED_ID, (void *)row,
+           *(void **)vec, ROWS_ROW_STRIDE);
+    printf("rows: injected row bValid=%u carCount=%u marker=%#x\n",
+           row[0], row[0x38], *(unsigned int *)(row + ROWS_MARKER_OFF));
+    printf("rows: injected names jp=%ls en=%ls form=%ls\n",
+           *(wchar_t **)(row + ROWS_NAME_JP),
+           *(wchar_t **)(row + ROWS_NAME_EN),
+           *(wchar_t **)(row + ROWS_PFORMNAME));
+    printf("rows: realloc calls=%u new_count=%lu ctor calls=%u\n",
+           g_rows_realloc_calls, g_rows_realloc_new, g_rows_ctor_calls);
+    /* the row-walk consumer (mirrors train_list_builder 0x14019d9c0 /
+       FUN_14019e760 / FUN_14019e950: walk the LIVE vector, skip row[0]==0) */
+    {
+        unsigned char *b = *(unsigned char **)vec;
+        unsigned char *e = *(unsigned char **)((char *)vec + 8);
+        unsigned long cnt = (unsigned long)((e - b) / ROWS_ROW_STRIDE);
+        unsigned valid = 0, has = 0;
+        for (unsigned long i = 0; i < cnt; i++) {
+            unsigned char *rr = b + i * ROWS_ROW_STRIDE;
+            if (!rr[0]) continue;
+            valid++;
+            if (i == ROWS_RESERVED_ID) has = 1;
+        }
+        printf("rows: walk rows=%lu valid=%u reserved-id-present=%u\n", cnt, valid, has);
+    }
+    printf("rows: reserved id %u < FORMS_MAX 1024 = %u\n", ROWS_RESERVED_ID,
+           ROWS_RESERVED_ID < 1024);
+    printf("rows: done\n");
+    return 0;
+}
+
 /* the M4 inject scenario host path: (1) open the pack through the
  * (possibly hooked) CFile::Open — the injector's capture seam fires
  * INSIDE that open for planned packs; (2) fill the fake pool the
@@ -1733,18 +2015,28 @@ int main(int argc, char **argv)
     setup_clamp_pages();   /* always-on guard: its anchors must exist on every boot */
     setup_inject_pages(mode);
 
-    /* real FORM list bytes -> the mapped region (NUL-terminated UTF-16) */
+    /* real FORM list bytes -> the mapped region (NUL-terminated UTF-16). Heap,
+     * not .bss: a 64K static pushed SizeOfImage past 0x30000, which would make
+     * the M7-1 row_name_ctor page (RVA 0x372f0) unmappable (VirtualAlloc's 64K
+     * granularity block is partially occupied by the image's tail). */
     FILE *f = fopen(argv[1], "rb");
     if (!f) {
         printf("FAIL: cannot open %s\n", argv[1]);
         return 2;
     }
-    static BYTE forms[0x10000];
-    size_t n = fread(forms, 1, sizeof(forms) - 2, f);
+    BYTE *forms = (BYTE *)VirtualAlloc(NULL, 0x10000, MEM_COMMIT | MEM_RESERVE,
+                                       PAGE_READWRITE);
+    if (!forms) {
+        printf("FAIL: FORM-list buffer alloc failed\n");
+        fclose(f);
+        return 2;
+    }
+    size_t n = fread(forms, 1, 0x10000 - 2, f);
     fclose(f);
     forms[n] = 0;
     forms[n + 1] = 0;
     memcpy((BYTE *)g_base + RVA_FORMS, forms, n + 2);
+    VirtualFree(forms, 0, MEM_RELEASE);
 
     /* (b) load the proxy under test (app-dir search hits our version.dll) */
     HMODULE v = LoadLibraryA("version.dll");
@@ -1776,6 +2068,7 @@ int main(int argc, char **argv)
     if (!strcmp(mode, "window")) return mode_window();
     if (!strcmp(mode, "save")) return mode_save();
     if (!strcmp(mode, "clamp")) return mode_clamp();
+    if (!strncmp(mode, "rows", 4)) return mode_rows(mode);
     if (!strcmp(mode, "inject")) return mode_inject();
     if (!strcmp(mode, "tailgate") || !strcmp(mode, "tailgate-mismatch")
         || !strcmp(mode, "tailgate-ws"))

@@ -7,7 +7,7 @@
 //! - allow-list txt: one FORM name per line, `#` comments, trimmed; matching
 //!   is exact and case-sensitive (like the C).
 //!
-//! M5 W3 adds [`compose_filter`]: several mods may each declare a `train_list`
+//! [`compose_filter`] (added later) composes: several mods may each declare a `train_list`
 //! contribution and the loader composes them into ONE keep-bitmap instead of
 //! letting a single mod own the filter.
 
@@ -104,7 +104,7 @@ pub fn all_forms(forms_len: usize) -> Box<[u8; FORMS_MAX / 8]> {
 }
 
 /// Compose every mod's `train_list` contribution into the ONE keep-bitmap the
-/// filter serves (M5 W3 — additive composition across mods).
+/// filter serves (additive composition across mods).
 ///
 /// The **base** is the layer below the contributions:
 /// - if any `Allow` contribution exists, the base is the **union of the allow
@@ -302,5 +302,18 @@ mod tests {
             (ListMode::Allow, &*a),
         ]);
         assert_eq!(one, two);
+    }
+
+    /// the reserved spec-row range is kept UNDER `FORMS_MAX` so the
+    /// composed keep-set can admit the loader's own trains. `kept()` is the
+    /// bound the three list surfaces apply, so a reserved id must be
+    /// admittable (and the next power-of-two boundary must not be).
+    #[test]
+    fn reserved_ids_below_forms_max_are_admittable() {
+        let reserved = bm(&[421, 1023]);
+        assert!(kept(&reserved, 421), "a reserved id under FORMS_MAX is admittable");
+        assert!(kept(&reserved, 1023));
+        assert!(!kept(&reserved, 1024), "FORMS_MAX is the hard admission ceiling");
+        assert!(!kept(&reserved, 65535));
     }
 }

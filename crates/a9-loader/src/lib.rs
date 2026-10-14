@@ -48,6 +48,8 @@ mod probe_save; // M7-2: the save-path writer probe (probe_save = true diagnosti
 #[cfg(target_os = "windows")]
 mod probe_window; // M7: the purchase-window list dump (probe_window = true diagnostics)
 #[cfg(target_os = "windows")]
+mod rowinject; // M7-1: direct spec-row injection (mechanism + harness export; NOT boot-wired)
+#[cfg(target_os = "windows")]
 mod sys; // minimal hand-declared Win32 + readability guards
 #[cfg(target_os = "windows")]
 mod tabrebuild; // M7: the type-tab rebuild fix (notes/23 purchase-list quirk)
