@@ -482,3 +482,18 @@ expect = "40,53,56,57,48,83,ec,20,48,8b,41,30,48,89,6c,24,48"
 [build."5.00.5634".anchors.wstr_clone_ref]
 rva = 0x1D7D0               # CString field clone (refcount bump) (file 0x1cbd0)
 expect = "40,53,48,83,ec,20,48,8b,d9,48,8b,0a,48,83,e9,18"
+
+#  * `preview_annotator_bound` 0x1403b0a7f — the ONE instruction that keeps an
+#    injected train from getting a list icon. `preview_form_list_annotator`
+#    (0x1403b0710, sole caller `train_csv_pipeline_builder` at 0x14019d630 —
+#    42 bytes after the train_list_builder call we hook, so an injected row
+#    already exists when it runs) walks the spec rows and composes
+#    `form_<row+0x138>_{f,w,s,s_N}.dds` preview names for each valid one, but its
+#    loop bound is the literal `CMP EBP,0x1a1` (417 = the shipped row count), so
+#    rows at index >= 417 are skipped entirely and show a blank icon. Rewriting
+#    the 4-byte immediate to the live row count is the whole fix (the loop's
+#    `JC` at 0x1403b0a85 keeps the `below` semantics). This is why the shipped
+#    template's icons work: it repurposes FORM_DUMMY_02, index 62, inside 417.
+[build."5.00.5634".anchors.preview_annotator_bound]
+rva = 0x3B0A7F              # CMP EBP,0x1a1 in preview_form_list_annotator
+expect = "81,fd,a1,01,00,00"
