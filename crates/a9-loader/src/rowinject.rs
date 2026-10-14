@@ -1049,25 +1049,31 @@ unsafe fn inject_trains_locked(g: &TrainState) -> Result<usize, String> {
             let jp = wide_format(&t.name_jp);
             let en = wide_format(&t.name_en);
             let form = wide_format(&t.form_name.to_lowercase());
-            // The Alt lane 0 is what the Rolling-Stock panel prints as its title: the
-            // live probe read the donor's as "ＡＲ４－アートディンク" (name －
-            // manufacturer) and the panel showed exactly that for our train. Clear it
-            // so the panel falls back to the row's own display name instead of
-            // crediting the donor's manufacturer.
+            // The Alt lanes 0 and 1 are what the Rolling-Stock panel prints as its
+            // title: the live probe read the donor's as "ＡＲ４－アートディンク" (JP)
+            // and "AR4 - ARTDINK" (EN) — a language pair — and the panel shows the
+            // EN one in English mode. Clearing only lane 0 left the EN lane intact,
+            // which is why the title did not change. Clear both so the panel falls
+            // back to the row's own display name instead of crediting the donor's
+            // manufacturer. (A `manufacturer` field belongs with the author-declared
+            // CSV work.)
             let title = wide_format("");
             ctor(s.as_mut_ptr().add(ROW_NAME_JP) as *mut *const u16, jp.as_ptr(), 0);
             ctor(s.as_mut_ptr().add(ROW_NAME_EN) as *mut *const u16, en.as_ptr(), 0);
             ctor(s.as_mut_ptr().add(ROW_PFORMNAME) as *mut *const u16, form.as_ptr(), 0);
-            ctor(
-                s.as_mut_ptr().add(ROW_NAMEALT_BASE) as *mut *const u16,
-                title.as_ptr(),
-                0,
-            );
+            for alt in 0..2 {
+                ctor(
+                    s.as_mut_ptr().add(ROW_NAMEALT_BASE + alt * 0x8) as *mut *const u16,
+                    title.as_ptr(),
+                    0,
+                );
+            }
             for (off, what) in [
                 (ROW_NAME_JP, "JP display lane"),
                 (ROW_NAME_EN, "EN display lane"),
                 (ROW_PFORMNAME, "pFormName"),
-                (ROW_NAMEALT_BASE, "panel title lane"),
+                (ROW_NAMEALT_BASE, "panel title lane (JP)"),
+                (ROW_NAMEALT_BASE + 0x8, "panel title lane (EN)"),
             ] {
                 if (*(s.as_ptr().add(off) as *const *const u16)).is_null() {
                     return Err(format!(
