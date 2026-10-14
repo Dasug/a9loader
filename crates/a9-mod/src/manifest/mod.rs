@@ -173,9 +173,10 @@ impl Manifest {
             Ok(m) => Ok(m),
             Err(e) => {
                 let msg = e.to_string();
-                Err(retired_section_error(&msg)
-                    .map(ModError::Parse)
-                    .unwrap_or(ModError::Parse(msg)))
+                Err(ModError::Parse(match retired_section_error(text) {
+                    Some(friendly) => friendly,
+                    None => msg,
+                }))
             }
         }
     }
@@ -183,17 +184,39 @@ impl Manifest {
 
 /// The friendlier refusal for a manifest that still declares a section the
 /// loader has retired (`[[file]]`) or not yet implemented (`[native]`).
-/// Returns `None` when the raw toml message needs no mapping.
-fn retired_section_error(msg: &str) -> Option<String> {
-    if msg.contains("unknown field `file`") {
+/// Returns `None` when the manifest declares neither.
+///
+/// Detected from the manifest TEXT, never from the toml error message: several
+/// supported sections legitimately carry a field called `file`
+/// (`[[pack.entry]]`, `[[csv]]`, `[[asset]]`, `[[loose_asset]]`), so matching on
+/// "unknown field `file`" turned any unrelated parse error in such a mod into a
+/// false "[[file]] is retired" report — which is exactly what happened to four
+/// of the live mods.
+fn retired_section_error(text: &str) -> Option<String> {
+    let declares = |header: &str| text.lines().any(|l| l.trim().starts_with(header));
+    // Top-level keys can only appear before the first section header — scanning the
+    // whole text for a `file =` line would flag the perfectly valid `file` field of
+    // `[[pack.entry]]`, `[[csv]]`, `[[asset]]` and `[[loose_asset]]`.
+    let head: String = text
+        .lines()
+        .take_while(|l| !l.trim_start().starts_with('['))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let retires_file = declares("[[file]]")
+        || head.lines().any(|l| {
+            let t = l.trim_start();
+            t.starts_with("file ") || t.starts_with("file=") || t.starts_with("file\t")
+        });
+    if retires_file {
         return Some(
             "section [[file]] is retired: the loader no longer writes into the game folder. \
              Serve pack content with [[asset]] and game files opened by path with \
-             [[loose_asset]] instead"
+             [[loose_asset]] instead. If the manifest only lists it as an empty key \
+             (`file = []`), just delete that line"
                 .into(),
         );
     }
-    if msg.contains("unknown field `native`") {
+    if declares("[native]") {
         return Some(
             "section [native] is designed but lands with M4+ (mods that ship code); \
              this loader build does not support it yet"
