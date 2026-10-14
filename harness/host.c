@@ -1927,19 +1927,19 @@ static int mode_rows(const char *scen)
  * accessor, print the composed-filter verdict for its reserved id, open
  * data\csvp.bin through the (hooked) CFile::Open so the overlay merges the
  * derived rows, and dump the merged tables. */
-/* M7-2 retry scenario: mark the FORM_KH32 donor row valid with the lane shape
+/* M7-2 retry scenario: mark the FORM_AR4 donor row valid with the lane shape
  * the clone fix exercises. A live boot showed the builder is called more than
  * once per boot and the FIRST call happens before the CSV pipeline populates
  * the rows, so the loader must defer and retry — the `train_retry` mode below
  * fires phase 1 with this helper deliberately NOT yet called. */
 static void train_populate_donor(void)
 {
-    int id = form_id_of(L"FORM_KH32");
+    int id = form_id_of(L"FORM_AR4");
     if (id >= 0 && id < (int)ROWS_TABLE_N) {
         unsigned char *r = g_rows_base + (size_t)id * ROWS_ROW_STRIDE;
         static wchar_t djp[] = L"DONOR_JP";
         static wchar_t den[] = L"DONOR_EN";
-        static wchar_t dfn[] = L"FORM_KH32";
+        static wchar_t dfn[] = L"FORM_AR4";
         r[0] = 1;
         r[0x38] = 1;
         *(void **)(r + ROWS_NAME_JP) = djp;
@@ -1947,9 +1947,9 @@ static void train_populate_donor(void)
         *(void **)(r + ROWS_NAME_JP + 2 * 8) = djp;
         *(void **)(r + ROWS_NAMEALT) = djp;
         *(void **)(r + ROWS_PFORMNAME) = dfn;
-        printf("train: donor row %d (FORM_KH32) populated\n", id);
+        printf("train: donor row %d (FORM_AR4) populated\n", id);
     } else {
-        printf("train: WARN: FORM_KH32 not found in the FORM list\n");
+        printf("train: WARN: FORM_AR4 not found in the FORM list\n");
     }
 }
 

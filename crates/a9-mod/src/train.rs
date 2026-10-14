@@ -65,9 +65,18 @@ const DEFAULT_ACCEL: &str = "低";
 const DEFAULT_SOUNDS: [&str; 4] = ["低速車両", "低速車両", "低速車両_貨物警笛", "低速車両"];
 const DEFAULT_DRIVING: &str = "ディーゼル車";
 
-/// The default donor FORM name (the KiHa-32 template: a shipped model whose
-/// directory `kh32` and its liveries are already in the `mtentr0` pack).
-pub const DEFAULT_FROM: &str = "FORM_KH32";
+/// The default donor FORM name.
+///
+/// It must be a train this build actually ENABLES: the spec row of a shipped
+/// train that the game never populates stays `bValid == 0` for the whole boot, so
+/// the injection refuses rather than cloning an uninitialised row. That is not a
+/// timing question — the live probe showed `FORM_KH32` (index 195) still invalid
+/// at a call made long after the boot, while `FORM_AR4` is in the shipped
+/// purchase whitelist and is therefore live in every version.
+///
+/// `kh32` remains the default MODEL (`DEFAULT_DIR`/`DEFAULT_MESH`): the mesh and
+/// its liveries are shipped even though the train itself is not enabled here.
+pub const DEFAULT_FROM: &str = "FORM_AR4";
 const DEFAULT_DIR: &str = "kh32";
 const DEFAULT_MESH: &str = "_t_kh32_a";
 const DEFAULT_PRICE: u64 = 45_000_000;

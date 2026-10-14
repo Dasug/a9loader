@@ -89,11 +89,11 @@ H29=$(python3 -c "print('|'.join(['h']*29))")
 H18=$(python3 -c "print('|'.join(['h']*18))")
 H11=$(python3 -c "print('|'.join(['h']*11))")
 H19=$(python3 -c "print('|'.join(['h']*19))")
-DON29=$(python3 -c "print('|'.join(['FORM_KH32']+['d']*28))")
-DON11=$(python3 -c "print('|'.join(['FORM_KH32']+['d']*10))")
-DON19=$(python3 -c "print('|'.join(['FORM_KH32']+['d']*18))")
+DON29=$(python3 -c "print('|'.join(['FORM_AR4']+['d']*28))")
+DON11=$(python3 -c "print('|'.join(['FORM_AR4']+['d']*10))")
+DON19=$(python3 -c "print('|'.join(['FORM_AR4']+['d']*18))")
 # a shipped pattern group for the donor: head + 9 keyless continuation + separator
-DON18=$(python3 -c "print('|'.join(['FORM_KH32']+['d']*17))")
+DON18=$(python3 -c "print('|'.join(['FORM_AR4']+['d']*17))")
 CONT=$(python3 -c "print('|'.join(['']*18))")
 mk_csv "$RUN/tf.csv"  "$H29" "$DON29"
 mk_csv "$RUN/tp.csv"  "$H18" "$DON18" "$CONT" "$CONT" "$CONT" "$CONT" "$CONT" "$CONT" "$CONT" "$CONT" "$CONT" "$CONT"
@@ -176,7 +176,7 @@ run_train
 OUT="$scen_dir/out.txt"; LOG="$scen_dir/mods/a9loader.log"
 # allocation + naming
 check "mod summary counts the train" "1 train)"                    "$LOG"
-check "allocation + naming" "train 'sample': allocated FORM name FORM_TRAINMOD_SAMPLE (spec row id 421, donor FORM_KH32, 1 car(s))" "$LOG"
+check "allocation + naming" "train 'sample': allocated FORM name FORM_TRAINMOD_SAMPLE (spec row id 421, donor FORM_AR4, 1 car(s))" "$LOG"
 check "icon host auto -> tp" "asset form_trainmod_sample_f.dds: host auto -> tp" "$LOG"
 # the injection
 check "injection installed" "train injection: train_list_builder rva=0x19d9c0 expect=verified (1 reserved row(s) queued" "$LOG"
