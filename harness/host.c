@@ -1939,7 +1939,7 @@ static void train_populate_donor(void)
         unsigned char *r = g_rows_base + (size_t)id * ROWS_ROW_STRIDE;
         static wchar_t djp[] = L"DONOR_JP";
         static wchar_t den[] = L"DONOR_EN";
-        static wchar_t dfn[] = L"FORM_AR4";
+        static wchar_t dfn[] = L"form_ar4";  /* shipped rows carry pFormName lowercase */
         r[0] = 1;
         r[0x38] = 1;
         *(void **)(r + ROWS_NAME_JP) = djp;

@@ -930,9 +930,17 @@ unsafe fn inject_trains_locked(g: &TrainState) -> Result<usize, String> {
                 }
             }
             // 2) re-format the three lanes we set (COW: refcount >= 2)
+            //
+            // pFormName is LOWERCASE on purpose. Every shipped row carries it that
+            // way ("form_kh32", "form_285" — read live with the train probe), and
+            // the game derives asset lookups from it: the preview trio is
+            // `<pFormName>_f.dds` / `_s.dds` / `_s_1.dds`, which is exactly how the
+            // compiler names the icon payloads. An uppercase lane made the game ask
+            // for "FORM_…_f.dds", which no listing and no payload provides — hence
+            // the blank preview icons on the first live acceptance boot.
             let jp = wide_format(&t.name_jp);
             let en = wide_format(&t.name_en);
-            let form = wide_format(&t.form_name);
+            let form = wide_format(&t.form_name.to_lowercase());
             ctor(s.as_mut_ptr().add(ROW_NAME_JP) as *mut *const u16, jp.as_ptr(), 0);
             ctor(s.as_mut_ptr().add(ROW_NAME_EN) as *mut *const u16, en.as_ptr(), 0);
             ctor(s.as_mut_ptr().add(ROW_PFORMNAME) as *mut *const u16, form.as_ptr(), 0);
