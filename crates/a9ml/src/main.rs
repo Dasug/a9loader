@@ -263,6 +263,19 @@ enum Cmd {
         #[arg(long)]
         out: PathBuf,
     },
+    /// Show what each `[[train]]` will allocate and expand to, and validate it
+    /// offline (the authoring dry run; nothing is applied). The loader
+    /// allocates the spec-row id + FORM name, derives the four csvp rows, the
+    /// preview icons and the visibility entry — this prints exactly that.
+    Trains {
+        /// Game dir (holding a9loader.toml + the mods dir) — resolves the load
+        /// order and compiles every mod's trains
+        #[arg(long)]
+        game: Option<PathBuf>,
+        /// A single mod dir (holding mod.toml) — compile just this mod
+        #[arg(long = "mod", value_name = "DIR")]
+        mod_dir: Option<PathBuf>,
+    },
 }
 
 fn main() {
@@ -330,6 +343,9 @@ fn main() {
             pack,
         } => asset::run(game, name, out.as_deref(), pack.as_deref()),
         Cmd::MergeAssets { game, mod_dir, out } => asset::run_merge(game, mod_dir, out),
+        Cmd::Trains { game, mod_dir } => {
+            cmd::trains::run(game.as_deref(), mod_dir.as_deref())
+        }
     };
     if let Err(e) = result {
         eprintln!("a9ml: {e:#}");

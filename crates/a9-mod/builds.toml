@@ -442,3 +442,43 @@ expect = "48,8d,04,92,48,c1,e0,06,48,03,01,c3"
 [build."5.00.5634".anchors.row_name_ctor]
 rva = 0x372F0               # the builder's auto-name ctor (file 0x366f0)
 expect = "48,89,54,24,10,4c,89,44,24,18,4c,89,4c,24,20,48,83,ec,28"
+
+# ---------------------------------------------------------------------------
+# M7-2 — the `[[train]]` section. The train compiler expands into the existing
+# primitives (row merges, asset entries) plus a direct spec-row injection. The
+# injection site is NOT M7-1's `spec_table_resize`:
+#
+#   `train_csv_pipeline_builder` 0x14019c340 calls `spec_table_resize` at
+#   0x14019c89e and then IMMEDIATELY runs its fill loop (0x14019c8c0..0x14019d2cf)
+#   — so right after the resize the rows are still uninitialised, and M7-1's
+#   clone-a-shipped-row step would copy garbage. The purchase-list builder,
+#   however, is called from INSIDE the same pipeline at 0x14019d606 (after the
+#   fill loop and the `form_id_%d` auto-name tail), so hooking it and injecting
+#   BEFORE its original runs is the first point where a shipped row is fully
+#   populated. The original then walks the grown vector through the loader's
+#   composed keep-set, so the injected rows are admitted.
+#
+#  * `train_list_builder` 0x14019d9c0 — walks the spec vector (manager+0x18/
+#    +0x20), applies the purchase filter (0x1401a13b0, which the loader
+#    replaces), and builds the offered list. Prologue 17 B, position-independent
+#    (3 pushes + sub rsp,0x20 + mov rax,[rcx+0x30] + mov [rsp+0x48],rbp — the
+#    record ends at the first instruction boundary >= 16: the home store is 5 B,
+#    so 16 would cut it mid-instruction), so it hooks through the standard
+#    trampoline. Sole caller 0x14019d606 (the pipeline) + 0x1402c9de5 (the window
+#    rebuild); the hook injects once, on the first call where the vector is
+#    exactly 421 rows and the donor row is valid.
+#
+#  * `wstr_clone_ref` 0x14001d7d0 — `(rcx = dest name field, rdx = src name
+#    field)`: clones an A9_RcStr field (a refcount bump / COW) so an injected
+#    row's name pointers are OWNED by the row. The M7-1 clone shares the
+#    template's other name pointers without a refcount increment, so the live
+#    teardown would double-free them; the train injection clones every one of
+#    the 18 lanes (awName[0..8] @+0xa8, awNameAlt[0..8] @+0xf0) through this.
+#    Prologue 16 B, position-independent; it is CALLED, never hooked.
+[build."5.00.5634".anchors.train_list_builder]
+rva = 0x19D9C0              # the purchase-list builder (file 0x19cdc0)
+expect = "40,53,56,57,48,83,ec,20,48,8b,41,30,48,89,6c,24,48"
+
+[build."5.00.5634".anchors.wstr_clone_ref]
+rva = 0x1D7D0               # CString field clone (refcount bump) (file 0x1cbd0)
+expect = "40,53,48,83,ec,20,48,8b,d9,48,8b,0a,48,83,e9,18"

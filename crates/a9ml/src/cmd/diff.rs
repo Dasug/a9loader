@@ -88,6 +88,7 @@ fn write_mod(
         csv,
         asset: Vec::new(),
         loose_asset: Vec::new(),
+        train: Vec::new(),
     };
     m.validate().map_err(|e| anyhow::anyhow!("generated manifest invalid: {e}"))?;
     fs::create_dir_all(out).context("creating the mod dir")?;

@@ -1019,6 +1019,7 @@ __asm__(
 #define ROWS_NAME_EN      0xb0u
 #define ROWS_MARKER_OFF   0x100u     /* a clone-property marker the host sets */
 #define ROWS_MARKER       0xA9C0DE01u
+#define ROWS_NAMEALT      0xf0u      /* awNameAlt[0] (M7-2 clone-fix exercise) */
 
 static const unsigned char g_rows_resize_orig[19] = {
     0x48,0x89,0x5c,0x24,0x08,0x48,0x89,0x74,0x24,0x10,0x57,0x48,0x83,0xec,0x30,
@@ -1125,6 +1126,10 @@ static void rows_make_template(void)
     *(void **)(r + ROWS_NAME_EN) = en;
     *(void **)(r + ROWS_PFORMNAME) = tname;
     *(unsigned int *)(r + ROWS_MARKER_OFF) = ROWS_MARKER;
+    /* two extra non-NULL lanes so the M7-2 clone fix has something to clone
+     * (awName[2] and awNameAlt[0]) */
+    *(void **)(r + ROWS_NAME_JP + 2 * 8) = jp;
+    *(void **)(r + ROWS_NAMEALT) = jp;
 }
 
 /* write the fake pages and point the manager's rows vector at the fake 421-row
@@ -1175,6 +1180,141 @@ static int setup_rows_pages(void)
     g_rows_realloc_new = 0;
     g_rows_new_block = NULL;
     g_rows_ctor_null = 0;
+    return 1;
+}
+
+/* ---- M7-2 train-injection fakes. The `[[train]]` compiler is pure (a9-mod);
+ * this mode drives the BOOT half: the engine's real boot (which runs when the
+ * DLL loads) compiles the scenario's `[[train]]`, installs the composed
+ * keep-set (with the reserved ids), the overlay plan and the injection hook.
+ * The host then calls the `train_list_builder` site to fire the hook.
+ *
+ * Two anchors need fake pages the other modes never map:
+ *   - `train_list_builder` 0x19D9C0 (the injection site; the 0x190000 block is
+ *     already mapped by setup_tab_pages — we only write the site bytes);
+ *   - `wstr_clone_ref` 0x1D7D0 (the name-pointer clone fix; CALLED, never
+ *     hooked). Its RVA falls in the image's own tail (SizeOfImage 0x21000), so
+ *     the page is committed rather than freshly mapped — the host writes the
+ *     recorded prologue over it, exactly like the other fakes. */
+#define RVA_TLB          0x19D9C0u   /* train_list_builder (injection site) */
+#define RVA_CLONEREF     0x1D7D0u    /* wstr_clone_ref (called) */
+
+static const unsigned char g_tlb_orig[17] = {
+    0x40,0x53,0x56,0x57,0x48,0x83,0xec,0x20,0x48,0x8b,0x41,0x30,0x48,0x89,0x6c,0x24,0x48
+};
+static const unsigned char g_cloneref_orig[16] = {
+    0x40,0x53,0x48,0x83,0xec,0x20,0x48,0x8b,0xd9,0x48,0x8b,0x0a,0x48,0x83,0xe9,0x18
+};
+
+static unsigned g_clone_calls;
+static unsigned g_tlb_calls;
+
+/* Padding so the host image's .bss reaches RVA 0x1D7D0: the M7-2 clone-fix
+ * anchor (wstr_clone_ref) lives in the image's own tail, which VirtualAlloc
+ * cannot commit (ERROR_INVALID_ADDRESS) — so the host grows its .bss over that
+ * RVA and writes the fake bytes in place. SizeOfImage stays < 0x30000, so the
+ * M7-1 row_name_ctor page (RVA 0x372f0) remains mappable. */
+static unsigned char g_train_pad[0x3000];
+
+extern void tlb_undo(void);
+extern void cloneref_undo(void);
+
+__asm__(
+    ".globl tlb_undo\n"
+    "tlb_undo:\n"
+    "addq $0x20, %rsp\n"
+    "popq %rdi\n"
+    "popq %rsi\n"
+    "popq %rbx\n"
+    "jmp tlb_body\n"
+    ".globl cloneref_undo\n"
+    "cloneref_undo:\n"
+    "addq $0x20, %rsp\n"
+    "popq %rbx\n"
+    "jmp cloneref_body\n");
+
+/* the fake purchase-list builder body: the injection hook has already run */
+__attribute__((used, noinline)) void tlb_body(void *mgr)
+{
+    g_tlb_calls++;
+    printf("train tlb_body: purchase-list builder ran (manager=%p)\n", mgr);
+}
+
+/* the fake wstr_clone_ref: a stand-in refcount bump (shares the pointer) */
+__attribute__((used, noinline)) void cloneref_body(void **dest, void **src)
+{
+    g_clone_calls++;
+    if (dest && src) *dest = *src;
+}
+
+/* a locale-independent view of a wide string: its UTF-16 code units as hex
+ * (the host's C locale cannot print the Japanese names through %ls) */
+static const char *whex(const wchar_t *s)
+{
+    static char buf[8][512];
+    static int n;
+    char *o = buf[n++ & 7];
+    o[0] = 0;
+    if (!s) { strcpy(o, "(null)"); return o; }
+    for (int i = 0; s[i] && i < 60; i++) {
+        char t[8];
+        snprintf(t, sizeof t, "%04x ", (unsigned)s[i]);
+        strcat(o, t);
+    }
+    return o;
+}
+
+/* find a FORM name's index in the mapped FORM list (UTF-16, comma-separated) */
+static int form_id_of(const wchar_t *name)
+{
+    const wchar_t *p = (const wchar_t *)((BYTE *)g_base + RVA_FORMS);
+    int idx = 0;
+    size_t nlen = wcslen(name);
+    while (*p) {
+        const wchar_t *s = p;
+        while (*p && *p != L',') p++;
+        const wchar_t *e = p;
+        while (s < e && (*s == L' ' || *s == L'\t')) s++;
+        while (e > s && (e[-1] == L' ' || e[-1] == L'\t')) e--;
+        if ((size_t)(e - s) == nlen && wcsncmp(s, name, nlen) == 0) return idx;
+        idx++;
+        if (*p == L',') p++;
+    }
+    return -1;
+}
+
+static int setup_train_pages(void)
+{
+    /* the clone-ref anchor sits in the image tail: verify the padded .bss
+     * really covers it, then make it executable (the fake bytes go in place) */
+    {
+        BYTE *cr = (BYTE *)g_base + RVA_CLONEREF;
+        MEMORY_BASIC_INFORMATION mbi;
+        DWORD old;
+        if (!VirtualQuery(cr, &mbi, sizeof mbi) || mbi.State != MEM_COMMIT
+            || mbi.Protect == PAGE_NOACCESS
+            || !VirtualProtect(cr, 0x100, PAGE_EXECUTE_READWRITE, &old)) {
+            printf("WARN: the clone-ref RVA 0x1d7d0 is not writable (.bss pad too small?)\n");
+            return 0;
+        }
+    }
+    /* the site bytes: real prologue + E9 into the undo thunk */
+    struct { UINT_PTR rva; const unsigned char *orig; size_t len; void *undo; } fakes[] = {
+        { RVA_TLB,      g_tlb_orig,      sizeof(g_tlb_orig),      (void *)&tlb_undo },
+        { RVA_CLONEREF, g_cloneref_orig, sizeof(g_cloneref_orig), (void *)&cloneref_undo },
+    };
+    for (unsigned i = 0; i < sizeof(fakes) / sizeof(fakes[0]); i++) {
+        BYTE *s = (BYTE *)g_base + fakes[i].rva;
+        memcpy(s, fakes[i].orig, fakes[i].len);
+        BYTE *t = s + fakes[i].len;
+        intptr_t rel = (intptr_t)fakes[i].undo - (intptr_t)(t + 5);
+        t[0] = 0xE9;
+        memcpy(t + 1, &rel, 4);
+    }
+    g_clone_calls = 0;
+    g_tlb_calls = 0;
+    printf("fake: train pages mapped (tlb 0x%lx, clone_ref 0x%lx)\n",
+           (unsigned long)RVA_TLB, (unsigned long)RVA_CLONEREF);
     return 1;
 }
 
@@ -1781,6 +1921,89 @@ static int mode_rows(const char *scen)
     return 0;
 }
 
+/* the M7-2 `[[train]]` host path: the engine's boot already ran (on load) and
+ * compiled/queued the scenario's train. Call the `train_list_builder` site to
+ * fire the injection hook, read the injected row through the game's OWN
+ * accessor, print the composed-filter verdict for its reserved id, open
+ * data\csvp.bin through the (hooked) CFile::Open so the overlay merges the
+ * derived rows, and dump the merged tables. */
+static int mode_train(const char *scen)
+{
+    HMODULE v = GetModuleHandleA("version.dll");
+    if (!v) { printf("FAIL: version.dll not loaded\n"); return 1; }
+    typedef unsigned long long (*m7kept_fn)(unsigned long long);
+    typedef unsigned long long (*m7dump_fn)(void);
+    m7kept_fn kept = (m7kept_fn)(void *)GetProcAddress(v, "a9loader_m7_kept");
+    m7dump_fn dump = (m7dump_fn)(void *)GetProcAddress(v, "a9loader_m7_dump");
+    if (!kept || !dump) { printf("FAIL: the M7-2 exports are missing\n"); return 1; }
+
+    /* the donor row must be populated BEFORE the injection (the FORM list is
+     * mapped now, after the load) — mark the FORM_KH32 row valid with the lane
+     * shape the clone-fix exercises. */
+    {
+        int id = form_id_of(L"FORM_KH32");
+        if (id >= 0 && id < (int)ROWS_TABLE_N) {
+            unsigned char *r = g_rows_base + (size_t)id * ROWS_ROW_STRIDE;
+            static wchar_t djp[] = L"DONOR_JP";
+            static wchar_t den[] = L"DONOR_EN";
+            static wchar_t dfn[] = L"FORM_KH32";
+            r[0] = 1;
+            r[0x38] = 1;
+            *(void **)(r + ROWS_NAME_JP) = djp;
+            *(void **)(r + ROWS_NAME_EN) = den;
+            *(void **)(r + ROWS_NAME_JP + 2 * 8) = djp;
+            *(void **)(r + ROWS_NAMEALT) = djp;
+            *(void **)(r + ROWS_PFORMNAME) = dfn;
+            printf("train: donor row %d (FORM_KH32) populated\n", id);
+        } else {
+            printf("train: WARN: FORM_KH32 not found in the FORM list\n");
+        }
+    }
+
+    BYTE *m = (BYTE *)g_base + RVA_MGR;
+    void *vec = m + 0x18;
+
+    /* fire the injection by calling the site (the loader hooked it) */
+    typedef void (*tlb_fn)(void *);
+    ((tlb_fn)(g_base + RVA_TLB))((void *)m);
+    printf("train: builder calls=%u clone_ref calls=%u\n", g_tlb_calls, g_clone_calls);
+
+    unsigned char *b = *(unsigned char **)vec;
+    unsigned char *e = *(unsigned char **)((char *)vec + 8);
+    printf("train: vector rows after injection = %lu\n",
+           (unsigned long)((e - b) / ROWS_ROW_STRIDE));
+
+    typedef unsigned char *(*acc_fn)(const unsigned char *, unsigned long);
+    acc_fn acc = (acc_fn)(g_base + RVA_ROWS_ACCESSOR);
+    unsigned char *row = acc((const unsigned char *)vec, ROWS_RESERVED_ID);
+    printf("train: injected row %u bValid=%u special=%u cruise=%u fare=%u carCount=%u\n",
+           ROWS_RESERVED_ID, row[0], row[0x9e],
+           *(unsigned short *)(row + 0x0c), *(unsigned short *)(row + 0x12), row[0x38]);
+    printf("train: injected names jp=%s en=%s form=%s\n",
+           whex(*(wchar_t **)(row + ROWS_NAME_JP)),
+           whex(*(wchar_t **)(row + ROWS_NAME_EN)),
+           whex(*(wchar_t **)(row + ROWS_PFORMNAME)));
+    printf("train: reserved id %u kept by the composed filter = %llu\n",
+           ROWS_RESERVED_ID, kept(ROWS_RESERVED_ID));
+
+    /* open data\csvp.bin through the hooked CFile::Open -> the overlay merges */
+    {
+        static const wchar_t csvp[] = L"data\\csvp.bin";
+        unsigned char cfile[0x28];
+        cfile_open_fn cfo = (cfile_open_fn)(g_base + RVA_CFILE);
+        memset(cfile, 0, sizeof(cfile));
+        int r = cfo(cfile, csvp, 0, 0);
+        printf("train: cfile_open(csvp) -> %d\n", r);
+        if (r) CloseHandle(*(HANDLE *)(cfile + 8));
+    }
+    if (strstr(scen, "nodump")) {
+        printf("train: dump skipped\n");
+    } else {
+        printf("train: dumped %llu merged rows\n", dump());
+    }
+    printf("train: done\n");
+    return 0;
+}
 /* the M4 inject scenario host path: (1) open the pack through the
  * (possibly hooked) CFile::Open — the injector's capture seam fires
  * INSIDE that open for planned packs; (2) fill the fake pool the
@@ -2014,6 +2237,14 @@ int main(int argc, char **argv)
     if (!strcmp(mode, "save")) setup_save_pages();
     setup_clamp_pages();   /* always-on guard: its anchors must exist on every boot */
     setup_inject_pages(mode);
+    /* M7-2: the train anchors are verified DURING the boot (on load), so their
+     * fake pages must exist before the proxy DLL loads. setup_rows_pages also
+     * repoints the spec-table manager at the 421-row fake table (it must run
+     * after setup_tab_pages, which installs the 400-row one). */
+    if (!strncmp(mode, "train", 5)) {
+        if (!setup_rows_pages()) return 3;
+        if (!setup_train_pages()) return 3;
+    }
 
     /* real FORM list bytes -> the mapped region (NUL-terminated UTF-16). Heap,
      * not .bss: a 64K static pushed SizeOfImage past 0x30000, which would make
@@ -2069,6 +2300,7 @@ int main(int argc, char **argv)
     if (!strcmp(mode, "save")) return mode_save();
     if (!strcmp(mode, "clamp")) return mode_clamp();
     if (!strncmp(mode, "rows", 4)) return mode_rows(mode);
+    if (!strcmp(mode, "train") || !strcmp(mode, "train-nodump")) return mode_train(mode);
     if (!strcmp(mode, "inject")) return mode_inject();
     if (!strcmp(mode, "tailgate") || !strcmp(mode, "tailgate-mismatch")
         || !strcmp(mode, "tailgate-ws"))

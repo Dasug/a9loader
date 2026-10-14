@@ -90,16 +90,35 @@ pub unsafe fn boot(hinst: sys::HMODULE) {
         return;
     };
 
+    // ---- M7-2: compile the [[train]] sections (pure, offline) and refuse any
+    // whose allocated FORM name collides with a shipped catalog name. The
+    // compiler is per-train fail-open; the collision check needs the live FORM
+    // list, so it lives here.
+    let (mut trains, train_refusals) = a9_mod::train::compile_all(&manifests, &res.order);
+    for r in &train_refusals {
+        logger.err(r);
+    }
+    if !trains.is_empty() {
+        refuse_colliding_trains(&mut trains, &entry, base, &logger);
+    }
+    for t in &trains {
+        logger.line(&format!(
+            "train '{}': allocated FORM name {} (spec row id {}, donor {}, {} car(s))",
+            t.key, t.form_name, t.id, t.donor, t.cars
+        ));
+    }
+
     // ---- execute
-    let (applied, refused) =
-        unsafe { apply_memory_effects(&manifests, &dirs, &res, &build_id, &entry, base, &logger) };
+    let (applied, refused) = unsafe {
+        apply_memory_effects(&manifests, &dirs, &res, &build_id, &entry, base, &logger, &trains)
+    };
 
     // ---- data effects (M3/M4): [[pack]]/[[csv]] serving
     // pack_serving == "inject" routes family-B [[pack]] effects through the
     // M4 window-scoped injector instead of the merge overlay; [[csv]] keeps
     // the M3 merge mechanism in both modes.
     let inject_mode = cfg.pack_serving == a9_mod::config::PackServing::Inject;
-    let mut builder = PlanBuilder::new(&res, &build_id, inject_mode, &logger);
+    let mut builder = PlanBuilder::new(&res, &build_id, inject_mode, &logger, &trains);
     for &i in &res.order {
         builder.add_mod(i, &manifests[i], &dirs[i]);
     }
@@ -135,6 +154,15 @@ pub unsafe fn boot(hinst: sys::HMODULE) {
     // inject mode (with the plan moved out) it doubles as the injector's
     // pack-identity capture seam
     install_overlay(plan, &cfg, &exe_dir, &mods_dir, &entry, &logger, injector_live);
+
+    // ---- M7-2: the train spec-row injection. Installed AFTER the overlay so a
+    // failed injection cannot affect serving; the hook (train_list_builder,
+    // trampoline-only) fires later, inside the CSV pipeline, once the shipped
+    // rows are populated. Fail-open: a refusal logs and the game boots with the
+    // trains' CSV/asset effects only.
+    if !trains.is_empty() {
+        install_train_injection(&entry, base, &mods_dir, &logger, &trains);
+    }
 
     // ---- M4 fetch probe (opt-in diagnostics; trampoline-only, fail-open)
     // Installs after the build gate + overlay block; each anchor
@@ -243,7 +271,7 @@ fn scan_and_resolve(
             }
             Ok(m) => {
                 logger.line(&format!(
-                    "mod: {} v{} by {} ({} patch, {} hook, {} pack entr{}, {} csv, {} asset, {} loose)",
+                    "mod: {} v{} by {} ({} patch, {} hook, {} pack entr{}, {} csv, {} asset, {} loose, {} train)",
                     m.id,
                     m.version,
                     m.author,
@@ -257,7 +285,8 @@ fn scan_and_resolve(
                     },
                     m.csv.len(),
                     m.asset.len(),
-                    m.loose_asset.len()
+                    m.loose_asset.len(),
+                    m.train.len()
                 ));
                 manifests.push(m.clone());
                 dirs.push(s.dir.clone());
@@ -301,6 +330,7 @@ fn scan_and_resolve(
 /// `train_list` contributions into ONE filter install (M5 W3 — several mods
 /// may each declare forms to offer/hide; a priority tie must not decide
 /// membership). Returns `(applied, refused)`.
+#[allow(clippy::too_many_arguments)]
 unsafe fn apply_memory_effects(
     manifests: &[Manifest],
     dirs: &[PathBuf],
@@ -309,6 +339,7 @@ unsafe fn apply_memory_effects(
     entry: &builds::BuildEntry,
     base: *const u8,
     logger: &log::Logger,
+    trains: &[a9_mod::train::CompiledTrain],
 ) -> (usize, usize) {
     let mut applied = 0usize;
     let mut refused = 0usize;
@@ -333,6 +364,31 @@ unsafe fn apply_memory_effects(
         refused += r;
         if let Some(c) = c {
             train_list.push(c);
+        }
+    }
+    // M7-2: a `[[train]]`'s allocated id is not in the FORM list, so the name
+    // match in `train_list_contribution` can never admit it — the reserved ids
+    // are added to the composed keep-set PROGRAMMATICALLY, one `Add`
+    // contribution per mod that declares trains (notes/62-D).
+    for &i in &res.order {
+        let ids: Vec<usize> = trains
+            .iter()
+            .filter(|t| t.mod_id == manifests[i].id)
+            .map(|t| t.id)
+            .collect();
+        if ids.is_empty() {
+            continue;
+        }
+        match unsafe { handlers::reserved_id_contribution(&manifests[i].id, &ids, entry) } {
+            Ok(c) => train_list.push(c),
+            Err(e) => {
+                logger.err(&format!(
+                    "mod '{}': [[train]] visibility: {e} — the trains would be \
+                     filtered out of every list (fail-open)",
+                    manifests[i].id
+                ));
+                refused += 1;
+            }
         }
     }
     // the composed train_list filter — one install for every contribution
@@ -891,4 +947,76 @@ fn install_save_probe(
 /// book RVAs).
 unsafe fn base_ptr() -> *const u8 {
     unsafe { sys::GetModuleHandleW(std::ptr::null()) as *const u8 }
+}
+
+/// M7-2: drop any `[[train]]` whose allocated FORM name is a SHIPPED catalog
+/// name. The compiler's naming scheme (`FORM_<MOD>_<KEY>`) makes this reachable
+/// (e.g. mod `dummy` + key `02` -> `FORM_DUMMY_02`), and an alias would make the
+/// injected row shadow a real train in the annotator's name-keyed lookup.
+/// Fail-open: the colliding train is refused loudly, the rest load.
+fn refuse_colliding_trains(
+    trains: &mut Vec<a9_mod::train::CompiledTrain>,
+    entry: &builds::BuildEntry,
+    base: *const u8,
+    logger: &log::Logger,
+) {
+    let Some(a) = entry.anchor("form_list") else {
+        return;
+    };
+    let Ok(units) = (unsafe {
+        handlers::read_u16s_bounded(base, a.rva as usize, 16384)
+    }) else {
+        return;
+    };
+    let forms = forms::parse_form_list(&units);
+    trains.retain(|t| {
+        if forms.iter().any(|f| f == &t.form_name) {
+            logger.err(&format!(
+                "train '{}': the allocated FORM name {} is a SHIPPED catalog name — \
+                 refusing (it would alias a real train)",
+                t.key, t.form_name
+            ));
+            false
+        } else {
+            true
+        }
+    });
+}
+
+/// M7-2: install the train spec-row injection (`crate::rowinject`). Fail-open.
+fn install_train_injection(
+    entry: &builds::BuildEntry,
+    base: *const u8,
+    mods_dir: &Path,
+    logger: &log::Logger,
+    trains: &[a9_mod::train::CompiledTrain],
+) {
+    let rows: Vec<crate::rowinject::TrainRow> = trains
+        .iter()
+        .map(|t| crate::rowinject::TrainRow {
+            id: t.id,
+            form_name: t.form_name.clone(),
+            name_jp: t.name_jp.clone(),
+            name_en: t.name_en.clone(),
+            donor: t.donor.clone(),
+            cruise_speed: t.cruise_speed,
+            reverse_speed: t.reverse_speed,
+            fare: t.fare,
+            cars: t.cars,
+        })
+        .collect();
+    match unsafe {
+        crate::rowinject::install_trains(
+            entry,
+            base,
+            log::Logger::new(&mods_dir.join("a9loader.log")),
+            &rows,
+        )
+    } {
+        Ok(line) => logger.line(&line),
+        Err(e) => logger.err(&format!(
+            "train injection: {e} — the trains keep their CSV/asset effects only \
+             (fail-open)"
+        )),
+    }
 }

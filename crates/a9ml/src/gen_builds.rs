@@ -65,7 +65,7 @@ fn core_anchors(id: &str) -> Result<Vec<CoreAnchor>> {
     }
 }
 
-fn rva_to_file(d: &[u8], rva: u32) -> Result<(usize, String)> {
+pub(crate) fn rva_to_file(d: &[u8], rva: u32) -> Result<(usize, String)> {
     let pe = u32::from_le_bytes(d[0x3c..0x40].try_into().unwrap()) as usize;
     let nsec = u16::from_le_bytes(d[pe + 6..pe + 8].try_into().unwrap());
     let opt = u16::from_le_bytes(d[pe + 20..pe + 22].try_into().unwrap());

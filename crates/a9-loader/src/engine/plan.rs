@@ -7,7 +7,7 @@
 //! and logs; the serving installs happen later in the engine.
 
 use crate::log;
-use a9_mod::{manifest::Manifest, resolve};
+use a9_mod::{manifest::Manifest, resolve, train::CompiledTrain};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
@@ -26,6 +26,9 @@ pub(super) struct PlanBuilder<'a> {
     build_id: &'a str,
     inject_mode: bool,
     logger: &'a log::Logger,
+    /// the compiled `[[train]]` rows (M7-2), expanded into the existing
+    /// row-merge + asset primitives by [`PlanBuilder::trains`]
+    trains: &'a [CompiledTrain],
     plan: crate::overlay::Plan,
     inject_plan: crate::injector::InjectorPlan,
     refused: usize,
@@ -37,12 +40,14 @@ impl<'a> PlanBuilder<'a> {
         build_id: &'a str,
         inject_mode: bool,
         logger: &'a log::Logger,
+        trains: &'a [CompiledTrain],
     ) -> Self {
         Self {
             res,
             build_id,
             inject_mode,
             logger,
+            trains,
             plan: crate::overlay::Plan {
                 images: BTreeMap::new(),
                 csvs: Vec::new(),
@@ -58,12 +63,13 @@ impl<'a> PlanBuilder<'a> {
     }
 
     /// Collect one mod's data effects, in the documented section order:
-    /// `[[pack]]`, `[[csv]]`, `[[asset]]`, `[[loose_asset]]`.
+    /// `[[pack]]`, `[[csv]]`, `[[asset]]`, `[[loose_asset]]`, `[[train]]`.
     pub(super) fn add_mod(&mut self, i: usize, m: &Manifest, dir: &Path) {
         self.packs(i, m, dir);
         self.csvs(i, m, dir);
         self.assets(i, m, dir);
         self.loose(i, m, dir);
+        self.trains(i, m, dir);
     }
 
     pub(super) fn finish(
@@ -350,6 +356,140 @@ impl<'a> PlanBuilder<'a> {
                 mod_dir: dir.to_path_buf(),
                 file: l.file.clone(),
             });
+        }
+    }
+
+    /// `[[train]]` (M7-2) — the compiler's output expanded into the primitives
+    /// that already exist: four csvp row effects (three `Rows` + one positional
+    /// `GroupAppend` for the `train_pattern` group) and the three preview-icon
+    /// `[[asset]]` rows. The spec-row injection and the keep-bit contribution
+    /// are installed by the engine (`crate::rowinject` + the reserved-id
+    /// `train_list` contribution) — this only produces the served data.
+    ///
+    /// Every effect is overlap-checked per key, so a train collides with any
+    /// other mod's effect on the same row/asset exactly like an authored one.
+    fn trains(&mut self, i: usize, m: &Manifest, dir: &Path) {
+        let mine: Vec<&CompiledTrain> = self
+            .trains
+            .iter()
+            .filter(|t| t.mod_id == m.id)
+            .collect();
+        if mine.is_empty() {
+            return;
+        }
+        for t in mine {
+            // the four csvp rows
+            let rows: [(&str, a9_formats::overlay::CsvOpKind, Vec<u8>); 4] = [
+                (
+                    "train_form.csv",
+                    a9_formats::overlay::CsvOpKind::Rows,
+                    t.form_payload(),
+                ),
+                (
+                    "train_comment.csv",
+                    a9_formats::overlay::CsvOpKind::Rows,
+                    t.comment_payload(),
+                ),
+                (
+                    "train_custom.csv",
+                    a9_formats::overlay::CsvOpKind::Rows,
+                    t.custom_payload(),
+                ),
+                (
+                    "train_pattern.csv",
+                    a9_formats::overlay::CsvOpKind::GroupAppend,
+                    t.pattern_payload(),
+                ),
+            ];
+            for (name, kind, payload) in rows {
+                let key = format!("csv:{name}:{}", t.form_name);
+                if self.res.effect_refused(i, &key) {
+                    self.logger.err(&format!(
+                        "mod '{}': train {}: {key} refused (overlap loser)",
+                        m.id, t.form_name
+                    ));
+                    self.refused += 1;
+                    continue;
+                }
+                self.plan.csvs.push(crate::overlay::CsvOpPlan {
+                    mod_id: m.id.clone(),
+                    mod_version: m.version.to_string(),
+                    kind,
+                    name: name.to_string(),
+                    payload,
+                    row_keys: vec![t.form_name.clone()],
+                });
+            }
+            // the three preview icons (payloads ride their host via host = "auto",
+            // dir = "previewtexture" -> the tp pack, and the loader auto-extends
+            // the previewtexture.dir listing from exactly these rows)
+            let auto_index = a9_mod::dirindex::embedded_index();
+            for icon in &t.icons {
+                let key = format!("asset:{}", icon.name);
+                if self.res.effect_refused(i, &key) {
+                    self.logger.err(&format!(
+                        "mod '{}': train {}: {key} refused (overlap loser)",
+                        m.id, t.form_name
+                    ));
+                    self.refused += 1;
+                    continue;
+                }
+                if !dir.join(&icon.file).is_file() {
+                    self.logger.err(&format!(
+                        "mod '{}': train {}: icon payload {} is missing — the train \
+                         loads but its list icon stays blank (fail-open)",
+                        m.id, t.form_name, icon.file
+                    ));
+                    self.refused += 1;
+                    continue;
+                }
+                // `host = "auto"` -> the embedded per-build dir index (the icon
+                // row lives in the `previewtexture` group, which is tp)
+                let host = match &auto_index {
+                    Ok(idx) => match a9_mod::dirindex::resolve_auto(
+                        idx,
+                        self.build_id,
+                        &icon.name,
+                        "previewtexture",
+                    ) {
+                        Ok(h) => {
+                            self.logger.line(&format!(
+                                "mod '{}': asset {}: host auto -> {h} (dir index)",
+                                m.id, icon.name
+                            ));
+                            h
+                        }
+                        Err(e) => {
+                            self.logger.err(&format!(
+                                "mod '{}': train {}: icon {} host auto refused: {e} \
+                                 — icon skipped (fail-open)",
+                                m.id, t.form_name, icon.name
+                            ));
+                            self.refused += 1;
+                            continue;
+                        }
+                    },
+                    Err(e) => {
+                        self.logger.err(&format!(
+                            "mod '{}': train {}: icon {} host auto refused — the \
+                             embedded dir index failed to parse ({e})",
+                            m.id, t.form_name, icon.name
+                        ));
+                        self.refused += 1;
+                        continue;
+                    }
+                };
+                self.plan.assets.push(crate::overlay::AssetOpPlan {
+                    mod_id: m.id.clone(),
+                    mod_version: m.version.to_string(),
+                    host,
+                    name: icon.name.clone(),
+                    dir: "previewtexture".to_string(),
+                    mod_dir: dir.to_path_buf(),
+                    file: icon.file.clone(),
+                    override_vanilla: false,
+                });
+            }
         }
     }
 }

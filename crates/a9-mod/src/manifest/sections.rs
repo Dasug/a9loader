@@ -151,3 +151,94 @@ pub struct LooseAssetSection {
     /// the payload, relative to the mod dir (must not escape it)
     pub file: String,
 }
+
+/// `[[train]]` — a brand-new train type (M7-2), the one section that adds
+/// trains BEYOND the 417-name FORM catalog without the author hand-picking a
+/// slot.
+///
+/// It is a **compiler over primitives**: the author declares the train's own
+/// values, the loader allocates the row id and FORM name, derives the four
+/// `csvp` rows (`train_form`, `train_pattern`, `train_comment`,
+/// `train_custom`), the three preview-icon assets and the `train_list`
+/// visibility entry, and expands all of it into the effects that already
+/// exist — so overlap keys, priority and conflict handling compose unchanged.
+/// The loader also injects the matching spec row (a clone of a shipped donor
+/// row, renamed and re-statted) at boot.
+///
+/// The author **never** writes a form id, a slot name or a CSV row. The
+/// allocated FORM name is `FORM_<MODID>_<KEY>` (upper-cased, non-alphanumerics
+/// folded to `_`), and the preview-icon stem is that name lower-cased.
+///
+/// Limitations of this version (all loud, fail-open):
+/// * `cars` must be 1 — a multi-car consist needs several distinct car models,
+///   which this version does not author;
+/// * the four derived rows are keyed by the allocated name, which is not in the
+///   FORM literal, so the CSV pipeline does not attach them to the injected
+///   row; the row's runtime data comes from the donor clone + the declared
+///   overrides (price/capacity/running cost live only in `train_pattern` and
+///   are therefore not applied to the row — an M7-3 live-acceptance item).
+#[derive(Deserialize, Serialize, Debug, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct TrainSection {
+    /// short slug identifying this train within the mod
+    /// (`[a-z0-9_]{1,24}`); it derives the FORM name and the icon stem, so it
+    /// must be filename-safe and unique per mod.
+    pub key: String,
+    /// the train's display name (the `train_comment` 日本語 column and the
+    /// donor row's JP display lane).
+    pub name: String,
+    /// the English display name (`train_comment` 英語; defaults to `name`).
+    #[serde(default)]
+    pub name_en: Option<String>,
+    /// the shipped FORM name whose spec row is cloned (the model/livery and
+    /// profile donor). Default `FORM_KH32` — a fully shipped KiHa-32-based
+    /// railcar whose model directory `kh32` and its two liveries are already in
+    /// the `mtentr0` pack, so no model asset is needed.
+    #[serde(default)]
+    pub from: Option<String>,
+    /// purchase price (`train_pattern` 購入価格). Default `45000000`.
+    #[serde(default)]
+    pub price: Option<u64>,
+    /// capacity (`train_pattern` 定員積載). Default `106`.
+    #[serde(default)]
+    pub capacity: Option<u32>,
+    /// running cost (`train_pattern` 運行費用). Default `26200`.
+    #[serde(default)]
+    pub running_cost: Option<u32>,
+    /// cruise speed (`train_form` 巡航速度, u16). Default `65`.
+    #[serde(default)]
+    pub cruise_speed: Option<u16>,
+    /// reverse speed (`train_form` 反転速度; omitted = empty, as most rows).
+    #[serde(default)]
+    pub reverse_speed: Option<u16>,
+    /// base fare (`train_form` 基本運賃, u16). Default `300`.
+    #[serde(default)]
+    pub fare: Option<u16>,
+    /// consist length. Only `1` is supported in this version (a multi-car
+    /// consist needs several distinct car models); a larger value is refused
+    /// loudly and the train is skipped.
+    #[serde(default)]
+    pub cars: Option<u8>,
+    /// the reused model (`train_pattern` ディレクトリ/モデル). Default
+    /// `kh32` / `_t_kh32_a` (the donor's shipped model). The mesh must already
+    /// be a shipped `train\<dir>\<mesh>.x` i.dat row — no model asset is
+    /// authored.
+    #[serde(default)]
+    pub model: Option<TrainModel>,
+    /// the runtime livery name (documentation only in this version: the livery
+    /// is the donor model's shipped `_d_<dir>.dds`; a new livery needs the M5
+    /// `[[asset]]` route). Default = the model dir.
+    #[serde(default)]
+    pub livery: Option<String>,
+}
+
+/// The reused model of a [`TrainSection`]: a shipped directory + mesh basename
+/// (`train\<dir>\<mesh>.x`).
+#[derive(Deserialize, Serialize, Debug, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct TrainModel {
+    /// model directory (`train_pattern` column 1), e.g. "kh32"
+    pub dir: String,
+    /// mesh basename (`train_pattern` column 2), e.g. "_t_kh32_a"
+    pub mesh: String,
+}

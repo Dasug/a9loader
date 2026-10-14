@@ -7,7 +7,7 @@
 //! atomically (tmp + rename) beside its staleness key.
 //!
 //! Two keys are special. `csvp` merges the collected table ops; `i.dat` is the
-//! M5 W1 master-index merge ([`merge_idat`]) whose order is load-bearing for
+//! master-index merge ([`merge_idat`]) whose order is load-bearing for
 //! atomicity: host packs are built FIRST, then rows whose `off` comes from the
 //! same `plan_family_a` the host merges used — so no row can point past a
 //! vanilla image when a host cache fails.
@@ -88,7 +88,7 @@ pub(super) fn ensure_cache(inner: &Inner, key: &str) -> Result<PathBuf, String> 
 /// atomically (tmp + rename) + the key file. Returns (serve path,
 /// cache-was-fresh-reused).
 ///
-/// `key == "i.dat"` is the M5 W1 master-index merge (see [`merge_idat`]):
+/// `key == "i.dat"` is the master-index merge (see [`merge_idat`]):
 /// host packs first (atomicity), then rows whose `off` comes from the same
 /// `plan_family_a` the host merges used.
 fn build_cache(inner: &Inner, key: &str) -> Result<(PathBuf, bool), String> {
@@ -136,9 +136,13 @@ fn cache_fingerprint(inner: &Inner, key: &str) -> u64 {
             fingerprint.extend_from_slice(op.mod_id.as_bytes());
             fingerprint.extend_from_slice(op.mod_version.as_bytes());
             fingerprint.extend_from_slice(op.name.as_bytes());
-            // row/replace kind + the payload bytes (content-addressed — no
+            // row/replace/group kind + the payload bytes (content-addressed — no
             // file stat needed; the engine already read them at boot)
-            fingerprint.push(matches!(op.kind, a9_formats::overlay::CsvOpKind::Rows) as u8);
+            fingerprint.push(match op.kind {
+                a9_formats::overlay::CsvOpKind::Replace => 0u8,
+                a9_formats::overlay::CsvOpKind::Rows => 1,
+                a9_formats::overlay::CsvOpKind::GroupAppend => 2,
+            });
             fingerprint.extend_from_slice(&(op.payload.len() as u64).to_le_bytes());
             fingerprint.extend_from_slice(&op.payload);
             for k in &op.row_keys {
@@ -219,12 +223,13 @@ fn merge_pack(inner: &Inner, key: &str, original: &[u8]) -> Result<Vec<u8>, Stri
         };
         let (b, report) = a9_formats::overlay::overlay_csvp(original, &ops, BUDGET)
             .map_err(|e| format!("merge: {e}"))?;
-        let rows = if report.row_replaced + report.row_appended > 0 {
+        let rows = if report.row_replaced + report.row_appended + report.row_group_appended > 0 {
             format!(
-                ", {} row patch(es) ({} replaced, {} added)",
-                report.row_replaced + report.row_appended,
+                ", {} row patch(es) ({} replaced, {} added, {} group-appended)",
+                report.row_replaced + report.row_appended + report.row_group_appended,
                 report.row_replaced,
-                report.row_appended
+                report.row_appended,
+                report.row_group_appended
             )
         } else {
             String::new()
@@ -338,7 +343,7 @@ fn merge_family_a_host(inner: &Inner, key: &str, original: &[u8]) -> Result<Vec<
     Ok(b)
 }
 
-/// The M5 W1 master-index merge. Order is load-bearing for atomicity:
+/// The master-index merge. Order is load-bearing for atomicity:
 /// 1. read + parse the shipped `i.dat`;
 /// 2. refuse unresolved name collisions — a name that exists in the shipped
 ///    index without `override_vanilla` (**the authoritative check**: this is

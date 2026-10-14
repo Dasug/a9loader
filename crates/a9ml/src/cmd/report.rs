@@ -32,7 +32,7 @@ pub(crate) struct Offline {
 }
 
 /// Find the game exe in a game dir (Steam name first, then JP names).
-fn find_game_exe(game: &Path) -> Option<PathBuf> {
+pub(crate) fn find_game_exe(game: &Path) -> Option<PathBuf> {
     let mut candidates: Vec<PathBuf> = fs::read_dir(game)
         .ok()?
         .filter_map(|e| e.ok())

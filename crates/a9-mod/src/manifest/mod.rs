@@ -18,7 +18,8 @@ mod sections;
 mod validate;
 
 pub use sections::{
-    AssetSection, CsvMode, CsvSection, LooseAssetSection, PackEntry, PackSection, HOST_AUTO,
+    AssetSection, CsvMode, CsvSection, LooseAssetSection, PackEntry, PackSection, TrainModel,
+    TrainSection, HOST_AUTO,
 };
 
 pub const DEFAULT_PRIORITY: i64 = 50;
@@ -72,6 +73,12 @@ pub struct Manifest {
     /// a case-insensitive glob over the game's own open path (M6)
     #[serde(default)]
     pub loose_asset: Vec<LooseAssetSection>,
+    /// brand-new train types beyond the 417-name FORM catalog (M7-2) — a
+    /// compiler over the row-merge/asset/row-injection primitives: the author
+    /// declares the train, the loader allocates its id + FORM name, derives the
+    /// four csvp rows, the icons and the visibility entry
+    #[serde(default)]
+    pub train: Vec<TrainSection>,
 }
 
 fn default_priority() -> i64 {

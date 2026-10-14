@@ -22,10 +22,15 @@ pub struct CsvOp {
 /// Whether a [`CsvOp`] replaces the whole table or row-patches it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CsvOpKind {
-    /// the payload IS the table (M3 whole-table replace)
+    /// the payload IS the table (whole-table replace)
     Replace,
     /// the payload is a set of row patches merged into the table
     Rows,
+    /// the payload is a set of rows appended POSITIONALLY at the end of the
+    /// table (a `train_pattern` group: only the head row is keyed, so a
+    /// keyed [`CsvOpKind::Rows`] patch cannot address the continuation rows).
+    /// The rows are placed verbatim; no first-column matching happens.
+    GroupAppend,
 }
 
 /// Merge csv-table ops into the csvp FILE (family-B, 0x204 container).
@@ -53,14 +58,16 @@ fn group_ops_by_table(ops: &[CsvOp]) -> (Vec<String>, BTreeMap<String, Vec<usize
 
 /// The base payload for one table: a whole-table [`CsvOpKind::Replace`] op if
 /// present (at most one), else the container's existing table; then every
-/// `Rows` op for the table merged on top in op order. Returns the bytes plus
-/// the `(replaced, appended)` row counts the report carries.
+/// `Rows` op for the table merged on top in op order, then every
+/// [`CsvOpKind::GroupAppend`] op appended positionally in op order. Returns the
+/// bytes plus the `(replaced, appended, group_appended)` row counts the report
+/// carries.
 fn table_payload(
     name: &str,
     idxs: &[usize],
     ops: &[CsvOp],
     entries: &[CsvEntry],
-) -> Result<(Vec<u8>, usize, usize), Error> {
+) -> Result<(Vec<u8>, usize, usize, usize), Error> {
     let replaces: Vec<usize> = idxs
         .iter()
         .copied()
@@ -87,17 +94,36 @@ fn table_payload(
         .map(|&i| &ops[i])
         .filter(|o| o.kind == CsvOpKind::Rows)
         .collect();
-    if row_ops.is_empty() {
-        return Ok((base_bytes, 0, 0));
-    }
-    let base = csv::Table::parse(&base_bytes)?;
-    let patches: Vec<csv::Table> = row_ops
+    let group_ops: Vec<&CsvOp> = idxs
         .iter()
-        .map(|o| csv::Table::parse(&o.payload))
-        .collect::<Result<_, _>>()?;
-    let (merged, stats) = csv::merge_rows(&base, &patches, csv::MergeMode::Rows)?;
-    base_bytes = merged.serialize();
-    Ok((base_bytes, stats.replaced, stats.appended))
+        .map(|&i| &ops[i])
+        .filter(|o| o.kind == CsvOpKind::GroupAppend)
+        .collect();
+    if row_ops.is_empty() && group_ops.is_empty() {
+        return Ok((base_bytes, 0, 0, 0));
+    }
+    let mut table = csv::Table::parse(&base_bytes)?;
+    let mut replaced = 0usize;
+    let mut appended = 0usize;
+    let mut group_appended = 0usize;
+    if !row_ops.is_empty() {
+        let patches: Vec<csv::Table> = row_ops
+            .iter()
+            .map(|o| csv::Table::parse(&o.payload))
+            .collect::<Result<_, _>>()?;
+        let (merged, stats) = csv::merge_rows(&table, &patches, csv::MergeMode::Rows)?;
+        table = merged;
+        replaced = stats.replaced;
+        appended = stats.appended;
+    }
+    for op in group_ops {
+        let group = csv::Table::parse(&op.payload)?;
+        let (merged, n) = csv::append_group(&table, &group)?;
+        table = merged;
+        group_appended += n;
+    }
+    base_bytes = table.serialize();
+    Ok((base_bytes, replaced, appended, group_appended))
 }
 
 /// The csv merge on already-decoded container bytes.
@@ -118,13 +144,15 @@ pub fn overlay_csvs_decoded(
     let mut replaced = 0usize;
     let mut row_replaced = 0usize;
     let mut row_appended = 0usize;
+    let mut row_group_appended = 0usize;
 
     for name in &order {
         let idxs = &groups[name];
         let existing = entries.iter().position(|e| e.name.as_str() == *name);
-        let (base_bytes, rr, ra) = table_payload(name, idxs, ops, &entries)?;
+        let (base_bytes, rr, ra, rga) = table_payload(name, idxs, ops, &entries)?;
         row_replaced += rr;
         row_appended += ra;
+        row_group_appended += rga;
         let name_field = NameField::from_str(name)?;
         match existing {
             Some(p) => {
@@ -156,5 +184,6 @@ pub fn overlay_csvs_decoded(
     let mut report = merge_report(added, replaced, out.len(), file.len());
     report.row_replaced = row_replaced;
     report.row_appended = row_appended;
+    report.row_group_appended = row_group_appended;
     Ok((file, report))
 }
