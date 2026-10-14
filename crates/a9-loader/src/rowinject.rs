@@ -827,6 +827,32 @@ unsafe fn probe_row_map(g: &TrainState, call: u32, mgr: *mut u8) {
                     lanes_at(421)
                 ));
             }
+            // DIAGNOSTIC: the raw first 0x60 bytes of the donor row and of the
+            // injected row. The panel's price/capacity/configuration are the train's
+            // pattern-group aggregates (the group head for FORM_AR4 is at data row
+            // 2322 with capacity 168 / price 528,000,000 — neither of which is what
+            // the panel showed), so the row must still reference the DONOR's group
+            // somewhere in these bytes. A field-by-field diff pins the offset.
+            let hex_at = |idx: usize| -> String {
+                if idx >= count {
+                    return "<oob>".into();
+                }
+                let row = (begin + idx * ROW_STRIDE) as *const u8;
+                if !sys::is_readable(row as *const c_void, ROW_STRIDE) {
+                    return "<unreadable>".into();
+                }
+                let mut s = String::new();
+                for i in 0..0x60 {
+                    s.push_str(&format!("{:02x}", *row.add(i)));
+                }
+                s
+            };
+            g.logger
+                .debug(&format!("train probe bytes: donor(96) {}", hex_at(96)));
+            if count > 421 {
+                g.logger
+                    .debug(&format!("train probe bytes: injected(421) {}", hex_at(421)));
+            }
         }
     }
 }
@@ -1023,13 +1049,25 @@ unsafe fn inject_trains_locked(g: &TrainState) -> Result<usize, String> {
             let jp = wide_format(&t.name_jp);
             let en = wide_format(&t.name_en);
             let form = wide_format(&t.form_name.to_lowercase());
+            // The Alt lane 0 is what the Rolling-Stock panel prints as its title: the
+            // live probe read the donor's as "ＡＲ４－アートディンク" (name －
+            // manufacturer) and the panel showed exactly that for our train. Clear it
+            // so the panel falls back to the row's own display name instead of
+            // crediting the donor's manufacturer.
+            let title = wide_format("");
             ctor(s.as_mut_ptr().add(ROW_NAME_JP) as *mut *const u16, jp.as_ptr(), 0);
             ctor(s.as_mut_ptr().add(ROW_NAME_EN) as *mut *const u16, en.as_ptr(), 0);
             ctor(s.as_mut_ptr().add(ROW_PFORMNAME) as *mut *const u16, form.as_ptr(), 0);
+            ctor(
+                s.as_mut_ptr().add(ROW_NAMEALT_BASE) as *mut *const u16,
+                title.as_ptr(),
+                0,
+            );
             for (off, what) in [
                 (ROW_NAME_JP, "JP display lane"),
                 (ROW_NAME_EN, "EN display lane"),
                 (ROW_PFORMNAME, "pFormName"),
+                (ROW_NAMEALT_BASE, "panel title lane"),
             ] {
                 if (*(s.as_ptr().add(off) as *const *const u16)).is_null() {
                     return Err(format!(
