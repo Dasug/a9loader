@@ -554,7 +554,15 @@ pub fn run(path: Option<&Path>, entry: Option<&str>, pack: Option<&str>) -> Resu
         }
         println!("   summary: {}", s.compact());
         if rows.is_empty() {
-            println!("   verdict: no [[pack]]/[[csv]]/[[asset]]/[[file]] data effects");
+            if m.loose_asset.is_empty() {
+                println!("   verdict: no [[pack]]/[[csv]]/[[asset]]/[[file]] data effects");
+            } else {
+                println!(
+                    "   verdict: no window-model data effects; {} [[loose_asset]] path \
+                     redirect(s) served live at the game's own open (no residency window)",
+                    m.loose_asset.len()
+                );
+            }
         } else if s.all_known() {
             println!(
                 "   verdict: all {} target(s) have known consumption points — see the classes",

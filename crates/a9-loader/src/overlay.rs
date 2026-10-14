@@ -23,6 +23,14 @@
 //! offsets from the same [`a9_formats::overlay::plan_family_a`] the host
 //! merges used. `i.dat` is served from `<mods_dir>\cache\i.dat`.
 //!
+//! M6 adds `[[loose_asset]]`: game files the game opens BY PATH (not content
+//! inside a pack). Each payload is materialized into `<mods_dir>/cache/loose/`
+//! at install time (a REAL file — `CFile::Read`/`GetLength` are plain Win32 on
+//! the handle, so there is no memory-source branch to exploit) and every
+//! `CFile::Open` is tested against the compiled patterns BEFORE the pack
+//! logic; on a match the open path is rewritten to the cache file. The table
+//! is scanned only when it is non-empty.
+//!
 //! Cache staleness key: FNV-1a over (pack, per-op mod id + version + entry
 //! name + payload file mtime + size) — a changed mod set or a touched
 //! payload file rebuilds the cache; an unchanged set boots from cache with
@@ -105,6 +113,18 @@ struct Packs {
     /// stub uses, and the `i.dat` row offset) — read once at boot for every
     /// host referenced by an `[[asset]]`
     declared: BTreeMap<String, usize>,
+    /// the materialized `[[loose_asset]]` table (M6): compiled patterns + their
+    /// cache copies, in resolved order. Empty = the hook skips the scan.
+    loose: Vec<LooseEntry>,
+}
+
+/// One materialized `[[loose_asset]]` redirect: a compiled pattern and the
+/// loader-cache file whose bytes must be served in its place.
+struct LooseEntry {
+    mod_id: String,
+    pattern: a9_mod::loose::Pattern,
+    /// the cache file, relative to the game CWD (`mods\cache\loose\<name>`)
+    cache_rel: PathBuf,
 }
 
 struct Inner {
@@ -171,6 +191,21 @@ pub struct ListingOpPlan {
     pub payload: Vec<u8>,
 }
 
+/// One `[[loose_asset]]` op the engine hands to the overlay (M6): a game path
+/// pattern + the mod-relative payload that must be served in its place.
+///
+/// The overlay materializes the payload into `<mods_dir>/cache/loose/` at
+/// install time and tests every `CFile::Open` against the compiled pattern.
+pub struct LooseOpPlan {
+    pub mod_id: String,
+    /// the manifest glob, as authored (normalized at compile time)
+    pub pattern: String,
+    /// the owning mod directory (the payload is mod-relative)
+    pub mod_dir: PathBuf,
+    /// payload file, relative to the mod dir
+    pub file: String,
+}
+
 /// The plan the engine hands over at boot. Consumed by [`install`].
 pub struct Plan {
     /// `data\<pack>.bin` name (e.g. "mtentr0") → entry ops in priority order,
@@ -195,6 +230,10 @@ pub struct Plan {
     /// at boot — the tailgate append base == the i.dat row offset; a merged
     /// host ignores it and uses its decoded length (equal for vanilla packs)
     pub declared: BTreeMap<String, usize>,
+    /// `[[loose_asset]]` ops in resolved order (M6): game files opened BY
+    /// PATH, matched by a case-insensitive glob, served from a loader-managed
+    /// cache copy. Empty in the common case — the hook then skips the scan.
+    pub loose: Vec<LooseOpPlan>,
 }
 
 /// Install the overlay (boot time): stash the plan, hook `cfile_open`.
@@ -218,6 +257,10 @@ pub unsafe fn install(
             expect,
             sys::PAGE_EXECUTE_READWRITE,
         )?;
+        let mods_dir_abs = exe_dir.join(&mods_dir);
+        // M6: materialize the [[loose_asset]] cache copies now (fail-open per
+        // asset) and compile their patterns — the hook scans this table.
+        let loose = materialize_loose(&plan.loose, &mods_dir_abs, &mods_dir, &logger);
         let packs = Packs {
             images: plan
                 .images
@@ -277,10 +320,11 @@ pub unsafe fn install(
                 .collect(),
             tailgated: plan.tailgated,
             declared: plan.declared,
+            loose,
         };
         let _ = G.set(Inner {
             packs,
-            mods_dir: exe_dir.join(&mods_dir),
+            mods_dir: mods_dir_abs,
             mods_dir_rel: mods_dir,
             exe_dir,
             original: tramp,
@@ -316,6 +360,33 @@ unsafe extern "system" fn my_cfile_open(
         };
         if inner.trace_opens {
             inner.logger.debug(&format!("open trace: {norm}"));
+        }
+        // M6 [[loose_asset]]: a game file opened DIRECTLY by path (not pack
+        // content) — serve the loader's cache copy in its place. The scan only
+        // runs when the table is non-empty; `norm` is already normalized
+        // (lowercase + backslashes), which is exactly what the pattern wants.
+        if !inner.packs.loose.is_empty() {
+            if let Some(entry) = inner
+                .packs
+                .loose
+                .iter()
+                .find(|l| l.pattern.matches_norm(&norm))
+            {
+                if inner.trace_opens {
+                    inner.logger.debug(&format!(
+                        "loose match: {norm} -> {} (mod {})",
+                        entry.cache_rel.display(),
+                        entry.mod_id
+                    ));
+                }
+                let wide: Vec<u16> = entry
+                    .cache_rel
+                    .to_string_lossy()
+                    .encode_utf16()
+                    .chain(std::iter::once(0))
+                    .collect();
+                return original(this, wide.as_ptr(), flags, perr);
+            }
         }
         // M4 inject capture: `data\<pack>.bin` opens feed the injector's
         // pack-identity slot (a no-op unless the injector is live and the
@@ -451,6 +522,116 @@ fn stat_key(p: &Path) -> (u64, u64) {
         }
         Err(_) => (0, 0),
     }
+}
+
+/// Materialize the `[[loose_asset]]` cache copies (M6).
+///
+/// For each op: read the payload from the mod dir, write it to
+/// `<mods_dir>/cache/loose/<name>` (overwritten every boot — it is a cache),
+/// and compile its pattern into the table the hook scans. The name is the mod
+/// id + a sanitized pattern so two mods can never collide.
+///
+/// FAIL-OPEN per asset, always: an unreadable payload, a failed write, or an
+/// unwritable cache dir logs one loud line naming the mod + pattern and drops
+/// that asset; the game's original open then proceeds untouched.
+fn materialize_loose(
+    ops: &[LooseOpPlan],
+    mods_dir_abs: &Path,
+    mods_dir_rel: &Path,
+    logger: &log::Logger,
+) -> Vec<LooseEntry> {
+    if ops.is_empty() {
+        return Vec::new();
+    }
+    let dir = mods_dir_abs.join("cache").join("loose");
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        logger.err(&format!(
+            "loose: cannot create {}: {e} — {} loose asset(s) dropped (fail-open)",
+            dir.display(),
+            ops.len()
+        ));
+        return Vec::new();
+    }
+    let mut out: Vec<LooseEntry> = Vec::with_capacity(ops.len());
+    let mut used: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for op in ops {
+        let payload = match std::fs::read(op.mod_dir.join(&op.file)) {
+            Ok(b) => b,
+            Err(e) => {
+                logger.err(&format!(
+                    "loose: mod {} pattern \"{}\": payload {} unreadable ({e}) — dropped \
+                     (fail-open)",
+                    op.mod_id, op.pattern, op.file
+                ));
+                continue;
+            }
+        };
+        let name = unique_loose_name(&op.mod_id, &op.pattern, &mut used);
+        let abs = dir.join(&name);
+        if let Err(e) = std::fs::write(&abs, &payload) {
+            logger.err(&format!(
+                "loose: mod {} pattern \"{}\": writing {}: {e} — dropped (fail-open)",
+                op.mod_id,
+                op.pattern,
+                abs.display()
+            ));
+            continue;
+        }
+        let cache_rel = mods_dir_rel.join("cache").join("loose").join(&name);
+        let pattern = a9_mod::loose::Pattern::compile(&op.pattern);
+        logger.line(&format!(
+            "loose: mod {} pattern \"{}\" -> {} ({} B)",
+            op.mod_id,
+            pattern.text(),
+            cache_rel.display(),
+            payload.len()
+        ));
+        out.push(LooseEntry {
+            mod_id: op.mod_id.clone(),
+            pattern,
+            cache_rel,
+        });
+    }
+    out
+}
+
+/// The cache file name for one loose asset: `<mod-id>__<sanitized pattern>`
+/// (two mods can never collide), disambiguated with a counter if two distinct
+/// patterns in one mod sanitize to the same string.
+fn unique_loose_name(
+    mod_id: &str,
+    pattern: &str,
+    used: &mut std::collections::BTreeSet<String>,
+) -> String {
+    let base = format!(
+        "{}__{}",
+        sanitize_name(mod_id),
+        sanitize_name(&a9_mod::loose::normalize(pattern))
+    );
+    let mut name = base.clone();
+    let mut n = 2u32;
+    while !used.insert(name.clone()) {
+        name = format!("{base}__{n}");
+        n += 1;
+    }
+    name
+}
+
+/// A cache-name-safe form of a string: keep `[a-z0-9._-]`, map the rest to
+/// `_`, and bound the length (Windows path components are 255 chars).
+fn sanitize_name(s: &str) -> String {
+    let mut out: String = s
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    out.truncate(100);
+    out
 }
 
 /// Build (or reuse) the cache for `key`; returns the cache path relative to

@@ -105,7 +105,7 @@ pub unsafe fn boot(hinst: sys::HMODULE) {
             }
             Ok(m) => {
                 logger.line(&format!(
-                    "mod: {} v{} by {} ({} patch, {} hook, {} pack entr{}, {} csv, {} asset, {} file)",
+                    "mod: {} v{} by {} ({} patch, {} hook, {} pack entr{}, {} csv, {} asset, {} file, {} loose)",
                     m.id,
                     m.version,
                     m.author,
@@ -119,7 +119,8 @@ pub unsafe fn boot(hinst: sys::HMODULE) {
                     },
                     m.csv.len(),
                     m.asset.len(),
-                    m.file.len()
+                    m.file.len(),
+                    m.loose_asset.len()
                 ));
                 manifests.push(m.clone());
                 dirs.push(s.dir.clone());
@@ -260,6 +261,7 @@ pub unsafe fn boot(hinst: sys::HMODULE) {
         listings: Vec::new(),
         tailgated: std::collections::BTreeSet::new(),
         declared: std::collections::BTreeMap::new(),
+        loose: Vec::new(),
     };
     let inject_mode = cfg.pack_serving == a9_mod::config::PackServing::Inject;
     let mut inject_plan = crate::injector::InjectorPlan::default();
@@ -485,6 +487,27 @@ pub unsafe fn boot(hinst: sys::HMODULE) {
             }
             file_copies.push((m.id.clone(), f.clone(), dir.clone()));
         }
+        // [[loose_asset]] — game files opened by path, served from a
+        // loader-managed cache copy (M6). The payload is materialized at
+        // overlay install time; a failure there drops the asset loudly.
+        for l in &m.loose_asset {
+            let key = format!("loose:{}", l.match_.to_ascii_lowercase());
+            if res.effect_refused(i, &key) {
+                logger.err(&format!(
+                    "mod '{}': {key} refused (overlap loser — an earlier mod already \
+                     serves this path pattern)",
+                    m.id
+                ));
+                refused += 1;
+                continue;
+            }
+            plan.loose.push(crate::overlay::LooseOpPlan {
+                mod_id: m.id.clone(),
+                pattern: l.match_.clone(),
+                mod_dir: dir.clone(),
+                file: l.file.clone(),
+            });
+        }
     }
 
     // [[file]] copies — genuinely-new files, before the game enumerates
@@ -635,6 +658,7 @@ pub unsafe fn boot(hinst: sys::HMODULE) {
         || !plan.csvs.is_empty()
         || !plan.assets.is_empty()
         || !plan.listings.is_empty()
+        || !plan.loose.is_empty()
         || injector_live
     {
         match entry.anchor("cfile_open") {
@@ -648,6 +672,7 @@ pub unsafe fn boot(hinst: sys::HMODULE) {
                 };
                 let asset_count = plan.assets.len();
                 let listing_count = plan.listings.len();
+                let loose_count = plan.loose.len();
                 let packs: Vec<String> = plan
                     .images
                     .keys()
@@ -682,6 +707,21 @@ pub unsafe fn boot(hinst: sys::HMODULE) {
                 } else {
                     String::new()
                 };
+                let loose_note = if loose_count > 0 {
+                    format!(
+                        "; {loose_count} loose asset{}",
+                        if loose_count == 1 { "" } else { "s" }
+                    )
+                } else {
+                    String::new()
+                };
+                // a failed hook install must still name every loose asset it
+                // could not serve (fail-open: the original open proceeds)
+                let loose_summary: Vec<(String, String)> = plan
+                    .loose
+                    .iter()
+                    .map(|l| (l.mod_id.clone(), l.pattern.clone()))
+                    .collect();
                 match unsafe {
                     crate::overlay::install(
                         plan,
@@ -698,7 +738,8 @@ pub unsafe fn boot(hinst: sys::HMODULE) {
                             && image_count == 0
                             && csv_count == 0
                             && asset_count == 0
-                            && listing_count == 0 =>
+                            && listing_count == 0
+                            && loose_count == 0 =>
                     {
                         logger.line(&format!(
                             "overlay: cfile_open hooked rva={:#x} \
@@ -709,7 +750,7 @@ pub unsafe fn boot(hinst: sys::HMODULE) {
                     }
                     Ok(()) => logger.line(&format!(
                         "overlay: cfile_open hooked rva={:#x} expect=verified ({image_count} entr{} \
-                         across packs: {}; {csv_count} csv table{}{asset_note})",
+                         across packs: {}; {csv_count} csv table{}{asset_note}{loose_note})",
                         anchor.rva,
                         if image_count == 1 { "y" } else { "ies" },
                         packs.join(", "),
@@ -727,6 +768,13 @@ pub unsafe fn boot(hinst: sys::HMODULE) {
                                  this boot",
                             );
                         }
+                        for (id, pat) in &loose_summary {
+                            logger.err(&format!(
+                                "loose: mod {id} pattern \"{pat}\": the overlay hook \
+                                 could not be installed — this loose asset serves the \
+                                 original file this boot (fail-open)"
+                            ));
+                        }
                     }
                 }
             }
@@ -737,6 +785,14 @@ pub unsafe fn boot(hinst: sys::HMODULE) {
                         "inject serving cannot fire without the capture hook — \
                          [[pack]] inject effects serve vanilla this boot",
                     );
+                }
+                for l in &plan.loose {
+                    logger.err(&format!(
+                        "loose: mod {} pattern \"{}\": this build has no cfile_open \
+                         anchor — this loose asset serves the original file this boot \
+                         (fail-open)",
+                        l.mod_id, l.pattern
+                    ));
                 }
             }
         }

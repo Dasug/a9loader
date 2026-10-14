@@ -63,6 +63,11 @@ pub struct Manifest {
     /// overwrites an existing file — that is [[pack]]/[[csv]] territory.
     #[serde(default)]
     pub file: Vec<FileSection>,
+    /// game files the game opens BY PATH (not content inside a pack) — the
+    /// loader serves the mod's bytes in place of the file on disk, matched by
+    /// a case-insensitive glob over the game's own open path (M6)
+    #[serde(default)]
+    pub loose_asset: Vec<LooseAssetSection>,
 }
 
 fn default_priority() -> i64 {
@@ -257,6 +262,31 @@ pub struct FileSection {
     /// destination, relative to the game dir (e.g. "data/texture/x.dds")
     pub dest: String,
     /// source file, relative to the mod dir
+    pub file: String,
+}
+
+/// `[[loose_asset]]` — a game file the game opens BY PATH (not content inside
+/// a pack): the loader serves the mod's bytes in place of the file on disk.
+///
+/// Motivating case: the game builds its bitmap-font atlases at every boot,
+/// writes them to a PER-BOOT RANDOM temp directory
+/// (`%TEMP%\<random>.adk\fe01.bin` … `fs02.bin`), then reads them back through
+/// the same `CFile::Open` funnel the M3 overlay hooks — so the match must be a
+/// PATTERN, never an exact path. An exact game path (`data\bmf\fy01.bin`)
+/// works too (a `match` with no `*` is an exact, case-insensitive path).
+///
+/// The loader materializes each payload into `<mods_dir>/cache/loose/` (a real
+/// file — `CFile::Read`/`GetLength` are plain Win32 on the handle, so there is
+/// no memory-source branch to exploit) and rewrites the game's open path to it.
+#[derive(Deserialize, Serialize, Debug, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct LooseAssetSection {
+    /// case-insensitive GLOB over the game's own open path (backslashes
+    /// normalized; `*` = any run, including the empty run). `?` and `[`/`]`
+    /// are ordinary characters. A `match` with no `*` is an exact path.
+    #[serde(rename = "match")]
+    pub match_: String,
+    /// the payload, relative to the mod dir (must not escape it)
     pub file: String,
 }
 
@@ -476,6 +506,33 @@ impl Manifest {
                 return Err(ModError::Invalid(format!(
                     "file dest {:?} has no source `file`",
                     f.dest
+                )));
+            }
+        }
+        // [[loose_asset]] — game files opened by path, matched by a glob
+        let mut loose_matches = std::collections::BTreeSet::new();
+        for l in &self.loose_asset {
+            if l.match_.trim().is_empty() || l.match_.contains('\0') {
+                return Err(ModError::Invalid(format!(
+                    "loose_asset match must be a nonempty path/glob, got {:?}",
+                    l.match_
+                )));
+            }
+            if l.file.trim().is_empty() {
+                return Err(ModError::Invalid(format!(
+                    "loose_asset {:?} has no `file`",
+                    l.match_
+                )));
+            }
+            // the payload is a mod-relative file: no absolute path, no drive,
+            // no `..` (same rule the other payload fields use)
+            validate_mod_rel_path(&l.file, "loose_asset file")?;
+            // two sections with the same pattern (case-insensitively) would
+            // fight over one redirect — merge them into one
+            if !loose_matches.insert(l.match_.to_ascii_lowercase()) {
+                return Err(ModError::Invalid(format!(
+                    "two [[loose_asset]] sections match {:?} — one pattern is one redirect",
+                    l.match_
                 )));
             }
         }
@@ -833,6 +890,66 @@ expect = "bb 00 00 00"
         assert!(parse(
             "\nid=\"x\"\nname=\"X\"\nversion=\"1.0.0\"\nauthor=\"a\"\n\
              [[asset]]\nfolder=\"assets\"\nrecurse=false\n"
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn m6_loose_asset_section_parses_and_validates() {
+        // the motivating form: a glob over a per-boot random temp path
+        let m = parse(
+            "\nid=\"x\"\nname=\"X\"\nversion=\"1.0.0\"\nauthor=\"a\"\n\
+             [[loose_asset]]\nmatch=\"*.adk\\\\fe01.bin\"\nfile=\"bmf/fe01.bin\"\n",
+        )
+        .unwrap();
+        m.validate().unwrap();
+        assert_eq!(m.loose_asset.len(), 1);
+        assert_eq!(m.loose_asset[0].match_, "*.adk\\fe01.bin");
+        assert_eq!(m.loose_asset[0].file, "bmf/fe01.bin");
+        // an exact game path works too (no `*`)
+        let m = parse(
+            "\nid=\"x\"\nname=\"X\"\nversion=\"1.0.0\"\nauthor=\"a\"\n\
+             [[loose_asset]]\nmatch=\"data\\\\bmf\\\\fy01.bin\"\nfile=\"f\"\n",
+        )
+        .unwrap();
+        m.validate().unwrap();
+        assert_eq!(m.loose_asset[0].match_, "data\\bmf\\fy01.bin");
+
+        // empty match / empty file
+        let m = parse("\nid=\"x\"\nname=\"X\"\nversion=\"1.0.0\"\nauthor=\"a\"\n[[loose_asset]]\nmatch=\" \"\nfile=\"f\"\n").unwrap();
+        assert!(m.validate().unwrap_err().to_string().contains("nonempty path/glob"));
+        let m = parse("\nid=\"x\"\nname=\"X\"\nversion=\"1.0.0\"\nauthor=\"a\"\n[[loose_asset]]\nmatch=\"*.bin\"\nfile=\" \"\n").unwrap();
+        assert!(m.validate().unwrap_err().to_string().contains("no `file`"));
+
+        // the payload must not escape the mod dir
+        for file in ["/abs/x.bin", "C:\\\\x.bin", "a/../../x.bin", "..\\\\x.bin"] {
+            let m = parse(&format!(
+                "\nid=\"x\"\nname=\"X\"\nversion=\"1.0.0\"\nauthor=\"a\"\n[[loose_asset]]\nmatch=\"*.bin\"\nfile=\"{file}\"\n"
+            ))
+            .unwrap();
+            assert!(m.validate().is_err(), "file {file} must be refused");
+        }
+
+        // duplicate patterns (case-insensitively) are refused within one mod
+        let m = parse(
+            "\nid=\"x\"\nname=\"X\"\nversion=\"1.0.0\"\nauthor=\"a\"\n\
+             [[loose_asset]]\nmatch=\"*.ADK\\\\fe01.bin\"\nfile=\"a\"\n\
+             [[loose_asset]]\nmatch=\"*.adk\\\\fe01.bin\"\nfile=\"b\"\n",
+        )
+        .unwrap();
+        let e = m.validate().unwrap_err().to_string();
+        assert!(e.contains("two [[loose_asset]] sections match"), "{e}");
+
+        // an unknown field inside the section is refused (strict schema)
+        assert!(parse(
+            "\nid=\"x\"\nname=\"X\"\nversion=\"1.0.0\"\nauthor=\"a\"\n\
+             [[loose_asset]]\nmatch=\"*.bin\"\nfile=\"f\"\nkind=\"x\"\n"
+        )
+        .is_err());
+        // `match` is the TOML key; the Rust field name is not accepted
+        assert!(parse(
+            "\nid=\"x\"\nname=\"X\"\nversion=\"1.0.0\"\nauthor=\"a\"\n\
+             [[loose_asset]]\nmatch_=\"*.bin\"\nfile=\"f\"\n"
         )
         .is_err());
     }

@@ -215,6 +215,11 @@ pub fn resolve(mods: &[Manifest], cfg: &ResolveConfig) -> Resolution {
         for f in &mods[i].file {
             own(format!("file:{}", f.dest), i, false);
         }
+        for l in &mods[i].loose_asset {
+            // the effect key lowercases the pattern: the same pattern from two
+            // mods is one redirect, exactly like `asset:<name>` is one row
+            own(format!("loose:{}", l.match_.to_ascii_lowercase()), i, false);
+        }
         for a in &mods[i].asset {
             // `[[asset]]` names are bare master-map keys — a difference from the
             // family-B pack-entry namespace; colliding with a SHIPPED i.dat row
@@ -442,6 +447,22 @@ mod tests {
         // different asset names: no overlap
         let a3 = build("a3", 20, "[[asset]]\nname=\"_t_other_a.x\"\ndir=\"train\\\\o\"\nhost=\"vp\"\nfile=\"z.x\"\n");
         assert!(resolve(&vec![a3, a1], &ResolveConfig::default()).overlaps.is_empty());
+    }
+
+    #[test]
+    fn loose_asset_overlap_is_per_pattern() {
+        // the same pattern (case-insensitively) from two mods = one redirect:
+        // the earlier mod keeps it, the loser's op is skipped by the engine
+        let a = build("a", 10, "[[loose_asset]]\nmatch=\"*.adk\\\\fe01.bin\"\nfile=\"x.bin\"\n");
+        let b = build("b", 20, "[[loose_asset]]\nmatch=\"*.ADK\\\\FE01.BIN\"\nfile=\"y.bin\"\n");
+        let res = resolve(&vec![b, a.clone()], &ResolveConfig::default());
+        assert_eq!(res.overlaps.len(), 1);
+        assert_eq!(res.overlaps[0].key, "loose:*.adk\\fe01.bin");
+        assert!(!res.effect_refused(res.order[0], "loose:*.adk\\fe01.bin"));
+        assert!(res.effect_refused(res.order[1], "loose:*.adk\\fe01.bin"));
+        // a different pattern does not collide
+        let c = build("c", 20, "[[loose_asset]]\nmatch=\"*.adk\\\\fs02.bin\"\nfile=\"z.bin\"\n");
+        assert!(resolve(&vec![c, a], &ResolveConfig::default()).overlaps.is_empty());
     }
 
     #[test]
