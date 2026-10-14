@@ -856,7 +856,9 @@ fn print_common(o: &Offline, game: &Path, verbose: bool) {
             // the `order:`/`packs:` lines above stay byte-compatible)
             let classify_rows = classify::classify_manifest(m);
             if classify_rows.is_empty() {
-                println!("    classify: (no [[pack]]/[[csv]]/[[asset]]/[[file]] data effects)");
+                if m.loose_asset.is_empty() {
+                    println!("    classify: (no [[pack]]/[[csv]]/[[asset]]/[[file]]/[[loose_asset]] data effects)");
+                }
             } else {
                 println!(
                     "    classify: {}",
@@ -991,6 +993,32 @@ fn print_common(o: &Offline, game: &Path, verbose: bool) {
                     );
                 }
             }
+            // [[loose_asset]] roll-up (M6) — game files opened by path, served
+            // from a loader cache copy, matched by a case-insensitive glob. The
+            // redirect happens at the game's OWN open, so there is no
+            // boot-window residency concern (unlike [[pack]]/[[asset]]).
+            if !m.loose_asset.is_empty() {
+                let n = m.loose_asset.len();
+                println!(
+                    "    loose: {n} path redirect{} (served at the game's own open — no \
+                     boot-window residency)",
+                    if n == 1 { "" } else { "s" }
+                );
+                let missing: Vec<&str> = m
+                    .loose_asset
+                    .iter()
+                    .filter(|l| o.dirs.get(i).is_some_and(|d| !d.join(&l.file).is_file()))
+                    .map(|l| l.file.as_str())
+                    .collect();
+                if !missing.is_empty() {
+                    println!(
+                        "      warning: {} loose payload file(s) missing in the mod dir: {} \
+                         (the loader drops them loudly, fail-open)",
+                        missing.len(),
+                        missing.join(", ")
+                    );
+                }
+            }
             if verbose {
                 for p in &m.patch {
                     println!("    [[patch]] {} off={} len={}", p.target.key(p.offset), p.offset, amod::hex::parse(&p.data).map(|d| d.len()).unwrap_or(0));
@@ -1016,6 +1044,9 @@ fn print_common(o: &Offline, game: &Path, verbose: bool) {
                 }
                 for f in &m.file {
                     println!("    [[file]] {} <- {}", f.dest, f.file);
+                }
+                for l in &m.loose_asset {
+                    println!("    [[loose_asset]] match \"{}\" <- {}", l.match_, l.file);
                 }
                 for a in &m.asset {
                     let host = match auto_hosts.get(&a.name) {
@@ -1128,6 +1159,7 @@ fn write_mod(
         csv,
         asset: Vec::new(),
         file: Vec::new(),
+        loose_asset: Vec::new(),
     };
     m.validate().map_err(|e| anyhow::anyhow!("generated manifest invalid: {e}"))?;
     fs::create_dir_all(out).context("creating the mod dir")?;

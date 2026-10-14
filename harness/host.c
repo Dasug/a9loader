@@ -19,6 +19,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <wchar.h>
 
 #define RVA_FILTER 0x1A13B0u
 #define RVA_TABLE  0x6FC1C0u
@@ -115,6 +116,11 @@ static const unsigned char g_cfile_orig[16] = {
     0x40,0x53,0x55,0x56,0x57,0x41,0x56,0x41,0x57,0x48,0x81,0xec,0x88,0x02,0x00,0x00
 };
 
+/* M6: the path the LAST CFile::Open actually used — the loose-asset redirect
+ * evidence (cfile_open_body records it; the `loose` host mode reads it back so
+ * each open's tag can be tied to the path the loader handed over) */
+static wchar_t g_last_path[1024];
+
 /* the M4 fetch-probe prologue RECORDS (the address book's expect bytes;
  * machine-verified boundaries — each ends at an instruction boundary
  * >= 16 so the 16-byte hook write fits and the trampoline re-enters
@@ -176,6 +182,12 @@ __attribute__((used, noinline)) int cfile_open_body(void *cfile, const wchar_t *
     HANDLE h;
     (void)flags; (void)perr;
     /* the path the open used — THE redirect evidence for the harness */
+    if (path) {
+        wcsncpy(g_last_path, path, 1023);
+        g_last_path[1023] = 0;
+    } else {
+        g_last_path[0] = 0;
+    }
     printf("cfile_open_body: path=%ls\n", path);
     h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL,
                     OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
@@ -817,6 +829,52 @@ int main(int argc, char **argv) {
             free(buf);
             printf("overlay %s: %lu bytes, handle-read %s\n",
                    tags[i], (unsigned long)lo, ok ? "ok" : "SHORT");
+        }
+        return 0;
+    }
+    if (!strcmp(mode, "loose")) {
+        /* M6 [[loose_asset]]: open game files BY PATH through the (possibly
+         * hooked) CFile::Open — an ABSOLUTE path matching the mod's
+         * `*.adk\fe01.bin` glob (the per-boot random temp-dir shape), an exact
+         * RELATIVE path, and a non-matching path. Evidence: the path the open
+         * actually used (g_last_path) + the bytes read, dumped to
+         * read_<tag>.bin for an offline byte-compare. */
+        wchar_t cwd[512];
+        static wchar_t abs_path[1024];
+        const wchar_t *paths[3];
+        const char *tags[3] = { "abs", "rel", "plain" };
+        if (!GetCurrentDirectoryW(512, cwd)) cwd[0] = 0;
+        swprintf(abs_path, 1024, L"%ls\\tmpdir.adk\\fe01.bin", cwd);
+        paths[0] = abs_path;
+        paths[1] = L"data\\bmf\\fy01.bin";
+        paths[2] = L"data\\mtfake.bin";
+        for (int i = 0; i < 3; i++) {
+            unsigned char cfile[0x28];
+            cfile_open_fn cfo = (cfile_open_fn)(g_base + RVA_CFILE);
+            HANDLE h;
+            DWORD lo, hi, rd = 0;
+            BYTE *buf;
+            int ok = 0;
+            g_last_path[0] = 0;
+            memset(cfile, 0, sizeof(cfile));
+            int r = cfo(cfile, paths[i], 0, 0);
+            if (r) {
+                h = *(HANDLE *)(cfile + 8);
+                lo = GetFileSize(h, &hi);
+                buf = (BYTE *)malloc(lo ? lo : 1);
+                ok = ReadFile(h, buf, lo, &rd, NULL) && rd == lo;
+                if (ok) {
+                    char out[64];
+                    sprintf(out, "read_%s.bin", tags[i]);
+                    write_whole(out, buf, rd);
+                }
+                CloseHandle(h);
+                free(buf);
+                printf("loose %s: used=%ls ret=%d bytes=%lu read=%s\n",
+                       tags[i], g_last_path, r, (unsigned long)lo, ok ? "ok" : "SHORT");
+            } else {
+                printf("loose %s: used=%ls ret=0 (open failed)\n", tags[i], g_last_path);
+            }
         }
         return 0;
     }

@@ -12,6 +12,7 @@ pub mod builds;
 pub mod config;
 pub mod dirindex;
 pub mod hex;
+pub mod loose;
 pub mod manifest;
 pub mod resolve;
 pub mod scan;
