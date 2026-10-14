@@ -275,6 +275,23 @@ unsafe extern "system" fn tailgate_stub(
         if hp.failed.load(Ordering::Relaxed) {
             return al;
         }
+        append_host(inner, hp, dest, cap, src, al)
+    }
+}
+
+/// The post-decode validation: the decoded length must reach the plan's
+/// declared base, the destination must be the shared workspace, and the whole
+/// append range must be live — then commit. Total: every refusal logs and
+/// returns the decoder's own `AL`.
+unsafe fn append_host(
+    inner: &Inner,
+    hp: &HostPlan,
+    dest: *mut u8,
+    cap: *mut u32,
+    src: *const u8,
+    al: u8,
+) -> u8 {
+    unsafe {
         // the decoded length is now in *cap; the plan used the vanilla
         // declared size. They must agree or the i.dat rows would dangle.
         if cap.is_null() {
@@ -340,7 +357,20 @@ unsafe extern "system" fn tailgate_stub(
                 al,
             );
         }
+        commit_append(inner, hp, dest, decoded, al)
+    }
+}
 
+/// Commit the append: the host's parts at `dest+|V|`, then (i.dat) the count
+/// bump, then the journal line. Returns the decoder's own `AL`.
+unsafe fn commit_append(
+    inner: &Inner,
+    hp: &HostPlan,
+    dest: *mut u8,
+    decoded: usize,
+    al: u8,
+) -> u8 {
+    unsafe {
         // commit: append the parts at dest+|V|, then (i.dat) bump the count
         let mut off = hp.declared;
         for part in &hp.parts {

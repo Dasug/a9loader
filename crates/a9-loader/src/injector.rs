@@ -438,45 +438,79 @@ unsafe fn build_and_attach(
 ) -> Result<usize, String> {
     unsafe {
         // 1) payloads first — any unreadable file fails the whole pack
-        let mut payloads = Vec::with_capacity(ops.len());
-        for op in ops {
-            match std::fs::read(op.mod_dir.join(&op.file)) {
-                Ok(b) => payloads.push(b),
-                Err(e) => {
-                    return Err(format!(
-                        "mod {} entry {}: payload unreadable: {} ({e})",
-                        op.mod_id, op.name, op.file
-                    ))
-                }
-            }
-        }
-
+        let payloads = read_payloads(ops)?;
         // 2) sizes + one shared allocation (pointer array + blocks)
         let arr_bytes = (vanilla_count + ops.len())
             .saturating_mul(core::mem::size_of::<usize>());
-        let mut blocks_bytes = 0usize;
-        for p in &payloads {
-            blocks_bytes = blocks_bytes.saturating_add(ENTRY_HDR + p.len());
+        let region = alloc_region(arr_bytes, &payloads)?;
+        // 3+4) the vanilla pointer replicate and our entry blocks/slots
+        let appended = write_region(region, arr_bytes, vanilla_count, row0, ops, &payloads)?;
+        // 5) extend the LAST vanilla row + publish the region record
+        attach_row(inner, row0, row_count, region, appended, pack);
+        Ok(appended)
+    }
+}
+
+/// Step 1: read every op's payload from its mod dir; any failure names the mod
+/// and entry and fails the whole pack.
+fn read_payloads(ops: &[InjectOp]) -> Result<Vec<Vec<u8>>, String> {
+    let mut payloads = Vec::with_capacity(ops.len());
+    for op in ops {
+        match std::fs::read(op.mod_dir.join(&op.file)) {
+            Ok(b) => payloads.push(b),
+            Err(e) => {
+                return Err(format!(
+                    "mod {} entry {}: payload unreadable: {} ({e})",
+                    op.mod_id, op.name, op.file
+                ))
+            }
         }
-        if blocks_bytes > MAX_REGION_BYTES {
-            return Err(format!(
-                "region size {blocks_bytes} bytes exceeds the \
-                 {MAX_REGION_BYTES} sanity ceiling"
-            ));
-        }
-        let total = arr_bytes + blocks_bytes;
-        let region = sys::VirtualAlloc(
+    }
+    Ok(payloads)
+}
+
+/// Step 2: size the one shared region (pointer array + entry blocks) and
+/// `VirtualAlloc` it RW. Refuses (never OOMs) when the blocks exceed the
+/// sanity ceiling.
+unsafe fn alloc_region(arr_bytes: usize, payloads: &[Vec<u8>]) -> Result<*mut u8, String> {
+    let mut blocks_bytes = 0usize;
+    for p in payloads {
+        blocks_bytes = blocks_bytes.saturating_add(ENTRY_HDR + p.len());
+    }
+    if blocks_bytes > MAX_REGION_BYTES {
+        return Err(format!(
+            "region size {blocks_bytes} bytes exceeds the \
+             {MAX_REGION_BYTES} sanity ceiling"
+        ));
+    }
+    let total = arr_bytes + blocks_bytes;
+    let region = unsafe {
+        sys::VirtualAlloc(
             core::ptr::null_mut(),
             total,
             sys::MEM_COMMIT | sys::MEM_RESERVE,
             sys::PAGE_READWRITE,
-        );
-        if region.is_null() {
-            return Err("VirtualAlloc for the extension region failed".into());
-        }
-        let region = region as *mut u8;
+        )
+    };
+    if region.is_null() {
+        return Err("VirtualAlloc for the extension region failed".into());
+    }
+    Ok(region as *mut u8)
+}
 
-        // 3) the vanilla pointer replicate — copy the loader's own array
+/// Steps 3+4: copy the loader's own vanilla pointer array verbatim (every row
+/// shares it; row 0's +0x38 points at it) and lay out our entry blocks + their
+/// array slots after the vanilla range. Returns the appended entry count.
+unsafe fn write_region(
+    region: *mut u8,
+    arr_bytes: usize,
+    vanilla_count: usize,
+    row0: *mut u8,
+    ops: &[InjectOp],
+    payloads: &[Vec<u8>],
+) -> Result<usize, String> {
+    unsafe {
+        // the vanilla pointer replicate — copy the loader's own array
         // verbatim (every row shares it; row 0's +0x38 points at it). Copying
         // avoids depending on the loader's exact `out_base + 4 + Σ` arithmetic.
         let vanilla_array =
@@ -491,7 +525,7 @@ unsafe fn build_and_attach(
             (region.add(j * core::mem::size_of::<usize>()) as *mut usize).write(p);
         }
 
-        // 4) our entry blocks {0x200 name | w | h | stored | payload} and
+        // our entry blocks {0x200 name | w | h | stored | payload} and
         // their array slots after the vanilla range
         let mut w = arr_bytes;
         let mut appended = 0usize;
@@ -504,13 +538,27 @@ unsafe fn build_and_attach(
             w += ENTRY_HDR + payload.len();
             appended += 1;
         }
+        Ok(appended)
+    }
+}
 
-        // 5) extend the LAST vanilla row: keep its start (+0x13c) and
-        // delegate (+0x30)/mode (+0x41); grow its count (+0x140) and point
-        // its slice (+0x38) at our array. The delegate indexes the array
-        // ABSOLUTELY (`array[start + i]`, FUN_1403f0330), so our blocks at
-        // indices [vanilla_count, vanilla_count+ours) land exactly in this
-        // row's extended range. No pool-count bump — the row already exists.
+/// Step 5: extend the LAST vanilla row — keep its start (+0x13c) and
+/// delegate (+0x30)/mode (+0x41); grow its count (+0x140) and point its slice
+/// (+0x38) at our array. The delegate indexes the array ABSOLUTELY
+/// (`array[start + i]`, FUN_1403f0330), so our blocks at indices
+/// [vanilla_count, vanilla_count+ours) land exactly in this row's extended
+/// range. No pool-count bump — the row already exists. Then publish the region
+/// record (builds are one-shot per pack per boot; a second window re-reads and
+/// re-appends harmlessly).
+unsafe fn attach_row(
+    inner: &Inner,
+    row0: *mut u8,
+    row_count: usize,
+    region: *mut u8,
+    appended: usize,
+    pack: &str,
+) {
+    unsafe {
         let last = row0.wrapping_add((row_count - 1) * ROW_STRIDE);
         let last_count =
             core::ptr::read(last.add(ROW_COUNT) as *const u32) as usize;
@@ -520,8 +568,6 @@ unsafe fn build_and_attach(
             (last_count + appended) as u32,
         );
 
-        // publish the region record (builds are one-shot per pack per
-        // boot; a second window re-reads and re-appends harmlessly)
         if let Ok(mut m) = inner.runtime.lock() {
             m.entry(pack.to_string())
                 .or_insert(PackRuntime {
@@ -531,7 +577,6 @@ unsafe fn build_and_attach(
                 })
                 .region = region;
         }
-        Ok(appended)
     }
 }
 

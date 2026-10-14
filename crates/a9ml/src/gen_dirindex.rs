@@ -27,11 +27,19 @@
 //!
 //! The build id comes from the game exe (searched next to the data dir); pass
 //! `--exe` to point at it explicitly. Decoded packs are held one at a time.
+//!
+//! [`generate`] is a sequence of named steps: [`build_identity`] →
+//! [`read_rows`] → [`pack_keys`] → [`match_rows`] → [`aggregate`] →
+//! [`rescue_names`] → [`summarize`]. [`run`] renders the table
+//! ([`emit_table`]), the report ([`report_text`]) and the write/check
+//! ([`write_or_check`]).
 
 use a9_formats as fmt;
 use anyhow::{bail, Context, Result};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+
+use crate::util::{ascii_like, civil_stamp};
 
 /// A shipped row's content family, from its name suffix (the discriminator).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -116,14 +124,6 @@ fn row_matches(kind: Kind, off: u32, len: u32, buf: &[u8]) -> bool {
         Kind::Att | Kind::Csv | Kind::Other => ascii_like(blob),
         Kind::Dir => utf16_name_run(blob),
     }
-}
-
-fn ascii_like(b: &[u8]) -> bool {
-    let good = b
-        .iter()
-        .filter(|&&c| (9..=13).contains(&c) || (32..=126).contains(&c))
-        .count();
-    good * 10 >= b.len().max(1) * 9
 }
 
 fn utf16_name_run(b: &[u8]) -> bool {
@@ -224,31 +224,6 @@ fn find_exe(data_dir: &Path, explicit: Option<&Path>) -> Option<(PathBuf, Vec<u8
     None
 }
 
-fn civil_stamp() -> String {
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let days = (secs / 86_400) as i64;
-    let sod = (secs % 86_400) as u32;
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = if m <= 2 { y + 1 } else { y };
-    format!(
-        "{y:04}-{m:02}-{d:02} {:02}:{:02}:{:02}",
-        sod / 3600,
-        (sod % 3600) / 60,
-        sod % 60
-    )
-}
-
 /// What [`generate`] learned, for the report and tests.
 pub struct Report {
     pub packs: usize,
@@ -264,6 +239,17 @@ pub struct Report {
     pub train_ambiguous: usize,
 }
 
+/// The per-dir aggregation of one generation run.
+struct Aggregated {
+    /// number of distinct shipped dirs
+    dir_count: usize,
+    dirs: BTreeMap<String, String>,
+    ambiguous: BTreeMap<String, Vec<String>>,
+    unverified: Vec<String>,
+    train_dirs: usize,
+    train_ambiguous: usize,
+}
+
 /// The generator core: decode the shipped index + every pack, aggregate the
 /// per-dir resolution, and return the finished table. Pure IO in, table out.
 pub fn generate(
@@ -274,6 +260,36 @@ pub fn generate(
         bail!("not a directory: {}", data_dir.display());
     }
     // ---- build identity (the table is per build)
+    let (build, exe_path) = build_identity(data_dir, exe)?;
+    let id = build.id.clone();
+
+    // ---- the shipped index + the packs
+    let rows = read_rows(data_dir)?;
+    let pack_names = pack_keys(data_dir)?;
+    let (hits, decoded_packs, decode_failed) = match_rows(data_dir, &rows, &pack_names);
+
+    // ---- aggregate per dir, then rescue names, then summarize
+    let agg = aggregate(&rows, &hits);
+    let names = rescue_names(&rows, &hits, &agg.ambiguous);
+    let report = summarize(&rows, &hits, &agg, decoded_packs, decode_failed);
+
+    let mut index = a9_mod::dirindex::DirIndex::default();
+    index.build.insert(
+        id,
+        a9_mod::dirindex::BuildIndex {
+            names,
+            dirs: agg.dirs,
+            ambiguous: agg.ambiguous,
+        },
+    );
+    Ok((build, exe_path, index, report))
+}
+
+/// The exe + its build id (the dir index is keyed by build id).
+fn build_identity(
+    data_dir: &Path,
+    exe: Option<&Path>,
+) -> Result<(a9_mod::buildid::BuildId, PathBuf)> {
     let (exe_path, exe_bytes) = find_exe(data_dir, exe).ok_or_else(|| {
         anyhow::anyhow!(
             "cannot find an ATrain9*.exe next to {} — pass --exe (the dir index is per build)",
@@ -282,16 +298,18 @@ pub fn generate(
     })?;
     let build = a9_mod::buildid::from_exe_bytes(&exe_bytes)
         .ok_or_else(|| anyhow::anyhow!("{} has no VERSIONINFO", exe_path.display()))?;
-    let id = build.id.clone();
+    Ok((build, exe_path))
+}
 
-    // ---- the shipped index
+/// Parse the shipped i.dat into the rows to test.
+fn read_rows(data_dir: &Path) -> Result<Vec<Row>> {
     let idat_path = data_dir.join("i.dat");
     let idat_file = std::fs::read(&idat_path)
         .with_context(|| format!("reading {}", idat_path.display()))?;
     let decoded = fmt::pack::decode_pack(&idat_file, fmt::pack::Family::A)
         .context("decoding the shipped i.dat")?;
     let idat = fmt::idat::parse(&decoded).context("parsing the shipped i.dat")?;
-    let rows: Vec<Row> = idat
+    Ok(idat
         .entries
         .iter()
         .map(|e| Row {
@@ -301,31 +319,43 @@ pub fn generate(
             len: e.v1(),
             kind: Kind::of(&e.name),
         })
-        .collect();
+        .collect())
+}
 
-    // ---- packs (decoded one at a time; hits accumulated per row)
-    let mut pack_names: Vec<String> = Vec::new();
-    {
-        let rd = std::fs::read_dir(data_dir)
-            .with_context(|| format!("reading {}", data_dir.display()))?;
-        let mut files: Vec<PathBuf> = rd
-            .filter_map(|e| e.ok())
-            .map(|e| e.path())
-            .filter(|p| p.is_file())
-            .collect();
-        files.sort();
-        for p in files {
-            let name = p.file_name().unwrap().to_string_lossy().to_string();
-            if fmt::pack::classify(&name).is_none() || name.eq_ignore_ascii_case("i.dat") {
-                continue;
-            }
-            pack_names.push(fmt::pack::classify_key(&name));
+/// The pack keys to decode (every recognized pack in the data dir, i.dat
+/// excluded).
+fn pack_keys(data_dir: &Path) -> Result<Vec<String>> {
+    let rd = std::fs::read_dir(data_dir)
+        .with_context(|| format!("reading {}", data_dir.display()))?;
+    let mut files: Vec<PathBuf> = rd
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.is_file())
+        .collect();
+    files.sort();
+    let mut pack_names = Vec::new();
+    for p in files {
+        let name = p.file_name().unwrap().to_string_lossy().to_string();
+        if fmt::pack::classify(&name).is_none() || name.eq_ignore_ascii_case("i.dat") {
+            continue;
         }
+        pack_names.push(fmt::pack::classify_key(&name));
     }
+    Ok(pack_names)
+}
+
+/// Decode each pack (one at a time) and accumulate, per row, the packs whose
+/// buffer verifies it. Returns the per-row hits, the decoded count and the
+/// decode failures.
+fn match_rows(
+    data_dir: &Path,
+    rows: &[Row],
+    pack_names: &[String],
+) -> (Vec<BTreeSet<String>>, usize, Vec<String>) {
     let mut hits: Vec<BTreeSet<String>> = vec![BTreeSet::new(); rows.len()];
     let mut decoded_packs = 0usize;
     let mut decode_failed: Vec<String> = Vec::new();
-    for key in &pack_names {
+    for key in pack_names {
         let bin = data_dir.join(format!("{key}.bin"));
         let path = if bin.is_file() { bin } else { data_dir.join(key) };
         let Ok(file) = std::fs::read(&path) else {
@@ -347,8 +377,11 @@ pub fn generate(
             Err(e) => decode_failed.push(format!("{key} ({e})")),
         }
     }
+    (hits, decoded_packs, decode_failed)
+}
 
-    // ---- aggregate per dir
+/// Aggregate the per-row hits into one resolution per dir.
+fn aggregate(rows: &[Row], hits: &[BTreeSet<String>]) -> Aggregated {
     let mut dir_rows: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
     for (i, r) in rows.iter().enumerate() {
         dir_rows.entry(r.dir.as_str()).or_default().push(i);
@@ -369,51 +402,61 @@ pub fn generate(
             DirResolution::Unverified => unverified.push(dir.to_string()),
         }
     }
-    // ---- names: rescue a row from a dir-level ambiguity where the row itself
-    //      verified in exactly one pack ("where useful")
+    let is_train = |d: &str| d == "train" || d.starts_with("train\\");
+    let train_dirs = dir_rows.keys().filter(|d| is_train(d)).count();
+    let train_ambiguous = ambiguous.keys().filter(|d| is_train(d)).count();
+    Aggregated {
+        dir_count: dir_rows.len(),
+        dirs,
+        ambiguous,
+        unverified,
+        train_dirs,
+        train_ambiguous,
+    }
+}
+
+/// Names: rescue a row from a dir-level ambiguity where the row itself
+/// verified in exactly one pack ("where useful").
+fn rescue_names(
+    rows: &[Row],
+    hits: &[BTreeSet<String>],
+    ambiguous: &BTreeMap<String, Vec<String>>,
+) -> BTreeMap<String, String> {
     let mut names: BTreeMap<String, String> = BTreeMap::new();
     for (i, r) in rows.iter().enumerate() {
         if ambiguous.contains_key(r.dir.as_str()) && hits[i].len() == 1 {
             names.insert(r.name.clone(), hits[i].iter().next().unwrap().clone());
         }
     }
+    names
+}
 
+/// Roll the run's counts into a [`Report`].
+fn summarize(
+    rows: &[Row],
+    hits: &[BTreeSet<String>],
+    agg: &Aggregated,
+    decoded_packs: usize,
+    decode_failed: Vec<String>,
+) -> Report {
     let mut kinds: BTreeMap<String, usize> = BTreeMap::new();
-    for r in &rows {
+    for r in rows {
         *kinds.entry(r.kind.to_string()).or_default() += 1;
     }
     let matched = rows.iter().enumerate().filter(|(i, _)| !hits[*i].is_empty()).count();
-    let train_ambiguous = ambiguous
-        .keys()
-        .filter(|d| *d == "train" || d.starts_with("train\\"))
-        .count();
-    let report = Report {
+    Report {
         packs: decoded_packs,
         decode_failed,
         rows: rows.len(),
         matched,
         kinds,
-        dirs: dir_rows.len(),
-        resolved: dirs.len(),
-        unverified: unverified.len(),
-        ambiguous: ambiguous.clone(),
-        train_dirs: dir_rows
-            .keys()
-            .filter(|d| **d == "train" || d.starts_with("train\\"))
-            .count(),
-        train_ambiguous,
-    };
-
-    let mut index = a9_mod::dirindex::DirIndex::default();
-    index.build.insert(
-        id,
-        a9_mod::dirindex::BuildIndex {
-            names,
-            dirs,
-            ambiguous,
-        },
-    );
-    Ok((build, exe_path, index, report))
+        dirs: agg.dir_count,
+        resolved: agg.dirs.len(),
+        unverified: agg.unverified.len(),
+        ambiguous: agg.ambiguous.clone(),
+        train_dirs: agg.train_dirs,
+        train_ambiguous: agg.train_ambiguous,
+    }
 }
 
 pub fn run(data_dir: &Path, exe: Option<&Path>, out: Option<&Path>, check: bool) -> Result<()> {
@@ -421,6 +464,22 @@ pub fn run(data_dir: &Path, exe: Option<&Path>, out: Option<&Path>, check: bool)
     let id = build.id.clone();
 
     // ---- emit
+    let full = emit_table(&build, &exe_path, &index)?;
+
+    // ---- report (also with --check; the empirical ambiguity answer)
+    eprint!("{}", report_text(&report, &id, data_dir));
+
+    write_or_check(out, check, &full, data_dir, &report)?;
+    Ok(())
+}
+
+/// The full `dirindex.toml` text: the provenance header + the serialized index.
+fn emit_table(
+    build: &a9_mod::buildid::BuildId,
+    exe_path: &Path,
+    index: &a9_mod::dirindex::DirIndex,
+) -> Result<String> {
+    let id = build.id.clone();
     let mut t = String::new();
     t.push_str("# a9loader per-build dir index — the `host = \"auto\"` resolution table.\n");
     t.push_str("#\n");
@@ -440,10 +499,13 @@ pub fn run(data_dir: &Path, exe: Option<&Path>, out: Option<&Path>, check: bool)
         build.tuple(),
         civil_stamp()
     ));
-    let body = toml::to_string(&index).context("serializing the dir index")?;
-    let full = t + &body;
+    let body = toml::to_string(index).context("serializing the dir index")?;
+    Ok(t + &body)
+}
 
-    // ---- report (also with --check; the empirical ambiguity answer)
+/// The diagnostic report text (goes to stderr, so stdout stays clean TOML when
+/// no `--out` is given).
+fn report_text(report: &Report, id: &str, data_dir: &Path) -> String {
     let mut buf = String::new();
     buf.push_str(&format!("gen-dirindex: build {id} from {}\n", data_dir.display()));
     buf.push_str(&format!("   packs decoded: {}\n", report.packs));
@@ -481,10 +543,17 @@ pub fn run(data_dir: &Path, exe: Option<&Path>, out: Option<&Path>, check: bool)
         "   train family: {} dir(s), ambiguous {} (a new `train\\<name>` dir resolves via the `train` prefix)\n",
         report.train_dirs, report.train_ambiguous
     ));
-    // the report is diagnostic — stderr, so stdout stays clean TOML when no
-    // --out is given
-    eprint!("{buf}");
+    buf
+}
 
+/// Write `--out`, or verify it under `--check`, or print to stdout.
+fn write_or_check(
+    out: Option<&Path>,
+    check: bool,
+    full: &str,
+    data_dir: &Path,
+    report: &Report,
+) -> Result<()> {
     if let Some(path) = out {
         if check {
             let cur = std::fs::read_to_string(path).unwrap_or_default();
@@ -498,7 +567,7 @@ pub fn run(data_dir: &Path, exe: Option<&Path>, out: Option<&Path>, check: bool)
                     .collect::<Vec<_>>()
                     .join("\n")
             };
-            if norm(&cur) != norm(&full) {
+            if norm(&cur) != norm(full) {
                 bail!(
                     "{} differs from the generated table — regenerate it \
                      (a9ml gen-dirindex --data-dir {} --out {})",
@@ -509,7 +578,7 @@ pub fn run(data_dir: &Path, exe: Option<&Path>, out: Option<&Path>, check: bool)
             }
             println!("check ok: {} matches {}", path.display(), data_dir.display());
         } else {
-            std::fs::write(path, &full)
+            std::fs::write(path, full)
                 .with_context(|| format!("writing {}", path.display()))?;
             eprintln!("   wrote {} ({} dirs)", path.display(), report.resolved);
         }

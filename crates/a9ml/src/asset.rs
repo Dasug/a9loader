@@ -30,10 +30,16 @@
 //! `<host>.bin` pack(s) and merged `i.dat` a single mod's `[[asset]]` sections
 //! produce, using the same `a9_formats` primitives the loader runs — nothing is
 //! installed. (Multi-mod overlap resolution stays `a9ml list`'s job.)
+//!
+//! The merge is a sequence of named steps: [`load_manifest`] → [`resolve_ops`]
+//! → [`host_order`] → [`merge_host`] per host → [`write_merged_idat`].
 
 use a9_formats as fmt;
+use a9_mod::manifest::Manifest;
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
+
+use crate::util::ascii_like;
 
 /// A row's payload plus how it was found (for the report).
 #[derive(Debug)]
@@ -151,14 +157,6 @@ pub fn utf16_name_list_ok(b: &[u8]) -> bool {
     units
         .iter()
         .all(|&u| u == 0 || u == 9 || u == 10 || u == 13 || (0x20..=0x7e).contains(&u))
-}
-
-fn ascii_like(b: &[u8]) -> bool {
-    let good = b
-        .iter()
-        .filter(|&&c| (9..=13).contains(&c) || (32..=126).contains(&c))
-        .count();
-    good * 10 >= b.len().max(1) * 9
 }
 
 /// Decode every family-A pack in `data` and return those whose bytes at
@@ -325,49 +323,45 @@ pub struct MergedRow {
     pub override_vanilla: bool,
 }
 
-/// The offline `[[asset]]` merge: the exact primitive sequence the loader's
-/// `merge_family_a_host` + `merge_idat` run (decode → `plan_family_a` →
-/// `overlay_assets_decoded`; `idat::add_rows` → serialize → family-A encode).
-/// Nothing is installed — `out` receives the merged `<host>.bin` pack(s) and
-/// the merged `i.dat`, so an author can inspect exactly what the game would be
-/// served. Pure `a9_formats` math, byte-identical to the loader's.
-pub fn merge(game: &Path, mod_dir: &Path, out: &Path) -> Result<Vec<MergedRow>> {
-    let data = data_dir(game)?;
-    // ---- the manifest (with folder-form assets expanded like the loader)
+/// One resolved `[[asset]]` op: its host pack and the payload file to append.
+struct Op {
+    host: String,
+    name: String,
+    dir: String,
+    file: PathBuf,
+    override_vanilla: bool,
+}
+
+/// Read + validate the mod manifest (with folder-form assets expanded, the
+/// same way the loader does before it merges).
+fn load_manifest(mod_dir: &Path) -> Result<Manifest> {
     let manifest_path = mod_dir.join("mod.toml");
     let text = std::fs::read_to_string(&manifest_path)
         .with_context(|| format!("reading {}", manifest_path.display()))?;
-    let mut m: a9_mod::manifest::Manifest =
+    let mut m: Manifest =
         toml::from_str(&text).with_context(|| format!("parsing {}", manifest_path.display()))?;
     m.validate().map_err(|e| anyhow::anyhow!("{}: {e}", manifest_path.display()))?;
     a9_mod::scan::expand_asset_folders(&mut m, mod_dir)
         .map_err(|e| anyhow::anyhow!("{}: {e}", manifest_path.display()))?;
     m.validate().map_err(|e| anyhow::anyhow!("{}: {e}", manifest_path.display()))?;
-    if m.asset.is_empty() {
-        bail!("mod '{}' has no [[asset]] sections — nothing to merge", m.id);
-    }
+    Ok(m)
+}
 
-    let idat = shipped_idat(&data)?;
-    let build = find_exe(game)
-        .and_then(|p| std::fs::read(p).ok())
-        .and_then(|b| a9_mod::buildid::from_exe_bytes(&b));
-    let dirindex = a9_mod::dirindex::embedded_index().ok();
-
-    // ---- resolve every op's host (and refuse a vanilla collision early)
-    struct Op {
-        host: String,
-        name: String,
-        dir: String,
-        file: PathBuf,
-        override_vanilla: bool,
-    }
+/// Resolve every op's host (and refuse a vanilla collision early).
+fn resolve_ops(
+    m: &Manifest,
+    mod_dir: &Path,
+    idat: &fmt::idat::Idat,
+    build: Option<&a9_mod::buildid::BuildId>,
+    dirindex: Option<&a9_mod::dirindex::DirIndex>,
+) -> Result<Vec<Op>> {
     let mut ops: Vec<Op> = Vec::new();
     for a in &m.asset {
         let host = if a.host.eq_ignore_ascii_case(a9_mod::manifest::HOST_AUTO) {
-            let build = build.as_ref().with_context(|| {
+            let build = build.with_context(|| {
                 "host = \"auto\" needs the game exe's build id (no ATrain9*.exe found)".to_string()
             })?;
-            let idx = dirindex.as_ref().with_context(|| "the embedded dir index failed to parse")?;
+            let idx = dirindex.with_context(|| "the embedded dir index failed to parse")?;
             a9_mod::dirindex::resolve_auto(idx, &build.id, &a.name, &a.dir)
                 .map_err(|e| anyhow::anyhow!("asset {:?}: host auto refused: {e}", a.name))?
         } else {
@@ -394,61 +388,100 @@ pub fn merge(game: &Path, mod_dir: &Path, out: &Path) -> Result<Vec<MergedRow>> 
             override_vanilla: a.override_vanilla,
         });
     }
+    Ok(ops)
+}
 
-    // ---- per host, in first-appearance order (the loader's order)
+/// The hosts to merge, in first-appearance order (the loader's order).
+fn host_order(ops: &[Op]) -> Vec<String> {
     let mut hosts: Vec<String> = Vec::new();
-    for o in &ops {
+    for o in ops {
         if !hosts.iter().any(|h| h == &o.host) {
             hosts.push(o.host.clone());
         }
     }
+    hosts
+}
+
+/// The offline `[[asset]]` merge: the exact primitive sequence the loader's
+/// `merge_family_a_host` + `merge_idat` run (decode → `plan_family_a` →
+/// `overlay_assets_decoded`; `idat::add_rows` → serialize → family-A encode).
+/// Nothing is installed — `out` receives the merged `<host>.bin` pack(s) and
+/// the merged `i.dat`, so an author can inspect exactly what the game would be
+/// served. Pure `a9_formats` math, byte-identical to the loader's.
+pub fn merge(game: &Path, mod_dir: &Path, out: &Path) -> Result<Vec<MergedRow>> {
+    let data = data_dir(game)?;
+    let m = load_manifest(mod_dir)?;
+    if m.asset.is_empty() {
+        bail!("mod '{}' has no [[asset]] sections — nothing to merge", m.id);
+    }
+
+    let idat = shipped_idat(&data)?;
+    let build = find_exe(game)
+        .and_then(|p| std::fs::read(p).ok())
+        .and_then(|b| a9_mod::buildid::from_exe_bytes(&b));
+    let dirindex = a9_mod::dirindex::embedded_index().ok();
+
+    let ops = resolve_ops(&m, mod_dir, &idat, build.as_ref(), dirindex.as_ref())?;
+    let hosts = host_order(&ops);
     std::fs::create_dir_all(out).with_context(|| format!("creating {}", out.display()))?;
     let mut rows: Vec<MergedRow> = Vec::new();
     for host in &hosts {
-        let path = data.join(format!("{host}.bin"));
-        let file = std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
-        let decoded = fmt::pack::decode_pack(&file, fmt::pack::Family::A)
-            .with_context(|| format!("decoding {}", path.display()))?;
-        // read the payloads + build the ops for THIS host, in order
-        let mut aops: Vec<fmt::overlay::AssetOp> = Vec::new();
-        let mut metas: Vec<&Op> = Vec::new();
-        for o in ops.iter().filter(|o| &o.host == host) {
-            let payload = std::fs::read(&o.file)
-                .with_context(|| format!("reading {}", o.file.display()))?;
-            aops.push(fmt::overlay::AssetOp {
-                name: o.name.clone(),
-                dir: o.dir.clone(),
-                payload,
-            });
-            metas.push(o);
-        }
-        let plan = fmt::overlay::plan_family_a(decoded.len(), &aops);
-        let (merged, report) = fmt::overlay::overlay_assets_decoded(&decoded, &aops, BUDGET)
-            .map_err(|e| anyhow::anyhow!("host {host}: merge: {e}"))?;
-        let out_pack = out.join(format!("{host}.bin"));
-        std::fs::write(&out_pack, &merged).with_context(|| format!("writing {}", out_pack.display()))?;
-        for (o, (off, len)) in metas.iter().zip(plan) {
-            rows.push(MergedRow {
-                name: o.name.clone(),
-                dir: o.dir.clone(),
-                host: host.clone(),
-                off: off as u32,
-                len: len as u32,
-                override_vanilla: o.override_vanilla,
-            });
-        }
-        println!(
-            "{host}: {} op(s), vanilla decoded {} B -> merged decoded {} B ({:.1} MB), \
-             written {}",
-            aops.len(),
-            decoded.len(),
-            report.decoded,
-            report.decoded as f64 / (1024.0 * 1024.0),
-            out_pack.display()
-        );
+        rows.extend(merge_host(&data, out, host, &ops)?);
     }
+    write_merged_idat(out, idat, &rows)?;
+    Ok(rows)
+}
 
-    // ---- the merged index (same rows, same order)
+/// Merge one host pack: append this host's payloads to its decoded stream,
+/// write the merged `<host>.bin`, and return the rows it contributed.
+fn merge_host(data: &Path, out: &Path, host: &String, ops: &[Op]) -> Result<Vec<MergedRow>> {
+    let path = data.join(format!("{host}.bin"));
+    let file = std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
+    let decoded = fmt::pack::decode_pack(&file, fmt::pack::Family::A)
+        .with_context(|| format!("decoding {}", path.display()))?;
+    // read the payloads + build the ops for THIS host, in order
+    let mut aops: Vec<fmt::overlay::AssetOp> = Vec::new();
+    let mut metas: Vec<&Op> = Vec::new();
+    for o in ops.iter().filter(|o| &o.host == host) {
+        let payload = std::fs::read(&o.file)
+            .with_context(|| format!("reading {}", o.file.display()))?;
+        aops.push(fmt::overlay::AssetOp {
+            name: o.name.clone(),
+            dir: o.dir.clone(),
+            payload,
+        });
+        metas.push(o);
+    }
+    let plan = fmt::overlay::plan_family_a(decoded.len(), &aops);
+    let (merged, report) = fmt::overlay::overlay_assets_decoded(&decoded, &aops, BUDGET)
+        .map_err(|e| anyhow::anyhow!("host {host}: merge: {e}"))?;
+    let out_pack = out.join(format!("{host}.bin"));
+    std::fs::write(&out_pack, &merged).with_context(|| format!("writing {}", out_pack.display()))?;
+    let mut rows = Vec::new();
+    for (o, (off, len)) in metas.iter().zip(plan) {
+        rows.push(MergedRow {
+            name: o.name.clone(),
+            dir: o.dir.clone(),
+            host: host.clone(),
+            off: off as u32,
+            len: len as u32,
+            override_vanilla: o.override_vanilla,
+        });
+    }
+    println!(
+        "{host}: {} op(s), vanilla decoded {} B -> merged decoded {} B ({:.1} MB), \
+         written {}",
+        aops.len(),
+        decoded.len(),
+        report.decoded,
+        report.decoded as f64 / (1024.0 * 1024.0),
+        out_pack.display()
+    );
+    Ok(rows)
+}
+
+/// Write the merged `i.dat` (same rows, same order) and report it.
+fn write_merged_idat(out: &Path, mut idat: fmt::idat::Idat, rows: &[MergedRow]) -> Result<()> {
     let replaced = rows.iter().filter(|r| idat.row(&r.name).is_some()).count();
     let new_rows: Vec<fmt::idat::NewRow> = rows
         .iter()
@@ -460,7 +493,6 @@ pub fn merge(game: &Path, mod_dir: &Path, out: &Path) -> Result<Vec<MergedRow>> 
             off: r.off,
         })
         .collect();
-    let mut idat = idat;
     idat.add_rows(&new_rows).map_err(|e| anyhow::anyhow!("i.dat rows: {e}"))?;
     let out_idat = out.join("i.dat");
     std::fs::write(&out_idat, fmt::pack::encode_pack_a(&fmt::idat::serialize(&idat)))
@@ -472,7 +504,7 @@ pub fn merge(game: &Path, mod_dir: &Path, out: &Path) -> Result<Vec<MergedRow>> 
         replaced,
         out_idat.display()
     );
-    Ok(rows)
+    Ok(())
 }
 
 /// CLI entry for `merge-assets`.

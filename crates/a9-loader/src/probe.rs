@@ -1,4 +1,10 @@
-//! The M4 runtime fetch probe — `probe_fetch = true` diagnostics.
+//! DIAGNOSTIC ONLY — OFF BY DEFAULT, not part of normal loader operation.
+//!
+//! Nothing in this module runs unless `probe_fetch = true` is set in
+//! `a9loader.toml`; a default boot never installs these hooks. It exists to
+//! answer one-off reverse-engineering questions about the runtime fetch path
+//! (see notes/24): it serves nothing, changes no behaviour, and every hook is
+//! trampoline-only, forwarding verbatim to the original.
 //!
 //! The question (notes/24 round 3): material fetch classes pass their ctx
 //! opaquely through vtable dispatch, so which pack object serves which

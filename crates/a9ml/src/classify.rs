@@ -40,9 +40,14 @@
 //!
 //! **Every** name pattern lives in this module, in the `const` tables directly
 //! below, so extending the model is a one-place edit.
+//!
+//! The classifier is split by rule ([`classify_entry`] calls one predicate per
+//! rule, in order) and by manifest section ([`classify_manifest`] collects one
+//! helper's rows per section). The `const` tables and the boot-window model
+//! are the "what consumes what" data; [`run`] is only the CLI rendering.
 
 use a9_formats::pack::{self, Container, Family};
-use a9_mod::manifest::Manifest;
+use a9_mod::manifest::{AssetSection, Manifest};
 use anyhow::{bail, Context, Result};
 use std::fs;
 use std::path::Path;
@@ -333,10 +338,37 @@ pub fn classify_entry(pack: Option<&str>, name: &str) -> Verdict {
     let key = pack.map(pack::classify_key);
     let famb = key.as_deref().map(is_famb_pack).unwrap_or(false);
 
-    // 1. livery/kit textures in a family-B image pack: served during the
-    //    pack's boot window (me/mt), inserted into the CTexture cache then.
-    if famb && TEX_SUFFIX_FAMILIES.iter().any(|p| p.hit(&n)) {
-        return Verdict {
+    if let Some(v) = rule_famb_texture(pack, &n, famb) {
+        return v;
+    }
+    if let Some(v) = rule_preview(&n) {
+        return v;
+    }
+    if let Some(v) = rule_tp_names(&n) {
+        return v;
+    }
+    if let Some(v) = rule_shaders(key.as_deref(), &n) {
+        return v;
+    }
+    if let Some(v) = rule_models(pack, &n, famb) {
+        return v;
+    }
+    if let Some(v) = rule_csv(key.as_deref(), &n) {
+        return v;
+    }
+    // 7. unrecognized — be conservative
+    Verdict {
+        class: Class::Unknown,
+        reason: "consumption point not in the known set — treat conservatively \
+                     (window residency)".into(),
+    }
+}
+
+/// Rule 1: livery/kit textures in a family-B image pack — served during the
+/// pack's boot window (me/mt), inserted into the CTexture cache then.
+fn rule_famb_texture(pack: Option<&str>, n: &str, famb: bool) -> Option<Verdict> {
+    if famb && TEX_SUFFIX_FAMILIES.iter().any(|p| p.hit(n)) {
+        return Some(Verdict {
             class: Class::Early(Early::Famb),
             reason: format!(
                 "family-B image pack {} entry: inserted into the CTexture cache during \
@@ -344,86 +376,90 @@ pub fn classify_entry(pack: Option<&str>, name: &str) -> Verdict {
                  bind during boot) — serve with pack_serving=inject or merge",
                 pack.unwrap_or("?")
             ),
-        };
+        });
     }
+    None
+}
 
-    // 2. previews — created in-window from pack memory, bypassing the cache
-    if PREVIEW_MARKERS.iter().any(|p| p.hit(&n)) {
-        return Verdict {
-            class: Class::Early(Early::Tp),
-            reason: "preview bypass — created in the tp window straight from pack memory \
-                     (preview_texture_pack_loader 0x1403b0ef0), NOT via the CTexture cache: \
-                     a late cache overwrite can not win; needs tp injection"
-                .into(),
-        };
-    }
+/// Rule 2: previews — created in-window from pack memory, bypassing the cache.
+fn rule_preview(n: &str) -> Option<Verdict> {
+    PREVIEW_MARKERS.iter().any(|p| p.hit(n)).then(|| Verdict {
+        class: Class::Early(Early::Tp),
+        reason: "preview bypass — created in the tp window straight from pack memory \
+                 (preview_texture_pack_loader 0x1403b0ef0), NOT via the CTexture cache: \
+                 a late cache overwrite can not win; needs tp injection"
+            .into(),
+    })
+}
 
-    // 3. tp system/UI/terrain/sky texture + .dat names
-    if TP_NAMES.iter().any(|p| p.hit(&n)) {
-        return Verdict {
-            class: Class::Early(Early::Tp),
-            reason: "tp window (pack_loader_tp 0x1403f0d20) reads it via pack_master_map_query \
-                     + d3dx from pack memory — must be resident before tp"
-                .into(),
-        };
-    }
+/// Rule 3: `tp` system/UI/terrain/sky texture + `.dat` names.
+fn rule_tp_names(n: &str) -> Option<Verdict> {
+    TP_NAMES.iter().any(|p| p.hit(n)).then(|| Verdict {
+        class: Class::Early(Early::Tp),
+        reason: "tp window (pack_loader_tp 0x1403f0d20) reads it via pack_master_map_query \
+                 + d3dx from pack memory — must be resident before tp"
+            .into(),
+    })
+}
 
-    // 4. shaders: csdp compiles pre-sequence (stage 1); sdp in its own window
-    if key.as_deref() == Some("csdp") {
-        return Verdict {
+/// Rule 4: shaders — `csdp` compiles pre-sequence (stage 1); `sdp` in its own
+/// window.
+fn rule_shaders(key: Option<&str>, n: &str) -> Option<Verdict> {
+    if key == Some("csdp") {
+        return Some(Verdict {
             class: Class::Pre,
             reason: "csdp shader bytecode: compiled to COM shaders at load \
                      (boot_pack_system_driver, stage 1 — before the asset sequence)"
                 .into(),
-        };
+        });
     }
-    if key.as_deref() == Some("sdp") || SHADER_EXTS.iter().any(|p| p.hit(&n)) {
-        return Verdict {
+    if key == Some("sdp") || SHADER_EXTS.iter().any(|p| p.hit(n)) {
+        return Some(Verdict {
             class: Class::Early(Early::Sdp),
             reason: "shader bytecode: compiled to COM shaders in the sdp window \
                      (pack_loader_sdp 0x1403f0850)"
                 .into(),
-        };
+        });
     }
+    None
+}
 
-    // 5. models / meshes / prop-dir data (parsed + built in-window)
+/// Rule 5: models / meshes / prop-dir data (parsed + built in-window).
+fn rule_models(pack: Option<&str>, n: &str, famb: bool) -> Option<Verdict> {
     let in_model_dir = MODEL_DIRS.iter().any(|d| n.starts_with(&format!("{d}/")));
-    if MODEL_EXTS.iter().any(|p| p.hit(&n)) || in_model_dir {
-        // a .dir inside a family-B image pack is that pack's index data, not a
-        // texture and not an mcp prop set
-        if famb && n.ends_with(".dir") {
-            return Verdict {
-                class: Class::Unknown,
-                reason: format!(
-                    "pack {} index data (.dir), not a texture — not late-viable",
-                    pack.unwrap_or("?")
-                ),
-            };
-        }
-        return Verdict {
-            class: Class::Early(Early::Models),
-            reason: "model/mesh or prop-dir data: parsed + built in-window \
-                     (mcp 0x1403ee710 / ep 0x1403ef9f0 / cp 0x1403ef100)"
-                .into(),
-        };
+    if !(MODEL_EXTS.iter().any(|p| p.hit(n)) || in_model_dir) {
+        return None;
     }
+    // a .dir inside a family-B image pack is that pack's index data, not a
+    // texture and not an mcp prop set
+    if famb && n.ends_with(".dir") {
+        return Some(Verdict {
+            class: Class::Unknown,
+            reason: format!(
+                "pack {} index data (.dir), not a texture — not late-viable",
+                pack.unwrap_or("?")
+            ),
+        });
+    }
+    Some(Verdict {
+        class: Class::Early(Early::Models),
+        reason: "model/mesh or prop-dir data: parsed + built in-window \
+                 (mcp 0x1403ee710 / ep 0x1403ef9f0 / cp 0x1403ef100)"
+            .into(),
+    })
+}
 
-    // 6. CSV tables (csvp reservoir filled in stage 1, before tp)
-    if key.as_deref() == Some("csvp") || n.ends_with(".csv") {
-        return Verdict {
+/// Rule 6: CSV tables (csvp reservoir filled in stage 1, before tp).
+fn rule_csv(key: Option<&str>, n: &str) -> Option<Verdict> {
+    if key == Some("csvp") || n.ends_with(".csv") {
+        return Some(Verdict {
             class: Class::Pre,
             reason: "csv table: resident in the csvp reservoir (pack_loader_csvp 0x1403ef5b0, \
                      boot_pack_system_driver stage 1) — never late; merge/serve before the csvp load"
                 .into(),
-        };
+        });
     }
-
-    // 7. unrecognized — be conservative
-    Verdict {
-        class: Class::Unknown,
-        reason: "consumption point not in the known set — treat conservatively \
-                     (window residency)".into(),
-    }
+    None
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -436,6 +472,17 @@ pub struct Verdict {
 /// author sees what will NOT win before what will).
 pub fn classify_manifest(m: &Manifest) -> Vec<Row> {
     let mut rows: Vec<Row> = Vec::new();
+    rows.extend(pack_rows(m));
+    rows.extend(csv_rows(m));
+    rows.extend(asset_rows(m));
+    rows.extend(file_rows(m));
+    rows.sort_by_key(|r| r.risk());
+    rows
+}
+
+/// `[[pack.entry]]` rows.
+fn pack_rows(m: &Manifest) -> Vec<Row> {
+    let mut rows = Vec::new();
     for p in &m.pack {
         for e in &p.entry {
             let v = classify_entry(Some(&p.pack), &e.name);
@@ -448,73 +495,89 @@ pub fn classify_manifest(m: &Manifest) -> Vec<Row> {
             });
         }
     }
-    for c in &m.csv {
-        let v = classify_entry(Some("csvp"), &c.name);
-        rows.push(Row {
-            mod_id: m.id.clone(),
-            mechanism: "csvp".into(),
-            target: c.name.clone(),
-            class: v.class,
-            reason: v.reason,
-        });
-    }
-    for a in &m.asset {
-        // the windows the family-A host packs are loaded in (boot order:
-        // tp -> ... -> mcp/ep/cp -> vp); a merge-hosted payload is resident
-        // only while that pack is the current one.
-        // `host = "auto"` is resolved at load time from the per-build dir
-        // index — the window depends on the resolved pack, so classify labels
-        // it as the family-A bucket and says so.
-        if a.host.eq_ignore_ascii_case(a9_mod::manifest::HOST_AUTO) {
-            rows.push(Row {
-                mod_id: m.id.clone(),
-                mechanism: "asset:auto".into(),
-                target: a.name.clone(),
-                class: Class::Early(Early::Models),
-                reason: "[[asset]] host = \"auto\": the host pack is resolved at load time \
-                         from the embedded per-build dir index (dir -> pack); the residency \
-                         window is that of the resolved family-A pack — check `a9ml list` for \
-                         the concrete host"
-                    .into(),
-            });
-            continue;
-        }
-        let (early, hostname) = match pack::classify_key(&a.host).as_str() {
-            "tp" => (Early::Tp, "tp"),
-            "vp" => (Early::Vp, "vp"),
-            _ => (Early::Models, "mcp/ep/cp"),
-        };
-        rows.push(Row {
-            mod_id: m.id.clone(),
-            mechanism: format!("asset:{}", a.host),
-            target: a.name.clone(),
-            class: Class::Early(early),
-            reason: format!(
-                "[[asset]] merge-served: appended to the {hostname} pack's decoded stream \
-                 + an i.dat row (off from the shared layout) — window-time only (the payload \
-                 is resident only while {hostname} is the current pack){}",
-                if a.override_vanilla {
-                    "; replaces a shipped i.dat row (override_vanilla)"
-                } else {
-                    ""
-                }
-            ),
-        });
-    }
-    for f in &m.file {
-        // the destination's basename, classified without pack context
-        let base = f.dest.rsplit(['/', '\\']).next().unwrap_or(&f.dest);
-        let v = classify_entry(None, base);
-        rows.push(Row {
-            mod_id: m.id.clone(),
-            mechanism: "file".into(),
-            target: f.dest.clone(),
-            class: v.class,
-            reason: format!("[[file]] new loose copy — {}", v.reason),
-        });
-    }
-    rows.sort_by_key(|r| r.risk());
     rows
+}
+
+/// `[[csv]]` rows (always classified in the csvp context).
+fn csv_rows(m: &Manifest) -> Vec<Row> {
+    m.csv
+        .iter()
+        .map(|c| {
+            let v = classify_entry(Some("csvp"), &c.name);
+            Row {
+                mod_id: m.id.clone(),
+                mechanism: "csvp".into(),
+                target: c.name.clone(),
+                class: v.class,
+                reason: v.reason,
+            }
+        })
+        .collect()
+}
+
+/// `[[asset]]` rows, window-time by their host pack.
+fn asset_rows(m: &Manifest) -> Vec<Row> {
+    m.asset.iter().map(|a| asset_row(m, a)).collect()
+}
+
+/// One `[[asset]]` row. The family-A host packs load in boot order
+/// (tp → ... → mcp/ep/cp → vp); a merge-hosted payload is resident only while
+/// that pack is the current one. `host = "auto"` is resolved at load time from
+/// the per-build dir index — the window depends on the resolved pack, so
+/// classify labels it as the family-A bucket and says so.
+fn asset_row(m: &Manifest, a: &AssetSection) -> Row {
+    if a.host.eq_ignore_ascii_case(a9_mod::manifest::HOST_AUTO) {
+        return Row {
+            mod_id: m.id.clone(),
+            mechanism: "asset:auto".into(),
+            target: a.name.clone(),
+            class: Class::Early(Early::Models),
+            reason: "[[asset]] host = \"auto\": the host pack is resolved at load time \
+                     from the embedded per-build dir index (dir -> pack); the residency \
+                     window is that of the resolved family-A pack — check `a9ml list` for \
+                     the concrete host"
+                .into(),
+        };
+    }
+    let (early, hostname) = match pack::classify_key(&a.host).as_str() {
+        "tp" => (Early::Tp, "tp"),
+        "vp" => (Early::Vp, "vp"),
+        _ => (Early::Models, "mcp/ep/cp"),
+    };
+    Row {
+        mod_id: m.id.clone(),
+        mechanism: format!("asset:{}", a.host),
+        target: a.name.clone(),
+        class: Class::Early(early),
+        reason: format!(
+            "[[asset]] merge-served: appended to the {hostname} pack's decoded stream \
+             + an i.dat row (off from the shared layout) — window-time only (the payload \
+             is resident only while {hostname} is the current pack){}",
+            if a.override_vanilla {
+                "; replaces a shipped i.dat row (override_vanilla)"
+            } else {
+                ""
+            }
+        ),
+    }
+}
+
+/// `[[file]]` rows — classified by the destination's basename, no pack context.
+fn file_rows(m: &Manifest) -> Vec<Row> {
+    m.file
+        .iter()
+        .map(|f| {
+            let base = f.dest.rsplit(['/', '\\']).next().unwrap_or(&f.dest);
+            let v = classify_entry(None, base);
+            Row {
+                mod_id: m.id.clone(),
+                mechanism: "file".into(),
+                target: f.dest.clone(),
+                class: v.class,
+                reason: format!("[[file]] new loose copy — {}", v.reason),
+            }
+        })
+        .collect()
 }
 
 // ------------------------------------------------------------ CLI command
@@ -537,56 +600,67 @@ pub fn run(path: Option<&Path>, entry: Option<&str>, pack: Option<&str>) -> Resu
         bail!("no mods found at {}", path.display());
     }
 
+    print_header();
+
+    let mut overall = Summary::default();
+    for (label, m) in &mods {
+        print_mod(m, label, &mut overall);
+    }
+    println!("== overall: {} mod(s), {}", mods.len(), overall.compact());
+    Ok(())
+}
+
+/// The command's banner: the model provenance and how to read the classes.
+fn print_header() {
     println!("== a9ml classify — where the game consumes each data effect");
     println!("   model: notes/24 round 7 — stage 1 (i.dat/csdp/csvp) then");
     println!("          tp → sdp → me0-3 → mtentr0/mtcutp0 → mcp → ep → cp → vp");
     println!("   early:* = consumed inside that boot window — serve with pack_serving=inject or merge");
     println!("             pre-shader/pre-csv = consumed in stage 1 · unknown = be conservative");
     println!();
+}
 
-    let mut overall = Summary::default();
-    for (label, m) in &mods {
-        let rows = classify_manifest(m);
-        let s = Summary::of(&rows);
-        println!("== mod '{}' ({label})", m.id);
-        for r in &rows {
-            println!("   {}", r.line());
-        }
-        println!("   summary: {}", s.compact());
-        if rows.is_empty() {
-            if m.loose_asset.is_empty() {
-                println!("   verdict: no [[pack]]/[[csv]]/[[asset]]/[[file]] data effects");
-            } else {
-                println!(
-                    "   verdict: no window-model data effects; {} [[loose_asset]] path \
-                     redirect(s) served live at the game's own open (no residency window)",
-                    m.loose_asset.len()
-                );
-            }
-        } else if s.all_known() {
-            println!(
-                "   verdict: all {} target(s) have known consumption points — see the classes",
-                rows.len()
-            );
+/// One mod's block: its rows, its summary, its verdict. Accumulates into
+/// `overall`.
+fn print_mod(m: &Manifest, label: &str, overall: &mut Summary) {
+    let rows = classify_manifest(m);
+    let s = Summary::of(&rows);
+    println!("== mod '{}' ({label})", m.id);
+    for r in &rows {
+        println!("   {}", r.line());
+    }
+    println!("   summary: {}", s.compact());
+    if rows.is_empty() {
+        if m.loose_asset.is_empty() {
+            println!("   verdict: no [[pack]]/[[csv]]/[[asset]]/[[file]] data effects");
         } else {
             println!(
-                "   verdict: {} target(s) unknown — treat conservatively (window residency)",
-                s.unknown
+                "   verdict: no window-model data effects; {} [[loose_asset]] path \
+                 redirect(s) served live at the game's own open (no residency window)",
+                m.loose_asset.len()
             );
         }
-        println!();
-        // accumulate
-        overall.early += s.early;
-        overall.pre += s.pre;
-        overall.unknown += s.unknown;
-        for w in s.windows {
-            if !overall.windows.contains(&w) {
-                overall.windows.push(w);
-            }
+    } else if s.all_known() {
+        println!(
+            "   verdict: all {} target(s) have known consumption points — see the classes",
+            rows.len()
+        );
+    } else {
+        println!(
+            "   verdict: {} target(s) unknown — treat conservatively (window residency)",
+            s.unknown
+        );
+    }
+    println!();
+    // accumulate
+    overall.early += s.early;
+    overall.pre += s.pre;
+    overall.unknown += s.unknown;
+    for w in s.windows {
+        if !overall.windows.contains(&w) {
+            overall.windows.push(w);
         }
     }
-    println!("== overall: {} mod(s), {}", mods.len(), overall.compact());
-    Ok(())
 }
 
 /// Accept either a single mod dir (holding `mod.toml`) or a mods dir.

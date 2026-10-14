@@ -18,6 +18,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 REPO="$(pwd)"
+source "$(dirname "$0")/lib.sh"
 
 RUN="$REPO/harness/run/m5"
 PREFIX="$REPO/harness/run/.prefix"
@@ -30,14 +31,6 @@ cargo build --release --target x86_64-pc-windows-gnu
 cargo build --release --bin a9ml
 DLL="$REPO/target/x86_64-pc-windows-gnu/release/version.dll"
 A9ML="$REPO/target/release/a9ml"
-
-py_mk() { # py_mk <file> <size> <seed> — a deterministic ramp payload
-    python3 - "$1" "$2" "$3" <<'EOF'
-import sys
-path, size, seed = sys.argv[1], int(sys.argv[2], 0), int(sys.argv[3], 0)
-open(path, "wb").write(bytes((seed + i) & 0xff for i in range(size)))
-EOF
-}
 
 echo "== building the fixtures (a 64 B family-A vp + a one-row i.dat)"
 mkdir -p "$RUN/data"
@@ -52,62 +45,11 @@ printf 'FORM_DUMMY\x00' > "$RUN/form_list.bin"   # the host only needs a file he
 "$A9ML" mkpack --container a    --out "$RUN/data/vp.bin" "$RUN/vbase.bin"
 "$A9ML" mkpack --container idat --out "$RUN/data/i.dat" '_t_van_a.x=train\van:37:0'
 
-FAILED=0
-scen_dir=""
-
-new_scen() {
-    scen_dir="$RUN/$1"
-    rm -rf "$scen_dir"
-    mkdir -p "$scen_dir/data"
-    cp "$RUN/host.exe" "$scen_dir/"
-    cp "$DLL" "$scen_dir/version.dll"
-    cp "$RUN/form_list.bin" "$scen_dir/"
+# the S1–S6 scenarios are the MERGE regression: pin both mechanisms so the
+# loader's default (tailgate) does not change what they assert
+DEFAULT_CFG='pack_serving = "merge"\nasset_serving = "merge"\n'
+scen_fixtures() {
     cp "$RUN/data/vp.bin" "$RUN/data/i.dat" "$scen_dir/data/"
-    # the S1–S6 scenarios are the MERGE regression: pin both mechanisms so the
-    # loader's default (tailgate) does not change what they assert
-    printf 'pack_serving = "merge"\nasset_serving = "merge"\n' > "$scen_dir/a9loader.toml"
-}
-
-run_host() {
-    ( cd "$scen_dir" && WINEPREFIX="$PREFIX" WINEDEBUG=-all timeout 60 wine host.exe form_list.bin "$1" ) > "$scen_dir/out.txt" 2>&1 || true
-}
-
-check() { # check <label> <needle> <file>
-    if grep -q "$2" "$3"; then
-        echo "   [ ok ] $1"
-    else
-        echo "   [FAIL] $1 (missing: $2 in $3)"
-        FAILED=$((FAILED + 1))
-    fi
-}
-
-checkf() { # checkf <label> <cmd...>
-    local label="$1"; shift
-    if "$@" >/dev/null 2>&1; then
-        echo "   [ ok ] $label"
-    else
-        echo "   [FAIL] $label"
-        FAILED=$((FAILED + 1))
-    fi
-}
-
-checkq() { # checkq <label> <needle> <file> — assert the needle is ABSENT
-    if grep -q "$2" "$3"; then
-        echo "   [FAIL] $1 (unexpected: $2 in $3)"
-        FAILED=$((FAILED + 1))
-    else
-        echo "   [ ok ] $1"
-    fi
-}
-
-mod() { # mod <dir> <manifest-body...>
-    mkdir -p "$scen_dir/mods/$1"
-    printf '%s\n' "${@:2}" > "$scen_dir/mods/$1/mod.toml"
-}
-
-pay() { # pay <mod> <relpath> <runfile>
-    mkdir -p "$(dirname "$scen_dir/mods/$1/$2")"
-    cp "$RUN/$3" "$scen_dir/mods/$1/$2"
 }
 
 echo "== S1: [[asset]] appends to vp + writes the i.dat row (default inject -> still merge)"
@@ -834,10 +776,4 @@ checkq "no second cave install refusal" "relay cave bytes differ" "$LOG"
 check "vp splice installed"  "asset tailgate: vp splice installed rva=0x3f1434 expect=verified" "$LOG"
 check "the append still happened" "asset tailgate: vp appended 1 payload (96 B) at +64" "$LOG"
 
-echo
-if [ "$FAILED" = 0 ]; then
-    echo "M5 HARNESS: ALL SCENARIOS GREEN"
-else
-    echo "M5 HARNESS: $FAILED FAILURE(S)"
-fi
-exit "$FAILED"
+harness_done "M5 HARNESS"

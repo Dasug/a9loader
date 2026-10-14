@@ -17,6 +17,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 REPO="$(pwd)"
+source "$(dirname "$0")/lib.sh"
 
 RUN="$REPO/harness/run/m4inj"
 PREFIX="$REPO/harness/run/.prefix"
@@ -59,23 +60,11 @@ mk_bin n4.bin 'N4N4N4'
     "a.dds=64:64:$RUN/a.bin" "b.dds=128:128:$RUN/b.bin"
 ls -la "$RUN/n4.bin" "$RUN/data/mtfake.bin" >/dev/null
 
-FAILED=0
-scen_dir=""
-
-new_scen() { # new_scen <name>
-    scen_dir="$RUN/$1"
-    rm -rf "$scen_dir"
-    mkdir -p "$scen_dir/data"
-    cp "$RUN/host.exe" "$scen_dir/"
-    cp "$DLL" "$scen_dir/version.dll"
-    cp "$RUN/form_list.bin" "$scen_dir/"
+scen_fixtures() {
     cp "$RUN/data/mtfake.bin" "$scen_dir/data/"
 }
 
-run_host() {
-    ( cd "$scen_dir" && WINEPREFIX="$PREFIX" WINEDEBUG=-all timeout 60 wine host.exe form_list.bin "$1" ) > "$scen_dir/out.txt" 2>&1 || true
-}
-
+# m4inj's needles carry regex metacharacters — match them as FIXED strings
 check() { # check <label> <needle> <file>
     if grep -qF -- "$2" "$3"; then
         echo "   [ ok ] $1"
@@ -83,26 +72,6 @@ check() { # check <label> <needle> <file>
         echo "   [FAIL] $1 (missing: $2 in $3)"
         FAILED=$((FAILED + 1))
     fi
-}
-
-checkf() { # checkf <label> <cmd...>
-    local label="$1"; shift
-    if "$@" >/dev/null 2>&1; then
-        echo "   [ ok ] $label"
-    else
-        echo "   [FAIL] $label"
-        FAILED=$((FAILED + 1))
-    fi
-}
-
-mod() { # mod <dir> <manifest-body...>
-    mkdir -p "$scen_dir/mods/$1"
-    printf '%s\n' "${@:2}" > "$scen_dir/mods/$1/mod.toml"
-}
-
-pay() { # pay <mod> <relpath> <file>
-    mkdir -p "$(dirname "$scen_dir/mods/$1/$2")"
-    cp "$RUN/$3" "$scen_dir/mods/$1/$2"
 }
 
 paymissing() { # a missing payload: manifest only, no file copied
@@ -234,10 +203,4 @@ else
     FAILED=$((FAILED + 1))
 fi
 
-echo
-if [ "$FAILED" = 0 ]; then
-    echo "M4 INJECT HARNESS: ALL SCENARIOS GREEN"
-else
-    echo "M4 INJECT HARNESS: $FAILED FAILURE(S)"
-fi
-exit "$FAILED"
+harness_done "M4 INJECT HARNESS"
