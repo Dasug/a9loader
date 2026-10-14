@@ -136,9 +136,13 @@ fn cache_fingerprint(inner: &Inner, key: &str) -> u64 {
             fingerprint.extend_from_slice(op.mod_id.as_bytes());
             fingerprint.extend_from_slice(op.mod_version.as_bytes());
             fingerprint.extend_from_slice(op.name.as_bytes());
-            // row/replace kind + the payload bytes (content-addressed — no
+            // row/replace/group kind + the payload bytes (content-addressed — no
             // file stat needed; the engine already read them at boot)
-            fingerprint.push(matches!(op.kind, a9_formats::overlay::CsvOpKind::Rows) as u8);
+            fingerprint.push(match op.kind {
+                a9_formats::overlay::CsvOpKind::Replace => 0u8,
+                a9_formats::overlay::CsvOpKind::Rows => 1,
+                a9_formats::overlay::CsvOpKind::GroupAppend => 2,
+            });
             fingerprint.extend_from_slice(&(op.payload.len() as u64).to_le_bytes());
             fingerprint.extend_from_slice(&op.payload);
             for k in &op.row_keys {
@@ -219,12 +223,13 @@ fn merge_pack(inner: &Inner, key: &str, original: &[u8]) -> Result<Vec<u8>, Stri
         };
         let (b, report) = a9_formats::overlay::overlay_csvp(original, &ops, BUDGET)
             .map_err(|e| format!("merge: {e}"))?;
-        let rows = if report.row_replaced + report.row_appended > 0 {
+        let rows = if report.row_replaced + report.row_appended + report.row_group_appended > 0 {
             format!(
-                ", {} row patch(es) ({} replaced, {} added)",
-                report.row_replaced + report.row_appended,
+                ", {} row patch(es) ({} replaced, {} added, {} group-appended)",
+                report.row_replaced + report.row_appended + report.row_group_appended,
                 report.row_replaced,
-                report.row_appended
+                report.row_appended,
+                report.row_group_appended
             )
         } else {
             String::new()

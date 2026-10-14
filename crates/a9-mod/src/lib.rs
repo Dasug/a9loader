@@ -16,6 +16,7 @@ pub mod loose;
 pub mod manifest;
 pub mod resolve;
 pub mod scan;
+pub mod train;
 
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum ModError {

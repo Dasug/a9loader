@@ -55,6 +55,8 @@ pub struct MergeReport {
     /// csvp rows replaced / appended across all tables
     pub row_replaced: usize,
     pub row_appended: usize,
+    /// csvp rows added by a positional GROUP append (M7-2 train_pattern groups)
+    pub row_group_appended: usize,
 }
 
 fn merge_report(added: usize, replaced: usize, decoded: usize, encoded: usize) -> MergeReport {
@@ -65,6 +67,7 @@ fn merge_report(added: usize, replaced: usize, decoded: usize, encoded: usize) -
         encoded,
         row_replaced: 0,
         row_appended: 0,
+        row_group_appended: 0,
     }
 }
 

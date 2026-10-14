@@ -12,4 +12,5 @@ pub mod list;
 pub mod mkpack;
 pub mod report;
 pub mod selftests;
+pub mod trains;
 pub mod verify;

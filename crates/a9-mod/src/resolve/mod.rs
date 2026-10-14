@@ -272,6 +272,14 @@ fn collect_overlaps(res: &mut Resolution, enabled: &[usize], mods: &[Manifest]) 
             // is a separate (load-time) hard refusal.
             own(format!("asset:{}", a.name), i, false);
         }
+        // `[[train]]` (M7-2): a compiler that expands into the row-merge, asset
+        // and row-injection effects above — so it registers exactly those keys.
+        // Its `hook:train_list_filter` entry is composable (like every
+        // train_list contribution); the `csv:`/`asset:`/`train:` keys are not.
+        for key in crate::train::effect_keys_of(&mods[i].id, &mods[i].train) {
+            let composable = key == "hook:train_list_filter";
+            own(key, i, composable);
+        }
     }
     for (key, os) in owners {
         if os.len() > 1 && !os.iter().all(|(_, composable)| *composable) {

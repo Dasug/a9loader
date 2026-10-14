@@ -399,3 +399,55 @@ fn raw_target_repr() {
     assert_eq!(m.patch[0].target.key(0), "raw:0x1a13b0+0");
     assert!(m.patch[0].target.anchor().is_none());
 }
+
+#[test]
+fn train_section_parses_with_defaults() {
+    let m = parse(
+        "\nid=\"x\"\nname=\"X\"\nversion=\"1.0.0\"\nauthor=\"a\"\n\
+         [[train]]\nkey = \"sample\"\nname = \"サンプル\"\n",
+    )
+    .unwrap();
+    m.validate().unwrap();
+    assert_eq!(m.train.len(), 1);
+    assert_eq!(m.train[0].key, "sample");
+    assert_eq!(m.train[0].name, "サンプル");
+    // every optional field defaults (None = the compiler's documented default)
+    assert!(m.train[0].name_en.is_none());
+    assert!(m.train[0].from.is_none());
+    assert!(m.train[0].price.is_none());
+    assert!(m.train[0].cars.is_none());
+    assert!(m.train[0].model.is_none());
+    // the model sub-table is strict too
+    let m = parse(
+        "\nid=\"x\"\nname=\"X\"\nversion=\"1.0.0\"\nauthor=\"a\"\n\
+         [[train]]\nkey = \"s\"\nname = \"S\"\nmodel = { dir = \"kh32\", mesh = \"_t_kh32_a\" }\n",
+    )
+    .unwrap();
+    let mdl = m.train[0].model.as_ref().unwrap();
+    assert_eq!((mdl.dir.as_str(), mdl.mesh.as_str()), ("kh32", "_t_kh32_a"));
+}
+
+#[test]
+fn train_section_unknown_fields_refuse() {
+    // an unknown field on the section
+    assert!(parse(
+        "\nid=\"x\"\nname=\"X\"\nversion=\"1.0.0\"\nauthor=\"a\"\n\
+         [[train]]\nkey = \"s\"\nname = \"S\"\nid = 421\n",
+    )
+    .is_err());
+    // an unknown field on the model sub-table
+    assert!(parse(
+        "\nid=\"x\"\nname=\"X\"\nversion=\"1.0.0\"\nauthor=\"a\"\n\
+         [[train]]\nkey = \"s\"\nname = \"S\"\nmodel = { dir = \"kh32\", mesh = \"_t_kh32_a\", x = 1 }\n",
+    )
+    .is_err());
+    // `key` and `name` are required
+    assert!(parse(
+        "\nid=\"x\"\nname=\"X\"\nversion=\"1.0.0\"\nauthor=\"a\"\n[[train]]\nname = \"S\"\n",
+    )
+    .is_err());
+    assert!(parse(
+        "\nid=\"x\"\nname=\"X\"\nversion=\"1.0.0\"\nauthor=\"a\"\n[[train]]\nkey = \"s\"\n",
+    )
+    .is_err());
+}

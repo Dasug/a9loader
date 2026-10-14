@@ -37,6 +37,24 @@ pub fn composed_allowed() -> Option<&'static [u8; FORMS_MAX / 8]> {
     G_ALLOWED.get().map(|b| &**b)
 }
 
+/// Whether the installed composed keep-set admits `id` — `None` when no filter
+/// was installed. The M7-2 harness reads this to assert that a reserved train
+/// id is admitted (the `[[train]]` ids are added to the bitmap programmatically).
+pub fn composed_kept(id: usize) -> Option<bool> {
+    composed_allowed().map(|bm| forms::kept(bm, id))
+}
+
+/// The M7-2 harness seam: `a9loader_m7_kept(id)` -> 1 (kept), 2 (not kept) or
+/// 0 (no composed filter installed).
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn a9loader_m7_kept(id: u64) -> u64 {
+    match composed_kept(id as usize) {
+        Some(true) => 1,
+        Some(false) => 2,
+        None => 0,
+    }
+}
+
 type FilterFn =
     unsafe extern "system" fn(*mut c_void, *mut u32, *mut u32, *mut c_void) -> *mut c_void;
 
@@ -300,6 +318,47 @@ pub unsafe fn train_list_contribution(
         rva: t.rva,
         expect: t.expect,
         bitmap: report.bitmap,
+    })
+}
+
+/// One mod's `train_list` contribution carrying explicit reserved **ids**
+/// (M7-2): the `[[train]]` compiler allocates spec-row ids and the loader must
+/// add those ids to the composed keep-bitmap PROGRAMMATICALLY — the name match
+/// in [`train_list_contribution`] can never admit an injected row, because its
+/// allocated name is deliberately not in the FORM list (notes/62-D).
+///
+/// The contribution is an `Add` (the shipped whitelist stays the base) and
+/// names the same `train_list_filter` seam, so it composes with every other
+/// contribution unchanged.
+pub unsafe fn reserved_id_contribution(
+    mod_id: &str,
+    ids: &[usize],
+    entry: &BuildEntry,
+) -> Result<Contribution, String> {
+    let mut bitmap = Box::new([0u8; FORMS_MAX / 8]);
+    let mut set = 0usize;
+    for &id in ids {
+        if id < FORMS_MAX {
+            bitmap[id >> 3] |= 1u8 << (id & 7);
+            set += 1;
+        }
+    }
+    if set == 0 {
+        return Err("no reserved ids to admit".into());
+    }
+    let t = resolve_target(
+        &TargetRef::Anchor("train_list_filter".to_string()),
+        entry,
+    )?;
+    Ok(Contribution {
+        id: mod_id.to_string(),
+        mode: ListMode::Add,
+        list_name: format!("[[train]] reserved ids ({set})"),
+        matched: set,
+        unmatched: 0,
+        rva: t.rva,
+        expect: t.expect,
+        bitmap,
     })
 }
 

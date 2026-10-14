@@ -331,6 +331,55 @@ pub struct MergeStats {
     pub appended: usize,
     /// patch rows whose fields already matched the base row (kept verbatim)
     pub unchanged: usize,
+    /// rows added by a positional GROUP append ([`append_group`]) — rows with
+    /// no first-column identity of their own (the continuation rows of a
+    /// `train_pattern` group).
+    pub group_appended: usize,
+}
+
+/// Append `rows` **positionally** at the end of `base` — the M7-2 GROUP
+/// append primitive, a first-class operation next to [`merge_rows`].
+///
+/// Why it must exist: `train_pattern.csv` rows come in 10-row groups where only
+/// the HEAD row carries the first-column key (`編成ID`); the nine continuation
+/// rows have an empty first column, so the keyed [`merge_rows`] path cannot
+/// address them at all (it refuses an empty key). A group append takes whole
+/// rows — keyed or not — and places them verbatim at the end of the table,
+/// after fixing the previous last row's terminator so the append starts on its
+/// own line. The appended rows keep their own terminator (the compiler emits
+/// canonical CRLF rows); if the final appended row has no terminator it adopts
+/// the base's dominant one, so a later append never concatenates onto it.
+///
+/// Refusals (loud, never silent): a row whose column count differs from the
+/// base's (a malformed group). An empty `rows` table is a no-op. Returns the
+/// merged table and the number of rows appended.
+pub fn append_group(base: &Table, rows: &Table) -> Result<(Table, usize), Error> {
+    let cols = base.column_count();
+    let dominant = base.dominant_eol();
+    let mut out = base.clone();
+    if rows.rows.is_empty() {
+        return Ok((out, 0));
+    }
+    if let Some(last) = out.rows.last_mut() {
+        if last.eol == Eol::None {
+            last.eol = dominant; // so the append starts on its own line
+        }
+    }
+    for row in &rows.rows {
+        if cols != 0 && row.fields.len() != cols {
+            return Err(Error::Container(format!(
+                "csv group append: a row has {} columns but the base table has {cols}",
+                row.fields.len()
+            )));
+        }
+        out.rows.push(row.clone());
+    }
+    if let Some(last) = out.rows.last_mut() {
+        if last.eol == Eol::None {
+            last.eol = dominant;
+        }
+    }
+    Ok((out, rows.rows.len()))
 }
 
 /// Apply `patches` to `base`. `MergeMode::Replace` returns the last patch
@@ -575,6 +624,56 @@ mod tests {
         let back = Table::parse(&bytes).unwrap();
         assert_eq!(back.serialize(), bytes);
         assert_eq!(back.rows[0].fields, vec!["R1".to_string(), "a".to_string()]);
+    }
+
+    #[test]
+    fn group_append_is_positional_and_keyless() {
+        // a 3-column base whose rows are keyed by col0
+        let base = Table::parse(&utf16("\"K\",\"V\",\"N\"\r\n\"R1\",\"a\",\"1\"\r\n\"R2\",\"b\",\"2\"\r\n"))
+            .unwrap();
+        // a GROUP: the head carries the key, the continuation rows have an
+        // EMPTY first column (exactly the train_pattern shape)
+        let group = Table::parse(&utf16("\"R3\",\"c\",\"1\"\r\n,\"d\",\"2\"\r\n,\"e\",\"3\"\r\n")).unwrap();
+        let (m, n) = append_group(&base, &group).unwrap();
+        assert_eq!(n, 3);
+        let keys: Vec<&str> = m.rows.iter().map(|r| r.key()).collect();
+        assert_eq!(keys, vec!["K", "R1", "R2", "R3", "", ""]);
+        let text = String::from_utf16(
+            &m.serialize()[2..]
+                .chunks(2)
+                .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        assert_eq!(text, "\"K\",\"V\",\"N\"\r\n\"R1\",\"a\",\"1\"\r\n\"R2\",\"b\",\"2\"\r\n\"R3\",\"c\",\"1\"\r\n,\"d\",\"2\"\r\n,\"e\",\"3\"\r\n");
+        // empty group = no-op, byte-identical
+        let (m, n) = append_group(&base, &Table::parse(&utf16("")).unwrap()).unwrap();
+        assert_eq!(n, 0);
+        assert_eq!(m.serialize(), base.serialize());
+    }
+
+    #[test]
+    fn group_append_fixes_a_missing_final_newline() {
+        let base = Table::parse(&utf16("\"K\",\"V\"\r\n\"R1\",\"a\"")).unwrap();
+        let group = Table::parse(&utf16("\"R2\",\"b\"\r\n,\"c\"\r\n")).unwrap();
+        let (m, n) = append_group(&base, &group).unwrap();
+        assert_eq!(n, 2);
+        let text = String::from_utf16(
+            &m.serialize()[2..]
+                .chunks(2)
+                .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        assert_eq!(text, "\"K\",\"V\"\r\n\"R1\",\"a\"\r\n\"R2\",\"b\"\r\n,\"c\"\r\n");
+    }
+
+    #[test]
+    fn group_append_refuses_a_column_mismatch() {
+        let base = Table::parse(&utf16("\"K\",\"V\"\r\n\"R1\",\"a\"\r\n")).unwrap();
+        let bad = Table::parse(&utf16("\"R2\",\"b\",\"c\"\r\n")).unwrap();
+        let e = append_group(&base, &bad).unwrap_err().to_string();
+        assert!(e.contains("3 columns but the base table has 2"), "{e}");
     }
 
     #[test]
