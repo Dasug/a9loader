@@ -191,9 +191,12 @@ pub struct TrainSection {
     #[serde(default)]
     pub name_en: Option<String>,
     /// the shipped FORM name whose spec row is cloned (the model/livery and
-    /// profile donor). Default `FORM_KH32` — a fully shipped KiHa-32-based
-    /// railcar whose model directory `kh32` and its two liveries are already in
-    /// the `mtentr0` pack, so no model asset is needed.
+    /// profile donor). Default `FORM_AR4` — an ARTDINK original that is in the
+    /// shipped purchase whitelist, so its spec row is populated in every build.
+    /// It must be a train the game ENABLES: a shipped-but-disabled train (such as
+    /// `FORM_KH32`) keeps `bValid == 0` for the whole boot and the injection
+    /// refuses rather than cloning an uninitialised row. The model defaults stay
+    /// the shipped KiHa-32 ones, whose mesh and liveries are present regardless.
     #[serde(default)]
     pub from: Option<String>,
     /// purchase price (`train_pattern` 購入価格). Default `45000000`.

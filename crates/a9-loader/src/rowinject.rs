@@ -705,21 +705,46 @@ unsafe fn probe_row_map(g: &TrainState, call: u32, mgr: *mut u8) {
             .find(|&i| b0(i) == "1")
             .map(|i| i.to_string())
             .unwrap_or_else(|| "none".into());
-        let found = (0..count)
-            .find(|&i| name_at(i) == "FORM_KH32")
-            .map(|i| i.to_string())
-            .unwrap_or_else(|| "none".into());
+        let lower = |s: &str| s.to_ascii_lowercase();
+        let populated: Vec<usize> = (0..count).filter(|&i| b0(i) == "1").collect();
+        let sample: Vec<String> = populated
+            .iter()
+            .take(12)
+            .map(|&i| format!("{i}:{}", name_at(i)))
+            .collect();
+        let cand = |want: &str| -> String {
+            (0..count)
+                .find(|&i| lower(&name_at(i)) == lower(want))
+                .map(|i| {
+                    if b0(i) == "1" {
+                        format!("{i}:valid")
+                    } else {
+                        format!("{i}:INVALID")
+                    }
+                })
+                .unwrap_or_else(|| "absent".into())
+        };
 
         g.logger.debug(&format!(
-            "train probe: call {call} mgr={mgr:p} ours={ours:#x} begin={begin:#x} count={count} \
-             b0[0]={} b0[62]={} b0[195]={} b0[212]={} first_valid={first} \
-             name[195]={:?} name[212]={:?} FORM_KH32_at={found}",
+            "train probe: call {call} mgr={mgr:p} ours={ours:#x} count={count} \
+             populated={} b0[0]={} b0[62]={} b0[195]={} b0[212]={} first_valid={first} \
+             name[195]={:?} name[212]={:?} FORM_KH32_at={} | AR4={} 285={} 201KY={} \
+             sample=[{}]",
+            populated.len(),
             b0(0),
             b0(62),
             b0(195),
             b0(212),
             name_at(195),
-            name_at(212)
+            name_at(212),
+            (0..count)
+                .find(|&i| lower(&name_at(i)) == "form_kh32")
+                .map(|i| i.to_string())
+                .unwrap_or_else(|| "none".into()),
+            cand("FORM_AR4"),
+            cand("FORM_285"),
+            cand("FORM_201KY"),
+            sample.join(", ")
         ));
     }
 }
@@ -883,8 +908,11 @@ unsafe fn inject_trains_locked(g: &TrainState) -> Result<usize, String> {
             }
             if *donor.add(ROW_BVALID) == 0 {
                 return Err(format!(
-                    "train '{}': donor row {donor_id} ({}) is not populated yet \
-                     (bValid == 0) — refusing",
+                    "train '{}': donor row {donor_id} ({}) is not populated (bValid == 0) — \
+                     the game never enabled that train in this build, so there is no row to \
+                     clone. Pick a donor that appears in the purchase list (FORM_AR4 is in \
+                     the shipped whitelist); a shipped train can still be disabled here, \
+                     FORM_KH32 among them",
                     t.form_name, t.donor
                 ));
             }
