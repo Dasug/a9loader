@@ -722,6 +722,45 @@ unsafe fn probe_row_map(g: &TrainState, call: u32, mgr: *mut u8) {
             }
             s
         };
+        // DIAGNOSTIC: the 18 name lanes of a row (9 at +0xa8, 9 at +0xf0). The
+        // panel's price/capacity/description come from the CSV tables, whose keys
+        // are UPPERCASE FORM names, and the injected row's pFormName is lowercase
+        // — so whatever name the lookup uses is one of these lanes, and after the
+        // clone the unpatched ones still hold the DONOR's names. Dumping them for
+        // the donor and the injected row shows exactly which lane has to change.
+        let lanes_at = |idx: usize| -> String {
+            if idx >= count {
+                return "<oob>".into();
+            }
+            let row = (begin + idx * ROW_STRIDE) as *const u8;
+            if !sys::is_readable(row as *const c_void, ROW_STRIDE) {
+                return "<unreadable>".into();
+            }
+            let mut out = Vec::new();
+            for (base_off, tag) in [(ROW_NAME_BASE, "n"), (ROW_NAMEALT_BASE, "a")] {
+                for k in 0..9 {
+                    let off = base_off + k * 0x8;
+                    if off + 8 > ROW_STRIDE {
+                        break;
+                    }
+                    let p = *(row.add(off) as *const *const u16);
+                    if p.is_null() || !sys::is_readable(p as *const c_void, 2) {
+                        out.push(format!("{tag}{k}=<null>"));
+                        continue;
+                    }
+                    let mut s = String::new();
+                    for i in 0..20 {
+                        let c = *p.add(i);
+                        if c == 0 {
+                            break;
+                        }
+                        s.push(char::from_u32(c as u32).unwrap_or('?'));
+                    }
+                    out.push(format!("{tag}{k}={s}"));
+                }
+            }
+            out.join(" ")
+        };
         let b0 = |idx: usize| -> String {
             if idx >= count {
                 return "<oob>".into();
@@ -777,6 +816,18 @@ unsafe fn probe_row_map(g: &TrainState, call: u32, mgr: *mut u8) {
             cand("FORM_201KY"),
             sample.join(", ")
         ));
+        if count > 0 {
+            g.logger.debug(&format!(
+                "train probe lanes: donor(96) [{}]",
+                lanes_at(96)
+            ));
+            if count > 421 {
+                g.logger.debug(&format!(
+                    "train probe lanes: injected(421) [{}]",
+                    lanes_at(421)
+                ));
+            }
+        }
     }
 }
 

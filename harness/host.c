@@ -1991,6 +1991,11 @@ static int mode_train(const char *scen, int retry)
         train_populate_donor();
         ((tlb_fn)(g_base + RVA_TLB))((void *)m);
         printf("train: retry phase 2 fired with the donor populated\n");
+        /* a third call mirrors the live "scenario load" call: the injection is
+         * already done, so this one only exercises the probe's post-injection
+         * dump of the injected row's name lanes. */
+        ((tlb_fn)(g_base + RVA_TLB))((void *)m);
+        printf("train: third call (post-injection, probe only)\n");
     } else {
         train_populate_donor();
         ((tlb_fn)(g_base + RVA_TLB))((void *)m);
