@@ -150,6 +150,50 @@ mod tests {
         let cav = b.anchor("pack_lzss_cave").unwrap();
         assert_eq!(cav.rva, 0x5A1D13);
         assert_eq!(cav.expect_bytes().unwrap(), vec![0xcc; 16]);
+        // the M7-2 save-path probe anchors (notes/62-B §4.2)
+        let pw = b.anchor("mmf_paged_write").unwrap();
+        assert_eq!(pw.rva, 0x308FE0);
+        assert_eq!(
+            pw.expect_bytes().unwrap(),
+            vec![
+                0x48, 0x89, 0x6c, 0x24, 0x10, 0x48, 0x89, 0x74, 0x24, 0x18, 0x48, 0x89, 0x7c,
+                0x24, 0x20, 0x41, 0x56
+            ]
+        );
+        let pwb = b.anchor("mmf_paged_write_bulk").unwrap();
+        assert_eq!(pwb.rva, 0x308E20);
+        assert_eq!(pwb.expect_bytes().unwrap().len(), 17);
+        let wb = b.anchor("save_mmf_write_block").unwrap();
+        assert_eq!(wb.rva, 0x41500);
+        assert_eq!(
+            wb.expect_bytes().unwrap(),
+            vec![
+                0x48, 0x89, 0x6c, 0x24, 0x18, 0x48, 0x89, 0x74, 0x24, 0x20, 0x48, 0x89, 0x4c,
+                0x24, 0x08, 0x57
+            ]
+        );
+        let rv = b.anchor("mmf_read_u32_vector").unwrap();
+        assert_eq!(rv.rva, 0x41820);
+        assert_eq!(rv.expect_bytes().unwrap().len(), 16);
+        // the M7-0 save-id clamp guard anchors
+        let sh = b.anchor("save_group_head").unwrap();
+        assert_eq!(sh.rva, 0x1B6F0C);
+        assert_eq!(
+            sh.expect_bytes().unwrap(),
+            vec![0x49, 0x63, 0xc6, 0x48, 0x8d, 0x0c, 0x80]
+        );
+        let shc = b.anchor("save_group_head_cave").unwrap();
+        assert_eq!(shc.rva, 0x5D28F0);
+        assert_eq!(shc.expect_bytes().unwrap(), vec![0xcc; 16]);
+        let scr = b.anchor("save_car_read").unwrap();
+        assert_eq!(scr.rva, 0x61F8B);
+        assert_eq!(
+            scr.expect_bytes().unwrap(),
+            vec![0xe8, 0x90, 0x6f, 0x2a, 0x00]
+        );
+        let scrc = b.anchor("save_car_read_cave").unwrap();
+        assert_eq!(scrc.rva, 0x66790);
+        assert_eq!(scrc.expect_bytes().unwrap(), vec![0xcc; 16]);
     }
 
     #[test]

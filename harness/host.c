@@ -772,6 +772,229 @@ static void mgr_setup(void)
     *(void **)(m + 0x70) = g_vec_typ + MGR_VEC_CAP;
 }
 
+/* ---- M7-2 save-path probe fakes (builds.toml mmf_paged_write /
+ * mmf_paged_write_bulk / save_mmf_write_block / mmf_read_u32_vector).
+ * The four save-side mmf helpers carry their real position-independent
+ * prologues (expect-verified by the loader's address book) + an E9 into an
+ * undo thunk that reverses the prologue's single push and jumps to a plain C
+ * body. The caller stubs live in the already-mapped 0x300000 block at fixed
+ * RVAs, so the probe's logged "caller" is a deterministic in-image RVA. */
+#define RVA_SAVE_PW     0x308FE0u   /* mmf_paged_write (the byte-level writer) */
+#define RVA_SAVE_PWB    0x308E20u   /* mmf_paged_write_bulk (the bulk writer) */
+#define RVA_SAVE_WBLOCK 0x41500u    /* save_mmf_write_block (the u32-vector writer) */
+#define RVA_SAVE_RVEC   0x41820u    /* mmf_read_u32_vector (the u32-vector READER) */
+#define RVA_SAVE_STUB   0x300000u   /* 4 caller stubs, 0x10 apart */
+
+static const unsigned char g_save_pw_orig[17] = {
+    0x48,0x89,0x6c,0x24,0x10,0x48,0x89,0x74,0x24,0x18,0x48,0x89,0x7c,0x24,0x20,0x41,0x56
+};
+static const unsigned char g_save_pwb_orig[17] = {
+    0x48,0x89,0x5c,0x24,0x10,0x48,0x89,0x74,0x24,0x18,0x48,0x89,0x7c,0x24,0x20,0x41,0x56
+};
+static const unsigned char g_save_wblock_orig[16] = {
+    0x48,0x89,0x6c,0x24,0x18,0x48,0x89,0x74,0x24,0x20,0x48,0x89,0x4c,0x24,0x08,0x57
+};
+static const unsigned char g_save_rvec_orig[16] = {
+    0x48,0x89,0x5c,0x24,0x10,0x48,0x89,0x74,0x24,0x18,0x48,0x89,0x4c,0x24,0x08,0x57
+};
+
+static unsigned long g_save_calls;
+
+extern void save_pw_undo_thunk(void);
+extern void save_pwb_undo_thunk(void);
+extern void save_wblock_undo_thunk(void);
+extern void save_rvec_undo_thunk(void);
+
+__asm__(
+    ".text\n"
+    ".globl save_pw_undo_thunk\n"
+    "save_pw_undo_thunk:\n"
+    "popq %r14\n"
+    "jmp save_pw_body\n"
+    ".globl save_pwb_undo_thunk\n"
+    "save_pwb_undo_thunk:\n"
+    "popq %r14\n"
+    "jmp save_pwb_body\n"
+    ".globl save_wblock_undo_thunk\n"
+    "save_wblock_undo_thunk:\n"
+    "popq %rdi\n"
+    "jmp save_wblock_body\n"
+    ".globl save_rvec_undo_thunk\n"
+    "save_rvec_undo_thunk:\n"
+    "popq %rdi\n"
+    "jmp save_rvec_body\n");
+
+__attribute__((used, noinline)) void save_pw_body(void *ring, const void *src, unsigned size)
+{
+    (void)ring; (void)src;
+    g_save_calls++;
+    printf("save_pw_body: called size=0x%x\n", size);
+}
+__attribute__((used, noinline)) void save_pwb_body(void *ring, const void *src, unsigned size)
+{
+    (void)ring; (void)src;
+    g_save_calls++;
+    printf("save_pwb_body: called size=0x%x\n", size);
+}
+__attribute__((used, noinline)) void save_wblock_body(unsigned long a1, const void *vec)
+{
+    (void)a1; (void)vec;
+    g_save_calls++;
+    printf("save_wblock_body: called\n");
+}
+__attribute__((used, noinline)) void save_rvec_body(unsigned long a1, const void *vec)
+{
+    (void)a1; (void)vec;
+    g_save_calls++;
+    printf("save_rvec_body: called\n");
+}
+
+/* lay down the four fake prologues + their E9 tails, and build the four
+ * in-image caller stubs (`movabs r11,target; call r11; ret`). Both pages are
+ * already mapped by the other setups (0x410000 via setup_cfile_page's 64K
+ * granularity, 0x300000 via setup_probe_pages), so no new mapping is needed. */
+static void setup_save_pages(void)
+{
+    /* the 0x41500 / 0x41820 anchors live in their own page (the cfile fake
+     * maps 0x41d000, a different page). VirtualAlloc honours the exact
+     * page-aligned base here (verified: the cfile fake's 0x41d40c is mapped
+     * while 0x41500 is not), so one 4K page covers both. */
+    if (!map_fixed((UINT_PTR)g_base + 0x41000, 0x1000, PAGE_EXECUTE_READWRITE)) {
+        printf("WARN: could not map save page at RVA 0x41000 err=%lu\n",
+               (unsigned long)GetLastError());
+        return;
+    }
+    struct { UINT_PTR rva; const unsigned char *orig; size_t len; void *thunk; } fakes[] = {
+        { RVA_SAVE_PW,     g_save_pw_orig,     sizeof(g_save_pw_orig),     (void *)&save_pw_undo_thunk },
+        { RVA_SAVE_PWB,    g_save_pwb_orig,    sizeof(g_save_pwb_orig),    (void *)&save_pwb_undo_thunk },
+        { RVA_SAVE_WBLOCK, g_save_wblock_orig, sizeof(g_save_wblock_orig), (void *)&save_wblock_undo_thunk },
+        { RVA_SAVE_RVEC,   g_save_rvec_orig,   sizeof(g_save_rvec_orig),   (void *)&save_rvec_undo_thunk },
+    };
+    for (unsigned i = 0; i < sizeof(fakes) / sizeof(fakes[0]); i++) {
+        memcpy((BYTE *)g_base + fakes[i].rva, fakes[i].orig, fakes[i].len);
+        BYTE *tail = (BYTE *)g_base + fakes[i].rva + fakes[i].len;
+        intptr_t rel = (intptr_t)fakes[i].thunk - (intptr_t)(tail + 5);
+        tail[0] = 0xE9;
+        memcpy(tail + 1, &rel, 4);
+    }
+    /* the caller stubs: movabs r11,<entry>; sub rsp,0x28; call r11; add rsp,0x28;
+     * ret. The 0x28 reserves the Win64 32-byte home area (the helpers'
+     * prologues store rbp/rsi/rdi at [rsp+0x10]/[rsp+0x18]/[rsp+0x20] — without
+     * it they overwrite this stub's frame) and leaves RSP ≡ 0 before the call,
+     * so the hooked entry sees the ABI's RSP ≡ 8. The return address lands at
+     * stub+17, i.e. RVA 0x300011 / 0x300031 / 0x300051 / 0x300071. */
+    UINT_PTR targets[4] = { RVA_SAVE_PW, RVA_SAVE_PWB, RVA_SAVE_WBLOCK, RVA_SAVE_RVEC };
+    for (unsigned i = 0; i < 4; i++) {
+        BYTE *s = (BYTE *)g_base + RVA_SAVE_STUB + i * 0x20;
+        s[0] = 0x49; s[1] = 0xBB;
+        void *t = (void *)(g_base + targets[i]);
+        memcpy(s + 2, &t, 8);
+        s[10] = 0x48; s[11] = 0x83; s[12] = 0xEC; s[13] = 0x28; /* sub rsp,0x28 */
+        s[14] = 0x41; s[15] = 0xFF; s[16] = 0xD3;               /* call r11 */
+        s[17] = 0x48; s[18] = 0x83; s[19] = 0xC4; s[20] = 0x28; /* add rsp,0x28 */
+        s[21] = 0xC3;                                           /* ret */
+    }
+}
+
+/* ---- M7-0 save-id clamp guard fakes (builds.toml save_group_head /
+ * save_group_head_cave / save_car_read / save_car_read_cave). The head site
+ * carries the 7 real bytes the rewrite overwrites (+ a `ret` continuation at
+ * +7); the car site carries the real E8 whose target (0x308f20) is the fake
+ * paged reader below (+ a `ret` continuation at +5); both caves stay 0xCC.
+ * The guard is ALWAYS ON, so these pages are mapped unconditionally — every
+ * scenario's boot installs it. The caves live in 64K blocks no other fake uses
+ * (0x5d0000 / 0x5c0000); the sites in 0x1b0000 / 0x60000. */
+#define RVA_CLAMP_HEAD      0x1B6F0Cu  /* the head row-offset math (7 bytes) */
+#define RVA_CLAMP_HEAD_CAVE 0x5D28F0u  /* the head relay cave (16-byte CC run) */
+#define RVA_CLAMP_CAR       0x61F8Bu   /* the car-block read E8 */
+#define RVA_CLAMP_CAR_CAVE  0x66790u   /* the car relay cave (16-byte CC run) */
+#define RVA_CLAMP_READ      0x308F20u  /* mmf_paged_read (the car site's target) */
+#define CLAMP_ROWS          421u       /* the fake spec-vector row count */
+#define CLAMP_HEAD_TARGET   417u       /* the engine's auto-named invalid row */
+#define CLAMP_CAR_TARGET    160u       /* FORM_DUMMY_03 */
+
+static const unsigned char g_clamp_head_orig[7] = { 0x49,0x63,0xC6,0x48,0x8D,0x0C,0x80 };
+static const unsigned char g_clamp_car_orig[5]  = { 0xE8,0x90,0x6F,0x2A,0x00 };
+
+static const unsigned char *g_clamp_read_src;  /* what the fake reader copies */
+
+__attribute__((used, noinline)) void clamp_read_body(void *ring, void *dest, unsigned size)
+{
+    (void)ring;
+    if (g_clamp_read_src && size <= 0x1000) memcpy(dest, g_clamp_read_src, size);
+}
+
+static int setup_clamp_pages(void)
+{
+    /* one entry per 64K host block: the head site, the head cave, and the car
+     * site + car cave (which share the 0x60000 block) */
+    struct { UINT_PTR page; UINT_PTR span; const char *label; } crooms[] = {
+        { 0x1B6000, 0x1000,  "0x1b6000" },  /* the head site */
+        { 0x5D2000, 0x1000,  "0x5d2000" },  /* the head cave */
+        { 0x60000,  0x10000, "0x60000"  },  /* the car site + the car cave */
+    };
+    int ok = 1;
+    for (unsigned i = 0; i < sizeof(crooms) / sizeof(crooms[0]); i++) {
+        if (!map_fixed((UINT_PTR)g_base + crooms[i].page, crooms[i].span,
+                       PAGE_EXECUTE_READWRITE)) {
+            printf("WARN: could not map clamp page at RVA %s err=%lu\n",
+                   crooms[i].label, (unsigned long)GetLastError());
+            ok = 0;
+            continue;
+        }
+        memset((BYTE *)g_base + crooms[i].page, 0xCC, crooms[i].span);
+    }
+    if (!ok) return 0;
+    /* the head site: the 7 real bytes + a `ret` continuation at +7 (the shim's
+     * ret lands on the 2 nops, falls through to this ret and returns to the
+     * host's call thunk) */
+    memcpy((BYTE *)g_base + RVA_CLAMP_HEAD, g_clamp_head_orig, sizeof(g_clamp_head_orig));
+    ((BYTE *)g_base + RVA_CLAMP_HEAD)[7] = 0xC3;
+    /* the car site: the real E8 + a `ret` continuation at +5 */
+    memcpy((BYTE *)g_base + RVA_CLAMP_CAR, g_clamp_car_orig, sizeof(g_clamp_car_orig));
+    ((BYTE *)g_base + RVA_CLAMP_CAR)[5] = 0xC3;
+    /* the fake mmf_paged_read at 0x308f20 (inside setup_probe_pages' 0x300000
+     * span, between the save fakes 0x308e20/0x308fe0): movabs rax,<body>; jmp rax */
+    {
+        BYTE *shim = (BYTE *)g_base + RVA_CLAMP_READ;
+        intptr_t target = (intptr_t)&clamp_read_body;
+        shim[0] = 0x48; shim[1] = 0xB8;
+        memcpy(shim + 2, &target, 8);
+        shim[10] = 0xFF; shim[11] = 0xE0;
+    }
+    return 1;
+}
+
+/* the head site is reached by FALL-THROUGH in the game with RSP == 0 (mod 16),
+ * so the thunk keeps RSP == 8 before its `call` (entry 8 -> two pushes -> 8);
+ * r14d carries the id in and the clamped id out. */
+void *g_clamp_head_ptr = 0;
+extern unsigned clamp_head_call(unsigned id);
+__asm__(
+    ".text\n"
+    ".globl clamp_head_call\n"
+    "clamp_head_call:\n"
+    "  pushq %r14\n"
+    "  pushq %rbx\n"
+    "  movl %ecx, %r14d\n"
+    "  callq *g_clamp_head_ptr(%rip)\n"
+    "  movl %r14d, %eax\n"
+    "  popq %rbx\n"
+    "  popq %r14\n"
+    "  retq\n");
+
+/* the car site is also fall-through (RSP == 0 at its E8). The thunk is entered
+ * with RSP == 8 and its single `call` makes the site see RSP == 0; arguments
+ * rcx/rdx/r8 pass straight through, the result comes back in rax. */
+void *g_clamp_car_ptr = 0;
+extern unsigned long clamp_car_call(void *ring, void *dest, unsigned size);
+__asm__(
+    ".text\n"
+    ".globl clamp_car_call\n"
+    "clamp_car_call:\n"
+    "  callq *g_clamp_car_ptr(%rip)\n"
+    "  retq\n");
+
 /* ---- M5 tailgate fakes (same page set as the inject pages). The family-A * decode entry carries a movabs+branch shim to the plain C decoder; the
  * vp/tp/i.dat call sites carry the address book's E8 expect bytes followed by
  * a clean `ret` continuation the spliced stub returns into; the relay cave
@@ -1194,6 +1417,88 @@ static int mode_window(void)
     return 0;
 }
 
+/* the M7-2 save-path probe evidence: call the four (possibly hooked) save-side
+ * mmf helpers through in-image caller stubs, so the probe logs the caller RVA
+ * + size of each write, the two verbatim-block lines, and the read-side line.
+ * The fakes run through their undo thunks either way. */
+static int mode_save(void)
+{
+    static unsigned long ring[64];
+    static unsigned char buf[0x2000];
+    static unsigned data[8];
+    static const unsigned *vec[2];
+    for (unsigned i = 0; i < sizeof(buf); i++) buf[i] = (unsigned char)(0xA0 + (i & 0x0f));
+    data[0] = 1; data[1] = 2; data[2] = 3; data[3] = 4; data[4] = 5;
+    vec[0] = data; vec[1] = data + 5;
+    BYTE *stub = (BYTE *)g_base + RVA_SAVE_STUB;
+    typedef void (*w3)(void *, const void *, unsigned);
+    typedef void (*w2)(unsigned long, const void *);
+    printf("save: write 0xf8 (the car-block shape)\n");
+    ((w3)(stub + 0x00))(ring, buf, 0xf8);
+    printf("save: write 0x124 (the state block)\n");
+    ((w3)(stub + 0x00))(ring, buf, 0x124);
+    printf("save: bulk 0xbc0 (the mini-block)\n");
+    ((w3)(stub + 0x20))(ring, buf, 0xbc0);
+    printf("save: u32-vector block (5 elems)\n");
+    ((w2)(stub + 0x40))(0, vec);
+    printf("save: u32-vector read\n");
+    ((w2)(stub + 0x60))(0, vec);
+    printf("save: %lu fake-body calls\n", g_save_calls);
+    printf("save: done\n");
+    return 0;
+}
+
+/* the M7-0 clamp evidence: (1) the head clamp — call the head site with a set
+ * of ids through the r14 thunk; (2) the car clamp — fill a 0xf8 car block with
+ * a mix of in/out-of-range ids, call the car site (which reads through the fake
+ * paged reader, then clamps), and read the block back. The manager carries
+ * CLAMP_ROWS rows so the target rows are in range. */
+static int mode_clamp(void)
+{
+    unsigned char *rows = (unsigned char *)VirtualAlloc(NULL,
+        (SIZE_T)CLAMP_ROWS * 0x140, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (!rows) { printf("FAIL: clamp rows alloc\n"); return 2; }
+    memset(rows, 0, (SIZE_T)CLAMP_ROWS * 0x140);
+    {
+        BYTE *m = (BYTE *)g_base + RVA_MGR;
+        *(void **)(m + 0x18) = rows;
+        *(void **)(m + 0x20) = rows + (SIZE_T)CLAMP_ROWS * 0x140;
+    }
+
+    /* ---- head: in-range ids pass through, out-of-range -> 417 ---- */
+    g_clamp_head_ptr = (void *)(g_base + RVA_CLAMP_HEAD);
+    static const unsigned head_ids[] = { 42, 0, 420, 500, 421, 65535 };
+    printf("clamp head:");
+    for (unsigned i = 0; i < sizeof(head_ids) / sizeof(head_ids[0]); i++)
+        printf(" %u->%u", head_ids[i], clamp_head_call(head_ids[i]));
+    printf("\n");
+
+    /* ---- car: the fixed 0xf8 block, 10 rows of [u16 id][u8 aux][u8 f][20B] ---- */
+    static unsigned char src[0x100], dst[0x100];
+    static const unsigned short car_ids[10] =
+        { 42, 9999, 400, 0, 160, 421, 65535, 1, 0, 2000 };
+    memset(src, 0, sizeof src);
+    for (unsigned i = 0; i < 10; i++) {
+        *(unsigned short *)(src + i * 0x18) = car_ids[i];
+        src[i * 0x18 + 2] = 1;   /* aux */
+        src[i * 0x18 + 3] = 0;   /* f   */
+    }
+    src[0xf5] = 10;              /* the trailer's car count at block+0xf0+5 */
+    memset(dst, 0xAA, sizeof dst);
+    g_clamp_read_src = src;
+    g_clamp_car_ptr = (void *)(g_base + RVA_CLAMP_CAR);
+    unsigned long rr = clamp_car_call(NULL, dst, 0xf8);
+    printf("clamp car: ret=%lu\n", rr);
+    printf("clamp car ids:");
+    for (unsigned i = 0; i < 10; i++) {
+        unsigned short got = *(unsigned short *)(dst + i * 0x18);
+        printf(" %u->%u", car_ids[i], got);
+    }
+    printf("\n");
+    printf("clamp: done\n");
+    return 0;
+}
+
 /* the M4 inject scenario host path: (1) open the pack through the
  * (possibly hooked) CFile::Open — the injector's capture seam fires
  * INSIDE that open for planned packs; (2) fill the fake pool the
@@ -1424,6 +1729,8 @@ int main(int argc, char **argv)
     if (!setup_cfile_page()) return 3;
     g_probe_ok = setup_probe_pages();
     setup_tab_pages();
+    if (!strcmp(mode, "save")) setup_save_pages();
+    setup_clamp_pages();   /* always-on guard: its anchors must exist on every boot */
     setup_inject_pages(mode);
 
     /* real FORM list bytes -> the mapped region (NUL-terminated UTF-16) */
@@ -1467,6 +1774,8 @@ int main(int argc, char **argv)
     if (!strcmp(mode, "tabfix")) return mode_tabfix();
     if (!strcmp(mode, "formfix")) return mode_formfix();
     if (!strcmp(mode, "window")) return mode_window();
+    if (!strcmp(mode, "save")) return mode_save();
+    if (!strcmp(mode, "clamp")) return mode_clamp();
     if (!strcmp(mode, "inject")) return mode_inject();
     if (!strcmp(mode, "tailgate") || !strcmp(mode, "tailgate-mismatch")
         || !strcmp(mode, "tailgate-ws"))

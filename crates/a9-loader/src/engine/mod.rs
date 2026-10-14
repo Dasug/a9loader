@@ -57,11 +57,32 @@ pub unsafe fn boot(hinst: sys::HMODULE) {
         return;
     }
 
-    // ---- build identity (from the exe file; no version.dll APIs in DllMain)
+    // ---- build identity (from the exe file; no version.dll calls in DllMain)
     let Some((build_id, entry)) = build_gate(&exe, &logger) else {
         return;
     };
     let base = unsafe { base_ptr() };
+
+    // ---- M7-0: the save-id clamp guard. ALWAYS ON (a safety fix, not a
+    // diagnostic): a saved formation's form id is used as a spec-row index
+    // with no bounds check, so an out-of-range id reads past the heap block.
+    // Installed before the mod scan so it runs even with no mods at all —
+    // a save made with a mod that is now absent must still degrade to the
+    // engine's invalid-row state instead of crashing. Fail-open: a missing
+    // anchor / expect mismatch refuses loudly and the game boots vanilla.
+    match unsafe {
+        crate::clamp::install(
+            &entry,
+            base,
+            logger.clone(),
+            cfg.log_level >= a9_mod::config::LogLevel::Debug,
+        )
+    } {
+        Ok(line) => logger.line(&line),
+        Err(e) => logger.err(&format!(
+            "save clamp: {e} — out-of-range save ids are NOT guarded this boot (fail-open)"
+        )),
+    }
 
     // ---- scan + resolve (disabled ids are excluded with one line each —
     // a disabled mod is user intent, not an error)
@@ -136,6 +157,16 @@ pub unsafe fn boot(hinst: sys::HMODULE) {
     // notes/23 type-cycle quirk. No behaviour change.
     if cfg.probe_window {
         install_window_probe(&entry, base, &mods_dir, &logger);
+    }
+
+    // ---- M7-2 save-path probe (opt-in diagnostics; trampoline-only,
+    // fail-open): hooks the four save-side mmf helpers and logs the caller RVA
+    // + size of every save-path write, so one in-game save answers whether a
+    // formation's car block is one bulk 0xf8 write (the 20-byte tails then
+    // round-trip verbatim) or ten 0x18 writes (the tails are regenerated), and
+    // which caller RVA is the group-record writer. No behaviour change.
+    if cfg.probe_save {
+        install_save_probe(&entry, base, &mods_dir, &logger);
     }
 
     logger.line(&report::result_line(applied, refused, file_copies.len()));
@@ -830,6 +861,35 @@ fn install_window_probe(
         }
         Err(e) => logger.err(&format!(
             "probe refused: window: {e} — remaining boot unaffected"
+        )),
+    }
+}
+
+/// The M7-2 save-path probe (opt-in diagnostics): hook the four save-side mmf
+/// helpers trampoline-only and log the caller RVA + size + first bytes of every
+/// save-path write (notes/62-B §4.2). A failure logs loudly and leaves the boot
+/// vanilla.
+fn install_save_probe(
+    entry: &builds::BuildEntry,
+    base: *const u8,
+    mods_dir: &Path,
+    logger: &log::Logger,
+) {
+    logger.line("probe: save hooks on (diagnostic)");
+    match unsafe {
+        crate::probe_save::install(
+            log::Logger::new(&mods_dir.join("a9loader.log")),
+            base,
+            entry,
+        )
+    } {
+        Ok(lines) => {
+            for l in lines {
+                logger.line(&l);
+            }
+        }
+        Err(e) => logger.err(&format!(
+            "probe refused: save: {e} — remaining boot unaffected"
         )),
     }
 }

@@ -20,7 +20,10 @@ GAME_EXE="${ATRAIN9_EXE:-/run/media/frybarec/dasug/Games/steamlibrary/steamapps/
 echo "== building the host + the Rust version.dll"
 mkdir -p "$RUN"
 x86_64-w64-mingw32-windres harness/host.rc -O coff -o "$RUN/hostres.o"
-x86_64-w64-mingw32-gcc -O2 -o "$RUN/host.exe" harness/host.c "$RUN/hostres.o"
+# --strip-debug: the mingw static libs' .debug_* sections inflate SizeOfImage
+# to 0x4c000, which would cover the save probe's 0x41500 / 0x41820 anchors
+# (inside the host image => unmappable). Stripping debug drops it to 0x30000.
+x86_64-w64-mingw32-gcc -O2 -Wl,--strip-debug -o "$RUN/host.exe" harness/host.c "$RUN/hostres.o"
 cargo build --release --target x86_64-pc-windows-gnu
 DLL="$REPO/target/x86_64-pc-windows-gnu/release/version.dll"
 cargo build --release --bin a9ml
@@ -196,5 +199,83 @@ else
     echo "   [FAIL] a9ml list missing the window probe flag"
     FAILED=$((FAILED + 1))
 fi
+
+# ---- M7-2: the save-path writer probe ------------------------------------
+# The save-side fakes carry the four mmf helpers' real prologues + undo thunks
+# into plain C bodies, and four in-image caller stubs at RVA 0x300000/0x20/0x40/
+# 0x60 so the probe's logged caller RVAs are deterministic (stub+17).
+echo "== S1: save probe off (default) — no save probe lines, fakes still run"
+new_scen s1-off
+run_host save
+checkf "host ran"          grep -q "save: done"                    "$scen_dir/out.txt"
+check "pw fake body ran"   "save_pw_body: called size=0xf8"       "$scen_dir/out.txt"
+check "read fake body ran" "save_rvec_body: called"               "$scen_dir/out.txt"
+if grep -q "probe: save" "$scen_dir/mods/a9loader.log" 2>/dev/null; then
+    echo "   [FAIL] save probe lines present with probe_save unset"
+    FAILED=$((FAILED + 1))
+else
+    echo "   [ ok ] log clean of save probe lines"
+fi
+
+echo "== S2: save probe on (probe_save = true) — 4 hooks + the write evidence"
+new_scen s2-on
+quiet_mod
+printf 'probe_save = true\n' > "$scen_dir/a9loader.toml"
+run_host save
+LOG="$scen_dir/mods/a9loader.log"
+OUT="$scen_dir/out.txt"
+check "probe enabled"         "probe: save hooks on (diagnostic)"    "$LOG"
+check "pw hook installed"     "probe: mmf_paged_write (the byte-level save writer) hook installed rva=0x308fe0 expect=verified" "$LOG"
+check "pwb hook installed"    "probe: mmf_paged_write_bulk (the bulk save writer) hook installed rva=0x308e20 expect=verified" "$LOG"
+check "wblock hook installed" "probe: save_mmf_write_block (the u32-vector block writer — the 0x140115f70 thunk's target) hook installed rva=0x41500 expect=verified" "$LOG"
+check "rvec hook installed"   "probe: mmf_read_u32_vector (READ-side — the 0x140115f80 thunk's target) hook installed rva=0x41820 expect=verified" "$LOG"
+check "car-block write line"  "probe: save write mmf_paged_write ret=0x" "$LOG"
+check "car-block caller+size" "caller=0x300011 size=0xf8 data=a0 a1 a2 a3" "$LOG"
+check "state-block verbatim"  "probe: save verbatim block size=0x124 caller=0x300011 (state block 0x124" "$LOG"
+check "mini-block verbatim"   "probe: save verbatim block size=0xbc0 caller=0x300031 (mini-block 0xbc0" "$LOG"
+check "caller map line"       "probe: save caller#"                  "$LOG"
+check "vector write site"     "site=0x300051 size=0x14 helper=save_mmf_write_block" "$LOG"
+check "read-side call line"   "probe: save read mmf_read_u32_vector ret=0x" "$LOG"
+check "read-side labelled"    "(READ-SIDE)"                          "$LOG"
+checkf "host ran"             grep -q "save: done"                   "$OUT"
+check "fakes still ran (via the trampolines)" "save_pw_body: called size=0xf8" "$OUT"
+check "bulk fake ran"         "save_pwb_body: called size=0xbc0"     "$OUT"
+check "read fake ran"         "save_rvec_body: called"               "$OUT"
+
+echo "== S3: a9ml accepts the probe_save key (no unknown-key warning)"
+OUT3=$("$A9ML" list --game "$scen_dir" 2>&1 || true)
+if echo "$OUT3" | grep -q "config warning:.*probe_save"; then
+    echo "   [FAIL] a9ml warns about probe_save"
+    echo "$OUT3" | sed -n '1,12p'
+    FAILED=$((FAILED + 1))
+else
+    echo "   [ ok ] a9ml accepts probe_save silently (the key is known to a9-mod)"
+fi
+
+# ---- M7-0: the always-on save-id clamp guard ------------------------------
+# No config flag gates it: it installs on EVERY boot (the fake image maps its
+# four anchors unconditionally). The "clamp" host drives both choke points —
+# the head site through an r14 thunk, the car site through the fake paged
+# reader — and a valid id must pass through untouched.
+echo "== C1: the save-id clamp guard (M7-0) — out-of-range ids degrade"
+new_scen c1-clamp
+run_host clamp
+LOG="$scen_dir/mods/a9loader.log"
+OUT="$scen_dir/out.txt"
+check "guard installed (head)"  "save clamp: head rva=0x1b6f0c expect=verified" "$LOG"
+check "guard installed (car)"   "car rva=0x61f8b expect=verified"               "$LOG"
+checkf "host ran"               grep -q "clamp: done"                            "$OUT"
+check "head: out-of-range -> 417" "clamp head: 42->42 0->0 420->420 500->417 421->417 65535->417" "$OUT"
+check "car: out-of-range -> 160"  "clamp car ids: 42->42 9999->160 400->400 0->0 160->160 421->160 65535->160 1->1 0->0 2000->160" "$OUT"
+check "info summary line"         "save clamp: out-of-range save id 500 clamped to 417 at save_group_head" "$LOG"
+checkq "no per-id detail at info" "DBG:  save clamp"                             "$LOG"
+
+echo "== C2: debug level shows the per-id detail"
+new_scen c2-debug
+printf 'log_level = "debug"\n' > "$scen_dir/a9loader.toml"
+run_host clamp
+LOG="$scen_dir/mods/a9loader.log"
+check "debug per-id (head)" "save clamp [save_group_head]: out-of-range save id 500 -> 417" "$LOG"
+check "debug per-id (car)"  "save clamp [save_car_read]: out-of-range save id 9999 -> 160"  "$LOG"
 
 harness_done "M4 PROBE HARNESS"
