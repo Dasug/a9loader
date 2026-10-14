@@ -1,6 +1,6 @@
-//! The M3/M5/M6 manifest sections — `[[pack]]`, `[[csv]]`, `[[asset]]`,
-//! `[[file]]` and `[[loose_asset]]` — with their serde shapes and per-field
-//! findings. The M2 core sections (`[[patch]]`/`[[hook]]`) and the root
+//! The M3/M5/M6 manifest sections — `[[pack]]`, `[[csv]]`, `[[asset]]` and
+//! `[[loose_asset]]` — with their serde shapes and per-field findings. The M2
+//! core sections (`[[patch]]`/`[[hook]]`) and the root
 //! [`Manifest`](super::Manifest) stay in [`super`].
 
 use serde::{Deserialize, Serialize};
@@ -125,16 +125,6 @@ pub struct AssetSection {
     /// no flag. Applies to every file of a folder form.
     #[serde(default)]
     pub override_vanilla: bool,
-}
-
-/// `[[file]]` — a genuinely-new file copied into the game tree at boot.
-#[derive(Deserialize, Serialize, Debug, Clone)]
-#[serde(deny_unknown_fields)]
-pub struct FileSection {
-    /// destination, relative to the game dir (e.g. "data/texture/x.dds")
-    pub dest: String,
-    /// source file, relative to the mod dir
-    pub file: String,
 }
 
 /// `[[loose_asset]]` — a game file the game opens BY PATH (not content inside

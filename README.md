@@ -122,10 +122,6 @@ name = "train_comment.csv"      # is the first column, so independent mods can
 file = "csv/train_comment.patch.csv"   # edit one table and append rows without
 mode = "rows"                   # taking the whole table over
 
-[[file]]                        # genuinely-new files, copied at boot (journaled)
-dest = "data/texture/custom/x.dds"
-file = "files/x.dds"
-
 [[asset]]                       # a NEW i.dat row (M5 W1): the payload is
 name = "_t_mynew_a.x"           # appended to a family-A host pack's decoded
 dir  = "train\\mynew"           # stream and the merged i.dat gets the row
@@ -241,8 +237,8 @@ harness/m3.sh                   # M3 merge scenarios under wine: redirect,
                                 # add/replace merges (byte-exact vs expected
                                 # packs), csv tables, csv ROW patches (two mods
                                 # on one table, byte-exact), row overlaps,
-                                # cache staleness/reuse, [[file]] copies +
-                                # journal, fail-open on broken mods
+                                # cache staleness/reuse, fail-open on
+                                # broken mods
 harness/m4probe.sh              # M4 fetch-probe scenarios (diagnostic hooks)
 harness/m4inj.sh                # M4 inject scenarios: the pack-window splice,
                                 # row extension, pack capture, fail-open, and

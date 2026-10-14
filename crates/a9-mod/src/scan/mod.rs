@@ -40,7 +40,7 @@ pub fn scan(mods_dir: &Path) -> Vec<ScannedMod> {
         let manifest_path = dir.join("mod.toml");
         let manifest = std::fs::read_to_string(&manifest_path)
             .map_err(|e| ModError::Io(format!("mod.toml: {e}")))
-            .and_then(|text| parse_manifest(&text))
+            .and_then(|text| Manifest::parse(&text))
             .and_then(|mut m| {
                 m.validate()?;
                 // expand `folder`-form [[asset]] sections into ordinary
@@ -71,24 +71,6 @@ fn prime_csv_row_keys(m: &mut Manifest, dir: &Path) {
                     c.row_keys = table.patch_keys();
                 }
             }
-        }
-    }
-}
-
-fn parse_manifest(text: &str) -> Result<Manifest, ModError> {
-    match toml::from_str::<Manifest>(text) {
-        Ok(m) => Ok(m),
-        Err(e) => {
-            let msg = e.to_string();
-            // friendly pointer for designed-but-not-yet-supported sections
-            if msg.contains("unknown field `native`") {
-                return Err(ModError::Parse(
-                    "section [native] is designed but lands with M4+ (mods that ship code); \
-                     this loader build does not support it yet"
-                        .into(),
-                ));
-            }
-            Err(ModError::Parse(msg))
         }
     }
 }

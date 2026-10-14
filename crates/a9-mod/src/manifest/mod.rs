@@ -4,9 +4,9 @@
 //! silently ignored — the FORM_DUMMY lesson), and `validate()` enforces
 //! per-handler parameter shapes.
 //!
-//! Sections designed for M3/M4 (`[[pack]]`, `[[csv]]`, `[[file]]`, `[native]`)
-//! are NOT schema fields yet — a manifest carrying them is refused with a
-//! pointer to the milestone that implements them (see [`crate::scan`]).
+//! Sections designed for later milestones (`[native]`) are NOT schema fields
+//! yet — a manifest carrying them is refused with a pointer to the milestone
+//! that implements them (see [`Manifest::parse`]).
 //!
 //! The M3/M5/M6 section structs live in [`sections`]; the per-section checks
 //! behind [`Manifest::validate`] live in [`validate`].
@@ -18,8 +18,7 @@ mod sections;
 mod validate;
 
 pub use sections::{
-    AssetSection, CsvMode, CsvSection, FileSection, LooseAssetSection, PackEntry, PackSection,
-    HOST_AUTO,
+    AssetSection, CsvMode, CsvSection, LooseAssetSection, PackEntry, PackSection, HOST_AUTO,
 };
 
 pub const DEFAULT_PRIORITY: i64 = 50;
@@ -68,11 +67,6 @@ pub struct Manifest {
     /// pack's decoded stream, merged in-memory at the game's load (M5 W1)
     #[serde(default)]
     pub asset: Vec<AssetSection>,
-    /// genuinely-new files copied into the game tree at boot, before the game
-    /// enumerates, journaled in `<mods_dir>/journal.json` (M3). Never
-    /// overwrites an existing file — that is [[pack]]/[[csv]] territory.
-    #[serde(default)]
-    pub file: Vec<FileSection>,
     /// game files the game opens BY PATH (not content inside a pack) — the
     /// loader serves the mod's bytes in place of the file on disk, matched by
     /// a case-insensitive glob over the game's own open path (M6)
@@ -162,6 +156,44 @@ impl Manifest {
     pub fn validate(&self) -> Result<(), ModError> {
         validate::validate(self)
     }
+
+    /// Parse a `mod.toml`. The schema is strict (`deny_unknown_fields`); a
+    /// section the loader has retired or not yet implemented would otherwise
+    /// surface as a bare "unknown field" — [`retired_section_error`] maps it to
+    /// a pointer at the replacement.
+    pub fn parse(text: &str) -> Result<Self, ModError> {
+        match toml::from_str::<Self>(text) {
+            Ok(m) => Ok(m),
+            Err(e) => {
+                let msg = e.to_string();
+                Err(retired_section_error(&msg)
+                    .map(ModError::Parse)
+                    .unwrap_or(ModError::Parse(msg)))
+            }
+        }
+    }
+}
+
+/// The friendlier refusal for a manifest that still declares a section the
+/// loader has retired (`[[file]]`) or not yet implemented (`[native]`).
+/// Returns `None` when the raw toml message needs no mapping.
+fn retired_section_error(msg: &str) -> Option<String> {
+    if msg.contains("unknown field `file`") {
+        return Some(
+            "section [[file]] is retired: the loader no longer writes into the game folder. \
+             Serve pack content with [[asset]] and game files opened by path with \
+             [[loose_asset]] instead"
+                .into(),
+        );
+    }
+    if msg.contains("unknown field `native`") {
+        return Some(
+            "section [native] is designed but lands with M4+ (mods that ship code); \
+             this loader build does not support it yet"
+                .into(),
+        );
+    }
+    None
 }
 
 #[cfg(test)]

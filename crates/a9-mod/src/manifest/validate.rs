@@ -21,7 +21,6 @@ pub(super) fn validate(m: &Manifest) -> Result<(), ModError> {
 
     validate_packs(m)?;
     validate_csvs(m)?;
-    validate_files(m)?;
     validate_loose_assets(m)?;
     validate_assets(m)?;
     Ok(())
@@ -228,37 +227,6 @@ fn validate_csvs(m: &Manifest) -> Result<(), ModError> {
             return Err(ModError::Invalid(format!(
                 "csv {:?} has no `file`",
                 c.name
-            )));
-        }
-    }
-    Ok(())
-}
-
-/// `[[file]]` — boot copies of genuinely-new files: a game-relative dest (no
-/// absolute path, no drive, no `..`), unique dests, and a source file.
-fn validate_files(m: &Manifest) -> Result<(), ModError> {
-    let mut dests = BTreeSet::new();
-    for f in &m.file {
-        let bad = |why: &str| ModError::Invalid(format!("file dest {:?} {why}", f.dest));
-        if f.dest.trim().is_empty() {
-            return Err(ModError::Invalid("[[file]] dest must not be empty".into()));
-        }
-        if f.dest.starts_with('/') || f.dest.starts_with('\\') || f.dest.contains(':') {
-            return Err(bad("must be a relative path inside the game dir"));
-        }
-        if f.dest.split(['/', '\\']).any(|c| c == ".." || c.is_empty() && false) {
-            return Err(bad("must not contain '..'"));
-        }
-        if !dests.insert(f.dest.clone()) {
-            return Err(ModError::Invalid(format!(
-                "two [[file]] sections write dest {:?}",
-                f.dest
-            )));
-        }
-        if f.file.trim().is_empty() {
-            return Err(ModError::Invalid(format!(
-                "file dest {:?} has no source `file`",
-                f.dest
             )));
         }
     }

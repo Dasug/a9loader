@@ -1,16 +1,15 @@
 //! The boot's data-plan collector — the manifest → serving-plan translation.
 //!
 //! [`PlanBuilder`] walks the resolved mods in priority order and folds every
-//! `[[pack]]`/`[[csv]]`/`[[asset]]`/`[[file]]`/`[[loose_asset]]` section into
-//! the overlay plan (or, for family-B `[[pack]]` effects in inject mode, the
-//! injector plan), the `[[file]]` copy list, and the refusal count. It is pure
-//! boot-time planning: it reads payload files and logs; the serving installs
-//! happen later in the engine.
+//! `[[pack]]`/`[[csv]]`/`[[asset]]`/`[[loose_asset]]` section into the overlay
+//! plan (or, for family-B `[[pack]]` effects in inject mode, the injector plan)
+//! and the refusal count. It is pure boot-time planning: it reads payload files
+//! and logs; the serving installs happen later in the engine.
 
 use crate::log;
 use a9_mod::{manifest::Manifest, resolve};
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// The `[[asset]]` host resolution: `host = "auto"` (the folder-form default)
 /// is resolved against the embedded per-build dir index — the boot knows the
@@ -18,10 +17,10 @@ use std::path::{Path, PathBuf};
 /// refused (logged); the caller counts the refusal.
 type AutoIndex = Option<Result<a9_mod::dirindex::DirIndex, a9_mod::ModError>>;
 
-/// The `[[pack]]`/`[[csv]]`/`[[asset]]`/`[[file]]`/`[[loose_asset]]` plan
+/// The `[[pack]]`/`[[csv]]`/`[[asset]]`/`[[loose_asset]]` plan
 /// collector: walks the resolved mods in priority order and fills the overlay
 /// plan (or, for family-B `[[pack]]` effects in inject mode, the injector
-/// plan), the `[[file]]` copy list, and the refusal count.
+/// plan) and the refusal count.
 pub(super) struct PlanBuilder<'a> {
     res: &'a resolve::Resolution,
     build_id: &'a str,
@@ -29,7 +28,6 @@ pub(super) struct PlanBuilder<'a> {
     logger: &'a log::Logger,
     plan: crate::overlay::Plan,
     inject_plan: crate::injector::InjectorPlan,
-    file_copies: Vec<(String, a9_mod::manifest::FileSection, PathBuf)>,
     refused: usize,
 }
 
@@ -55,18 +53,16 @@ impl<'a> PlanBuilder<'a> {
                 loose: Vec::new(),
             },
             inject_plan: crate::injector::InjectorPlan::default(),
-            file_copies: Vec::new(),
             refused: 0,
         }
     }
 
     /// Collect one mod's data effects, in the documented section order:
-    /// `[[pack]]`, `[[csv]]`, `[[asset]]`, `[[file]]`, `[[loose_asset]]`.
+    /// `[[pack]]`, `[[csv]]`, `[[asset]]`, `[[loose_asset]]`.
     pub(super) fn add_mod(&mut self, i: usize, m: &Manifest, dir: &Path) {
         self.packs(i, m, dir);
         self.csvs(i, m, dir);
         self.assets(i, m, dir);
-        self.files(i, m, dir);
         self.loose(i, m, dir);
     }
 
@@ -75,10 +71,9 @@ impl<'a> PlanBuilder<'a> {
     ) -> (
         crate::overlay::Plan,
         crate::injector::InjectorPlan,
-        Vec<(String, a9_mod::manifest::FileSection, PathBuf)>,
         usize,
     ) {
-        (self.plan, self.inject_plan, self.file_copies, self.refused)
+        (self.plan, self.inject_plan, self.refused)
     }
 
     /// `[[pack]]` — family-B image packs only. In inject mode the ops go to the
@@ -331,21 +326,6 @@ impl<'a> PlanBuilder<'a> {
                 ));
                 Err(())
             }
-        }
-    }
-
-    /// `[[file]]` — genuinely-new files, copied before the game enumerates
-    /// anything (idempotent, never overwrites).
-    fn files(&mut self, i: usize, m: &Manifest, dir: &Path) {
-        for f in &m.file {
-            let key = format!("file:{}", f.dest);
-            if self.res.effect_refused(i, &key) {
-                self.logger
-                    .err(&format!("mod '{}': {key} refused (overlap loser)", m.id));
-                self.refused += 1;
-                continue;
-            }
-            self.file_copies.push((m.id.clone(), f.clone(), dir.to_path_buf()));
         }
     }
 

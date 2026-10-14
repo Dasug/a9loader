@@ -34,8 +34,8 @@ impl LogLevel {
 ///   pack open to a merged cache file (decode → edit → re-encode, budgeted).
 /// - `inject`: the M4 window-scoped injector — loader-owned memory spliced
 ///   into the family-B loader's worker-row pool at its runner call site
-///   (notes/24 R5).csvp `[[csv]]` tables keep the merge overlay in both
-///   modes; `[[file]]` copies are unaffected.
+///   (notes/24 R5). csvp `[[csv]]` tables keep the merge overlay in both
+///   modes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum PackServing {
     Merge,

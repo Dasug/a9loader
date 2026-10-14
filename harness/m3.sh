@@ -257,30 +257,8 @@ check "rebuild after mod set change" "2 entries merged (2 added" "$scen_dir/mods
     "a.dds=64:64:$RUN/a.bin" "b.dds=128:128:$RUN/b.bin" "n1.dds=16:16:$RUN/n1.bin" "n2.dds=24:24:$RUN/n2.bin"
 checkf "cache == both-mods result" cmp -s "$scen_dir/mods/cache/mtfake.bin" "$scen_dir/expected.bin"
 
-echo "== S7: [[file]] boot copy + journal"
-new_scen s7-file
-mkdir -p "$scen_dir/data"   # the game tree the file lands in
-mod filesmod \
-    'id = "filesmod"' \
-    'name = "Files"' \
-    'version = "1.0.0"' \
-    'author = "test"' \
-    '' \
-    '[[file]]' \
-    'dest = "data/extra/loose.dds"' \
-    'file = "files/loose.dds"'
-pay filesmod "files/loose.dds" n1.bin
-run_host overlaypack
-check "copy journaled"  "data/extra/loose.dds copied (journaled)" "$scen_dir/mods/a9loader.log"
-checkf "file on disk"   test -f                                   "$scen_dir/data/extra/loose.dds"
-checkf "journal exists" test -f                                   "$scen_dir/mods/journal.json"
-check "journal line"    '"mod":"filesmod"'                        "$scen_dir/mods/journal.json"
-# idempotent second boot
-run_host overlaypack
-check "idempotent re-run" "already in place (idempotent)" "$scen_dir/mods/a9loader.log"
-
-echo "== S8: missing payload — fail open (original served, loud log)"
-new_scen s8-missing
+echo "== S7: missing payload — fail open (original served, loud log)"
+new_scen s7-missing
 mod brokenmod \
     'id = "brokenmod"' \
     'name = "Broken"' \
@@ -299,8 +277,8 @@ run_host overlaypack
 check "original served"   "path=data.mtfake.bin"             "$scen_dir/out.txt"
 check "loud failure"       "serving the original this boot"      "$scen_dir/mods/a9loader.log"
 
-echo "== S9: [[csv]] row patches — two mods on one table (replace a cell + add a row)"
-new_scen s9-csv-rows
+echo "== S8: [[csv]] row patches — two mods on one table (replace a cell + add a row)"
+new_scen s8-csv-rows
 mk_csv "$RUN/base_t1.csv" "KEY|VAL" "R1|a" "R2|b" "R3|c"
 mk_csv "$RUN/a_patch.csv" "R2|B2"
 mk_csv "$RUN/b_patch.csv" "R4|d"
@@ -340,8 +318,8 @@ check "one table, two row patches" \
 "$A9ML" mkpack --container csvs --out "$scen_dir/expected.bin" "t1.csv=$RUN/exp_t1.csv"
 checkf "cache == expected row-merged csvp" cmp -s "$scen_dir/mods/cache/csvp.bin" "$scen_dir/expected.bin"
 
-echo "== S10: [[csv]] row overlap — the same row key, the earlier mod keeps it"
-new_scen s10-csv-row-overlap
+echo "== S9: [[csv]] row overlap — the same row key, the earlier mod keeps it"
+new_scen s9-csv-row-overlap
 mk_csv "$RUN/base_t1o.csv" "KEY|VAL" "R1|a" "R2|b" "R3|c"
 mk_csv "$RUN/o1.csv" "R2|from-first"
 mk_csv "$RUN/o2.csv" "R2|from-second"
@@ -377,8 +355,8 @@ check "loser row refused"     "1 row patch(es) refused (overlap loser)" "$scen_d
 "$A9ML" mkpack --container csvs --out "$scen_dir/expected.bin" "t1.csv=$RUN/exp_o.csv"
 checkf "cache == first mod's row result" cmp -s "$scen_dir/mods/cache/csvp.bin" "$scen_dir/expected.bin"
 
-echo "== S11: [[csv]] row patch from a plain UTF-8 file (M5 W3 authoring)"
-new_scen s11-csv-utf8
+echo "== S10: [[csv]] row patch from a plain UTF-8 file (M5 W3 authoring)"
+new_scen s10-csv-utf8
 mk_csv "$RUN/base_u1.csv" "KEY|VAL" "R1|a" "R2|b"
 # a normal editor's UTF-8 patch file (no BOM); the loader re-encodes the row
 printf '"R2","B2"\r\n"R3","c"\r\n' > "$RUN/u_patch.csv"

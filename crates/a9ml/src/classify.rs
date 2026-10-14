@@ -228,7 +228,7 @@ impl Class {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Row {
     pub mod_id: String,
-    /// how the mod carries the target: `pack:<name>` | `csvp` | `file`
+    /// how the mod carries the target: `pack:<name>` | `csvp` | `asset:<host>`
     pub mechanism: String,
     pub target: String,
     pub class: Class,
@@ -475,7 +475,6 @@ pub fn classify_manifest(m: &Manifest) -> Vec<Row> {
     rows.extend(pack_rows(m));
     rows.extend(csv_rows(m));
     rows.extend(asset_rows(m));
-    rows.extend(file_rows(m));
     rows.sort_by_key(|r| r.risk());
     rows
 }
@@ -562,24 +561,6 @@ fn asset_row(m: &Manifest, a: &AssetSection) -> Row {
     }
 }
 
-/// `[[file]]` rows — classified by the destination's basename, no pack context.
-fn file_rows(m: &Manifest) -> Vec<Row> {
-    m.file
-        .iter()
-        .map(|f| {
-            let base = f.dest.rsplit(['/', '\\']).next().unwrap_or(&f.dest);
-            let v = classify_entry(None, base);
-            Row {
-                mod_id: m.id.clone(),
-                mechanism: "file".into(),
-                target: f.dest.clone(),
-                class: v.class,
-                reason: format!("[[file]] new loose copy — {}", v.reason),
-            }
-        })
-        .collect()
-}
-
 // ------------------------------------------------------------ CLI command
 
 /// `a9ml classify [<mod-dir-or-mods-dir>] [--entry NAME [--pack P]]`.
@@ -632,7 +613,7 @@ fn print_mod(m: &Manifest, label: &str, overall: &mut Summary) {
     println!("   summary: {}", s.compact());
     if rows.is_empty() {
         if m.loose_asset.is_empty() {
-            println!("   verdict: no [[pack]]/[[csv]]/[[asset]]/[[file]] data effects");
+            println!("   verdict: no [[pack]]/[[csv]]/[[asset]] data effects");
         } else {
             println!(
                 "   verdict: no window-model data effects; {} [[loose_asset]] path \
@@ -668,7 +649,7 @@ fn load_mods(path: &Path) -> Result<Vec<(String, Manifest)>> {
     if path.join("mod.toml").is_file() {
         let text = fs::read_to_string(path.join("mod.toml"))
             .with_context(|| format!("reading {}", path.join("mod.toml").display()))?;
-        let mut m: Manifest = toml::from_str(&text).context("parsing mod.toml")?;
+        let mut m: Manifest = Manifest::parse(&text).map_err(|e| anyhow::anyhow!("{e}"))?;
         m.validate().map_err(|e| anyhow::anyhow!("{e}"))?;
         a9_mod::scan::expand_asset_folders(&mut m, path).map_err(|e| anyhow::anyhow!("{e}"))?;
         m.validate().map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -833,7 +814,7 @@ mod tests {
             Row { mod_id: "m".into(), mechanism: "pack:sdp".into(), target: "c.vs".into(), class: Class::Early(Early::Sdp), reason: String::new() },
             Row { mod_id: "m".into(), mechanism: "asset:vp".into(), target: "_t_new_a.x".into(), class: Class::Early(Early::Vp), reason: String::new() },
             Row { mod_id: "m".into(), mechanism: "csvp".into(), target: "t.csv".into(), class: Class::Pre, reason: String::new() },
-            Row { mod_id: "m".into(), mechanism: "file".into(), target: "data/x.bin".into(), class: Class::Unknown, reason: String::new() },
+            Row { mod_id: "m".into(), mechanism: "other".into(), target: "mystery.bin".into(), class: Class::Unknown, reason: String::new() },
         ];
         let s = Summary::of(&rows);
         assert_eq!(s.early, 5);
@@ -849,21 +830,22 @@ mod tests {
     }
 
     #[test]
-    fn manifest_rows_cover_all_three_sections() {
+    fn manifest_rows_cover_the_sections_worst_first() {
         let m: Manifest = toml::from_str(
             "id=\"demo\"\nname=\"D\"\nversion=\"1.0.0\"\nauthor=\"t\"\n\
              [[pack]]\npack=\"me3\"\n\
              [[pack.entry]]\nname=\"_d_a.dds\"\nwidth=1\nheight=1\nfile=\"e/a.dds\"\n\
-             [[csv]]\nname=\"train_comment.csv\"\nfile=\"csv/t.csv\"\n\
-             [[file]]\ndest=\"data/texture/newthing.dds\"\nfile=\"files/n.dds\"\n",
+             [[pack.entry]]\nname=\"mystery.bin\"\nwidth=1\nheight=1\nfile=\"e/m.bin\"\n\
+             [[csv]]\nname=\"train_comment.csv\"\nfile=\"csv/t.csv\"\n",
         )
         .unwrap();
         m.validate().unwrap();
         let rows = classify_manifest(&m);
         assert_eq!(rows.len(), 3);
-        // worst-first: unknown ([[file]]), then early (pack), then pre (csv)
+        // worst-first: unknown (a non-texture pack entry), then early (the
+        // .dds), then pre (the csv)
         assert_eq!(rows[0].class, Class::Unknown);
-        assert_eq!(rows[0].mechanism, "file");
+        assert_eq!(rows[0].mechanism, "pack:me3");
         assert_eq!(rows[1].class, Class::Early(Early::Famb));
         assert_eq!(rows[1].mechanism, "pack:me3");
         assert_eq!(rows[2].class, Class::Pre);
