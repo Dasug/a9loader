@@ -168,6 +168,7 @@ pub unsafe fn boot(hinst: sys::HMODULE) {
         &logger,
         &trains,
         cfg.car_build,
+        cfg.probe_consist,
     );
     }
 
@@ -998,6 +999,7 @@ fn install_train_injection(
     logger: &log::Logger,
     trains: &[a9_mod::train::CompiledTrain],
     car_build: bool,
+    probe_consist: bool,
 ) {
     let rows: Vec<crate::rowinject::TrainRow> = trains
         .iter()
@@ -1017,6 +1019,7 @@ fn install_train_injection(
             running_cost: t.running_cost,
             price: t.price,
             form_cols: t.rows.form.clone(),
+            pattern_rows: t.rows.pattern.clone(),
         })
         .collect();
     match unsafe {
@@ -1026,6 +1029,7 @@ fn install_train_injection(
             log::Logger::new(&mods_dir.join("a9loader.log")),
             &rows,
             car_build,
+            probe_consist,
         )
     } {
         Ok(line) => logger.line(&line),

@@ -1145,6 +1145,11 @@ __attribute__((used, noinline)) void **rows_ctor_body(void **dest, const wchar_t
 static void rows_make_template(void)
 {
     unsigned char *r = g_rows_base + ROWS_TEMPLATE_ID * ROWS_ROW_STRIDE;
+    /* The live donor row's per-car block is ZERO for the consist lengths it does not
+     * describe (AR4's own 1..3-car records are zero; only 4..10 carry data), and the
+     * loader deliberately leaves those lengths alone so the injected row inherits
+     * them. The fake row must therefore start zeroed, not with the canary fill. */
+    memset(r + 0x39, 0, 0x64);
     static wchar_t tname[] = L"FORM_TEMPLATE";
     static wchar_t jp[] = L"TEMPLATE_JP";
     static wchar_t en[] = L"TEMPLATE_EN";
@@ -2283,10 +2288,23 @@ static int mode_train(const char *scen, int retry)
      * 2026-10-15): the validity u32 is exactly 1 on every shipped row, and unused
      * model slots carry the pipeline's empty marker (7), never a valid index. */
     printf("train: injected validity u32 = %u\n", *(unsigned int *)row);
-    printf("train: leftover model slots = %u %u %u %u %u\n",
-           *(unsigned short *)(row + 0x2e), *(unsigned short *)(row + 0x30),
-           *(unsigned short *)(row + 0x32), *(unsigned short *)(row + 0x34),
-           *(unsigned short *)(row + 0x36));
+    /* +0x2c is the 0x18-stride consist array: per entry a u16 model slot and a
+     * 1-based sub-index byte at +0x02 (the donor clone leaves it 0, and sub = 0
+     * makes train_row_car_wiring walk aModelIdx[-1]). */
+    printf("train: consist entries =");
+    for (unsigned k = 0; k < 6; k++) {
+        printf(" %u/%u", *(unsigned short *)(row + 0x2c + k * 0x18),
+               (unsigned)row[0x2e + k * 0x18]);
+    }
+    printf("\n");
+    /* the per-consist-length records: the leading byte is the car's sub-index, and
+     * the vanilla convention (AR4: 01 02 02 ff) writes ff for "the default type" —
+     * a 0 there makes the wiring walk aModelIdx[sub - 1] with sub = 0. */
+    for (unsigned rec = 0; rec < 10; rec++) {
+        const unsigned char *q = row + 0x39 + rec * 10;
+        printf("train: car build block record %u = %02x %02x %02x %02x\n",
+               rec + 1, q[0], q[1], q[2], q[3]);
+    }
     printf("train: injected names jp=%s en=%s form=%s\n",
            whex(*(wchar_t **)(row + ROWS_NAME_JP)),
            whex(*(wchar_t **)(row + ROWS_NAME_EN)),

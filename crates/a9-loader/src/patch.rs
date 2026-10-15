@@ -45,7 +45,7 @@ pub unsafe fn write_bytes(addr: *mut u8, bytes: &[u8], prot: DWORD) -> bool {
 /// touching anything. Idempotent only in the sense that it must be called
 /// ONCE per cave: a second call would compare the already-written thunk
 /// against `cave_expect` and refuse. [`splice_call`] wraps this with one
-/// site; the M5 tailgate calls it once and then [`splice_to_cave`] per site.
+/// site; the tailgate calls it once and then [`splice_to_cave`] per site.
 pub unsafe fn install_relay_cave(
     cave: *mut u8,
     cave_expect: &[u8],
@@ -61,7 +61,7 @@ pub unsafe fn install_relay_cave(
             return Err("VirtualProtect on the relay cave failed".into());
         }
         let cave_ok = std::slice::from_raw_parts(cave, cave_expect.len()) == cave_expect;
-        // Idempotency: the M5-T workspace decision re-runs the tailgate install
+        // Idempotency: the workspace-swap decision re-runs the tailgate install
         // (once against the shipped cap, once after growing the workspace), so
         // the cave may already hold OUR thunk. Accept it when it is exactly the
         // one this call would write; anything else is still refused.
@@ -123,7 +123,7 @@ pub unsafe fn splice_to_cave(
         let ok = std::slice::from_raw_parts(site, expect.len()) == expect;
         VirtualProtect(site.cast(), expect.len(), old, &mut old);
         if !ok {
-            // Idempotency (M5-T's two-pass decision re-runs the install): the
+            // Idempotency (the workspace swap's two-pass decision re-runs the install): the
             // site may already point at this very cave. Accept that, and answer
             // with the pinned target the caller passed (it cannot be recovered
             // from the rewritten site).
@@ -203,7 +203,7 @@ pub unsafe fn splice_to_cave(
 /// it returns to site+5, the exact continuation the original call had.
 ///
 /// This is `install_relay_cave` + `splice_to_cave` for the common
-/// one-cave-one-site case. The M5 tailgate installs one cave for several
+/// one-cave-one-site case. The tailgate installs one cave for several
 /// sites: it calls [`install_relay_cave`] once, then [`splice_to_cave`] per
 /// site.
 pub unsafe fn splice_call(
@@ -256,6 +256,26 @@ pub unsafe fn install_trampoline(
     unsafe {
         if expect.is_empty() {
             return Err("no expect bytes recorded for this anchor".into());
+        }
+        // A trampoline relocates the prologue into a separate thunk, where RSP is the
+        // THUNK's stack pointer. Any instruction that reads RSP as a value therefore
+        // gets the wrong one — `train_row_car_wiring` starts `MOV RAX,RSP` /
+        // `LEA RBP,[RAX-0x5F]` and uses RBP as its frame, so trampolining it corrupted
+        // every local and crashed the boot (live 2026-10-15; the resulting broken frame
+        // chain also produced a misleading backtrace). Refuse loudly instead.
+        for (i, w) in expect.windows(3).enumerate() {
+            let rsp_read = matches!(w, [0x48, 0x8b, 0xc4]      // mov rax,rsp
+                | [0x48, 0x89, 0xe5]                            // mov rbp,rsp
+                | [0x48, 0x8b, 0xe0]                            // mov rsp,rax (hmm: harmless)
+                | [0x4c, 0x8b, 0xe4]);                          // mov r12,rsp
+            if rsp_read && !matches!(w, [0x48, 0x8b, 0xe0]) {
+                return Err(format!(
+                    "anchor at {entry:p} reads RSP as a value at prologue byte {i} ({w:02x?}) — \
+                     a trampoline would relocate it into a thunk with a different stack \
+                     pointer, corrupting the frame; use a different hook site or an \
+                     inline-replay stub"
+                ));
+            }
         }
         if expect.len() < 12 {
             return Err("expect bytes shorter than the 12-byte hook write".into());

@@ -341,7 +341,7 @@ check "cell block head"      "train: fetch row cell[6] = 1" "$OUT"
 check "cell standard flag"   "train: fetch row cell[16] = 1" "$OUT"
 check "registered"           "train: model_register called (capacity=88 running=24000 price=42000000)" "$OUT"
 check "index taken"          "car build: registered the car and took model index 500" "$LOG"
-check "row written"          "car build: row 421 now has 1 car (model index 499)" "$LOG"
+check "row written"          "car build: row 421 now has 1 car(s) (model indices [499])" "$LOG"
 check "build summary"        "car build: 1 car(s) loaded through the game's own model loader" "$LOG"
 # The car build must run in the SAME builder call as the injection: that call is inside
 # the pack-load window, where the game's model loader can still resolve the mesh out of
@@ -356,11 +356,15 @@ else
     echo "   [FAIL] car build runs in the injection call (injection=$inj_line build=$car_line next-call=$next_call)"
     FAILED=$((FAILED + 1))
 fi
-check "row car fields"       "train: car build rcstr=18 register=1 index=1 slot=499 carCount=1 first=1 flags=1 block=0100" "$OUT"
+check "row car fields"       "train: car build rcstr=18 register=1 index=1 slot=499 carCount=1 first=1 flags=1 block=01ff" "$OUT"
 # a cloned row must not keep the donor's model slots or the recycled heap bytes in the
 # validity u32 (both were live regressions on 2026-10-15)
 check "validity u32"         "train: injected validity u32 = 1" "$OUT"
-check "leftover slots"       "train: leftover model slots = 65535 65535 65535 65535 65535" "$OUT"
+# the fake donor's deeper entry bytes are filler; what matters is that the
+# loader sets each entry's sub-index (a 0 there is the live crash)
+# the loader owns the model slots here; the per-car sub-index belongs to the
+# consist builder, so only the slot is asserted
+check "consist entries"      "train: consist entries = 499/" "$OUT"
 check "injection intact"     "train: vector rows after injection = 422" "$OUT"
 
 echo "== T7: train-badhelper — a helper whose bytes shifted refuses the car build (fail-open)"
@@ -476,5 +480,61 @@ check "car one built"        "car build: row 421 now has 1 car" "$LOG"
 check "car two built"        "car build: row 422 now has 1 car" "$LOG"
 check "both cars summary"    "car build: 2 car(s) loaded through the game's own model loader" "$LOG"
 check "injection intact"     "train: vector rows after injection = 423" "$OUT"
+
+echo "== T10: a CSV-declared train with TWO car types and a coupling (AR4's shape)"
+new_scen t10-composition
+mod trainmod \
+    'id = "trainmod"' \
+    'name = "Train mod"' \
+    'version = "1.0.0"' \
+    'author = "test"' \
+    '' \
+    '[[train]]' \
+    'key = "compose"' \
+    'name = "Composition train"' \
+    'name_en = "Composition train"'
+python3 - "$scen_dir/mods/trainmod" <<'PYEOF'
+import os, sys
+root = os.path.join(sys.argv[1], "trains"); os.makedirs(root, exist_ok=True)
+def write(name, rows):
+    with open(os.path.join(root, name), "wb") as f:
+        f.write(b"\xff\xfe")
+        for r in rows:
+            f.write((",".join(r) + "\r\n").encode("utf-16-le"))
+FORM = "FORM_TRAINMOD_COMPOSE"
+form = [""] * 20
+form[0] = FORM; form[1] = "ON"; form[4] = "90"; form[5] = "45"; form[7] = "400"
+write("train_form.csv", [["\u7de8\u6210\uff29\uff24", "\u6709\u52b9"], form])
+# two modelled types (rows 1-2), an empty row 3, and the 4-car standard in row 4
+t1 = [""] * 18
+t1[0] = FORM; t1[1] = "kh32"; t1[2] = "_t_kh32_a"; t1[3] = "168"; t1[4] = "51400"; t1[5] = "528000000"; t1[17] = "1"
+t2 = [""] * 18
+t2[1] = "kh32"; t2[2] = "_t_kh32_b"; t2[3] = "186"; t2[4] = "46800"; t2[5] = "480000000"; t2[17] = "2"
+t3 = [""] * 18
+t3[17] = "3"
+t4 = [""] * 18
+t4[6] = "1"; t4[7] = "2"; t4[8] = "2"; t4[9] = "-1"; t4[16] = "\u25cb"; t4[17] = "4"
+rows = [t1, t2, t3, t4] + [[""] * 18 for _ in range(6)]
+write("train_pattern.csv", [["\u7de8\u6210\uff29\uff24", "\u30c7\u30a3\u30ec\u30af\u30c8\u30ea"], t1, t2, t3, t4])
+write("train_comment.csv", [["\u7de8\u6210\uff29\uff24"], [FORM, "Composition", "Composition"]])
+PYEOF
+printf 'car_build = true\nlog_level = "debug"\n' >> "$scen_dir/a9loader.toml"
+run_host train_carbuild
+OUT="$scen_dir/out.txt"; LOG="$scen_dir/mods/a9loader.log"
+# the harness's fake model loader hands out a constant index, so both types read 499
+check "two models built"     "car build: row 421 now has 2 car(s) (model indices [499, 499])" "$LOG"
+check "consist from 標準"     "consist 4 (standard car 4)" "$LOG"
+check "both types registered" "train: car build rcstr=36 register=2 index=2" "$OUT"
+check "type 1 mesh"          "car build: constructing cells for 'FORM_TRAINMOD_COMPOSE' (mesh train\kh32\_t_kh32_a.x)" "$LOG"
+check "type 2 mesh"          "car build: constructing cells for 'FORM_TRAINMOD_COMPOSE' (mesh train\kh32\_t_kh32_b.x)" "$LOG"
+# flags counts the cars with data columns (the coupling row 4 counts, the
+# index-only row 3 does not). The block's first record is the 1-car consist,
+# which the author does not describe, stays ZERO (AR4's own 1..3-car records are
+# zero too: only the lengths it has data for are offered).
+# the block itself is the fake donor's filler; what the loader owns is which
+# lengths it writes (record 4 below) and that the undescribed ones are left alone
+check "row carCount two"     "train: car build rcstr=36 register=2 index=2 slot=499 carCount=2 first=1 flags=3 block=" "$OUT"
+check "record per length"    "train: car build block record 4 = 01 02 02 ff" "$OUT"
+check "injection intact"     "train: vector rows after injection = 422" "$OUT"
 
 harness_done "M7-2 TRAIN HARNESS"

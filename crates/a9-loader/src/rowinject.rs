@@ -63,6 +63,7 @@
 use crate::{log, patch, sys};
 use a9_mod::builds::BuildEntry;
 use core::ffi::c_void;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 /// `std::vector<A9_SpecRow_140>::resize(421)` — the boot-time re-pin.
@@ -221,6 +222,343 @@ unsafe fn ensure(install_hook: bool, logger: &log::Logger) -> Result<(), String>
             }
         }
         Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// DIAGNOSTIC ONLY — the consist wiring probe. Off unless `probe_consist = true`.
+//
+// `train_row_car_wiring(object, param_2)` walks the train object's per-car records
+// and, per car, does `spec_row.aModelIdx[sub - 1]` with `sub` read from the object
+// — a 0 there is the live crash when a consist length is selected. This hook logs
+// the object's identity and those reads so the source of `sub` is measured instead
+// of inferred.
+// ---------------------------------------------------------------------------
+static WIRING_CALLS: AtomicUsize = AtomicUsize::new(0);
+static WIRING_ARGS: [AtomicUsize; 8] = [
+    AtomicUsize::new(0),
+    AtomicUsize::new(0),
+    AtomicUsize::new(0),
+    AtomicUsize::new(0),
+    AtomicUsize::new(0),
+    AtomicUsize::new(0),
+    AtomicUsize::new(0),
+    AtomicUsize::new(0),
+];
+static WIRING_TRAMP: Mutex<Option<patch::Trampoline>> = Mutex::new(None);
+static WIRING_ORIG: AtomicUsize = AtomicUsize::new(0);
+static WIRING_LOGGER: OnceLock<log::Logger> = OnceLock::new();
+
+
+// ---------------------------------------------------------------------------
+// DIAGNOSTIC ONLY: the INLINE-REPLAY hook for `train_row_car_wiring`.
+//
+// Its prologue derives its frame pointer from RSP (`mov rax,rsp` /
+// `lea rbp,[rax-0x5f]`), so a trampoline cannot relocate it — the copied bytes would
+// run on the thunk's stack and compute a garbage RBP (that was the crash). Instead
+// this stub is entered by a JMP (so RSP is exactly what the caller left), REPLAYS
+// the prologue instructions itself, records, and jumps into the body.
+// ---------------------------------------------------------------------------
+core::arch::global_asm!(
+    r#"
+    .globl a9_wiring_replay_stub
+    .seh_proc a9_wiring_replay_stub
+a9_wiring_replay_stub:
+    mov  rax, rsp
+    .seh_pushreg rbp
+    push rbp
+    .seh_pushreg rsi
+    push rsi
+    .seh_pushreg rdi
+    push rdi
+    .seh_pushreg r12
+    push r12
+    .seh_pushreg r13
+    push r13
+    .seh_pushreg r14
+    push r14
+    .seh_pushreg r15
+    push r15
+    /* no .seh_setframe: rbp's frame offset (0x27) is not a multiple of 16, which the
+       directive requires. The unwinder does not need it — rbp is restored by the
+       pushes it already knows about. */
+    lea  rbp, [rax - 0x5f]
+    .seh_stackalloc 0xb0
+    sub  rsp, 0xb0
+    .seh_endprologue
+    /* EXPERIMENT: recording disabled — pure replay */
+    mov  rax, [rip + A9_WIRING_BODY]
+    jmp  rax
+    .seh_endproc
+"#
+);
+
+unsafe extern "C" {
+    fn a9_wiring_replay_stub();
+}
+
+/// Where the replay stub jumps to continue (entry + prologue length).
+#[unsafe(no_mangle)]
+pub static mut A9_WIRING_BODY: usize = 0;
+
+/// Install the inline-replay hook: write `jmp [rip+0]; imm64` over the prologue
+/// (expect-verified, padded with NOPs) and point the stub at the body.
+pub unsafe fn install_inline_replay(
+    base: usize,
+    anchor: &a9_mod::builds::Anchor,
+    logger: &log::Logger,
+) -> Result<(), String> {
+    unsafe {
+        let entry = (base + anchor.rva as usize) as *mut u8;
+        let expect = anchor.expect_bytes().unwrap_or_default();
+        if expect.len() < 12 {
+            return Err("prologue too short to hook".into());
+        }
+        // verify first, like every other write
+        let cur = std::slice::from_raw_parts(entry, expect.len());
+        if cur != expect.as_slice() {
+            return Err(format!(
+                "expect mismatch at {entry:p}: refusing to write the replay hook"
+            ));
+        }
+        let mut old = 0u32;
+        if sys::VirtualProtect(
+            entry.cast(),
+            expect.len(),
+            sys::PAGE_EXECUTE_READWRITE,
+            &mut old,
+        ) == 0
+        {
+            return Err("VirtualProtect failed for the replay hook".into());
+        }
+        // jmp [rip+0] ; imm64  = FF 25 00 00 00 00 <8-byte target>, then NOP padding
+        let target = a9_wiring_replay_stub as usize;
+        let mut patch = vec![0xffu8, 0x25, 0x00, 0x00, 0x00, 0x00];
+        patch.extend_from_slice(&(target as u64).to_le_bytes());
+        while patch.len() < expect.len() {
+            patch.push(0x90);
+        }
+        std::ptr::copy_nonoverlapping(patch.as_ptr(), entry, expect.len());
+        let mut old2 = 0u32;
+        let _ = sys::VirtualProtect(entry.cast(), expect.len(), old, &mut old2);
+        unsafe { A9_WIRING_BODY = entry as usize + expect.len(); }
+        logger.line(&format!(
+            "consist probe: train_row_car_wiring hooked by INLINE REPLAY rva={:#x} \
+             (prologue {} bytes replayed in place, body at {:#x})",
+            anchor.rva,
+            expect.len(),
+            core::ptr::addr_of!(A9_WIRING_BODY) as usize
+        ));
+        Ok(())
+    }
+}
+
+/// Records taken by the wiring hook. The hook itself must be lock-free AND
+/// allocation-free: it runs inside game calls the loader makes, and when it
+/// panicked once the Rust panic path's backtrace symbolizer is what faulted (Proton
+/// log, 2026-10-15, fault rva 0x1a216a = gimli/addr2line). So the hook only packs
+/// numbers into atomics and the car build — a safe context — prints them.
+static WIRING_RECS: [AtomicUsize; 8] = [
+    AtomicUsize::new(0),
+    AtomicUsize::new(0),
+    AtomicUsize::new(0),
+    AtomicUsize::new(0),
+    AtomicUsize::new(0),
+    AtomicUsize::new(0),
+    AtomicUsize::new(0),
+    AtomicUsize::new(0),
+];
+
+// The hook itself is a TAIL-CALLING stub in assembly: it records the arguments
+// through a transient helper call and then `jmp`s to the original, so at the moment
+// the original runs no frame of ours exists on the stack. That is required because
+// `train_row_car_wiring` THROWS as a normal path — with a Rust frame in between the
+// unwinder cannot traverse it and the exception goes unhandled (Proton log,
+// 2026-10-15).
+core::arch::global_asm!(
+    r#"
+    .globl a9_consist_probe_stub
+a9_consist_probe_stub:
+    sub  rsp, 0x38
+    mov  [rsp+0x20], rcx
+    mov  [rsp+0x28], rdx
+    mov  rcx, [rsp+0x20]
+    mov  rdx, [rsp+0x28]
+    call a9_consist_probe_record
+    mov  rcx, [rsp+0x20]
+    mov  rdx, [rsp+0x28]
+    add  rsp, 0x38
+    mov  rax, [rip + A9_CONSIST_ORIG]
+    jmp  rax
+"#
+);
+
+unsafe extern "C" {
+    /// the assembly stub above, installed as the hook
+    fn a9_consist_probe_stub();
+}
+
+/// Where the stub tail-calls to (the trampoline thunk = the original).
+#[unsafe(no_mangle)]
+pub static mut A9_CONSIST_ORIG: usize = 0;
+
+/// Records one call. Called from the stub with a transient frame; it must not
+/// allocate, format or lock (it runs inside game calls the loader makes).
+#[unsafe(no_mangle)]
+pub extern "C" fn a9_consist_probe_record(a1: usize, a2: usize) {
+    // NOTHING but two atomic stores: the hook runs inside game code, so it must not
+    // read memory, allocate, format or lock. The dump (a safe context) interprets.
+    let n = WIRING_CALLS.fetch_add(1, Ordering::SeqCst);
+    if n < 6 {
+        if let Some(r) = WIRING_RECS.get(n) {
+            r.store(a1, Ordering::SeqCst);
+        }
+        if let Some(r) = WIRING_ARGS.get(n) {
+            r.store(a2, Ordering::SeqCst);
+        }
+    }
+}
+
+/// Print what the wiring hook recorded (called from the car build, where logging is
+/// safe). DIAGNOSTIC ONLY.
+/// A panic message captured without allocation or backtrace, so it survives even
+/// when the default panic path's symbolizer is what crashes.
+static PANIC_MSG: Mutex<Option<String>> = Mutex::new(None);
+
+unsafe extern "system" {
+    fn OutputDebugStringA(lpOutputString: *const u8);
+}
+
+fn capture_panic(info: &std::panic::PanicHookInfo<'_>) {
+    {
+        static mut BUF: [u8; 512] = [0; 512];
+        unsafe {
+            let buf = &mut *core::ptr::addr_of_mut!(BUF);
+            let prefix = b"a9loader PANIC: <no payload>\0";
+            let mut n = 0usize;
+            while n < prefix.len() && n + 1 < buf.len() {
+                buf[n] = prefix[n];
+                n += 1;
+            }
+            buf[n] = 0;
+            OutputDebugStringA(buf.as_ptr());
+        }
+    }
+    let text = if let Some(t) = info.payload().downcast_ref::<&str>() {
+        (*t).to_string()
+    } else if let Some(t) = info.payload().downcast_ref::<String>() {
+        t.clone()
+    } else {
+        "<non-string panic payload>".to_string()
+    };
+    if let Ok(mut slot) = PANIC_MSG.try_lock() {
+        *slot = Some(match info.location() {
+            Some(l) => format!("{text} (at {l})"),
+            None => text,
+        });
+    }
+}
+
+/// Replace the default panic hook (whose backtrace symbolizer is what dies under
+/// Wine) so a loader panic is at least named. DIAGNOSTIC ONLY.
+pub fn install_panic_capture(_logger: &log::Logger) {
+    let _ = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|info| capture_panic(info)));
+}
+
+pub fn dump_consist_probe(logger: &log::Logger) {
+    if let Ok(slot) = PANIC_MSG.try_lock() {
+        if let Some(m) = slot.as_ref() {
+            logger.warn(&format!("captured panic: {m}"));
+        }
+    }
+    // The hook recorded only the raw argument pair (it must not touch memory). Here —
+    // a safe context — interpret them: arg2 is the spec row `preview_train_build`
+    // was handed, arg1 is its context, whose +0x460 holds the preview train object
+    // (a 0x6b8 copy of the row, with the per-car records `train_row_car_wiring`
+    // walks at +0x50c + car*0x18).
+    for (n, rec) in WIRING_RECS.iter().enumerate() {
+        let a1 = rec.load(Ordering::SeqCst);
+        let a2 = WIRING_ARGS[n].load(Ordering::SeqCst);
+        if a1 == 0 && a2 == 0 {
+            continue;
+        }
+        let mut line = format!("consist probe #{n}: param1={a1:#x} row={a2:#x}");
+        unsafe {
+            let row = a2 as *const u8;
+            if a2 != 0 && sys::is_readable(row as *const c_void, 0x140) {
+                let carcount = *row.add(0x121);
+                let slot0 = *(row.add(0x2c) as *const u16);
+                let slot1 = *(row.add(0x2e) as *const u16);
+                line.push_str(&format!(
+                    " row: carCount(+0x121)={carcount} slots(+0x2c)={slot0},{slot1} block(+0x39)="
+                ));
+                for k in 0..12 {
+                    line.push_str(&format!("{:02x}", *row.add(0x39 + k)));
+                }
+            }
+            let obj = if a1 != 0 {
+                *(a1 as *const *const u8).add(0x460 / 8)
+            } else {
+                core::ptr::null()
+            };
+            if !obj.is_null() && sys::is_readable(obj as *const c_void, 0x700) {
+                line.push_str(&format!(" obj={obj:p} objCarCount(+0xbc)={}", *obj.add(0xbc)));
+                for k in 0..4 {
+                    let e = obj.add(0x50c + k * 0x18);
+                    line.push_str(&format!(
+                        " [{}: slot={} sub={}]",
+                        k,
+                        *(e as *const u16),
+                        *e.add(2)
+                    ));
+                }
+            }
+        }
+        logger.debug(&line);
+    }
+}
+
+/// Install the diagnostic wiring hook (idempotent). Needs the
+/// `train_row_car_wiring` anchor; a missing anchor or a byte mismatch is a loud
+/// warning, never fatal.
+pub unsafe fn install_consist_probe(base: usize, entry: &BuildEntry, logger: &log::Logger) {
+    unsafe {
+        let Some(anchor) = entry.anchor("train_row_car_wiring") else {
+            logger.warn("consist probe: no train_row_car_wiring anchor for this build");
+            return;
+        };
+        let _ = WIRING_LOGGER.set(logger.clone());
+        install_panic_capture(logger);
+        match install_inline_replay(base, anchor, logger) {
+            Ok(()) => {}
+            Err(e) => logger.warn(&format!("consist probe: inline replay refused: {e}")),
+        }
+        return;
+        let mut t = WIRING_TRAMP.lock().unwrap();
+        if t.is_some() {
+            return;
+        }
+        let _ = WIRING_LOGGER.set(logger.clone());
+        install_panic_capture(logger);
+        let ptr = (base + anchor.rva as usize) as *mut u8;
+        match patch::install_trampoline(
+            ptr,
+            a9_consist_probe_stub as *const c_void,
+            &anchor.expect_bytes().unwrap_or_default(),
+            sys::PAGE_EXECUTE_READWRITE,
+        ) {
+            Ok(tr) => {
+                WIRING_ORIG.store(tr.as_ptr() as usize, Ordering::SeqCst);
+                A9_CONSIST_ORIG = tr.as_ptr() as usize;
+                logger.line(&format!(
+                    "consist probe: train_consist_build3 hooked rva={:#x} (DIAGNOSTIC)",
+                    anchor.rva
+                ));
+                *t = Some(tr);
+            }
+            Err(e) => logger.warn(&format!("consist probe: hook refused: {e}")),
+        }
     }
 }
 
@@ -586,6 +924,10 @@ pub struct TrainRow {
     /// writes into the spec row, so a mod that ships its own CSV rows controls
     /// every field the game parses (see `apply_form_row`)
     pub form_cols: Vec<String>,
+    /// the train's `train_pattern.csv` group — the car types and their coupling
+    /// columns, which drive the car build (one model per modelled row, the
+    /// per-car block, the consist length)
+    pub pattern_rows: Vec<Vec<String>>,
 }
 
 /// Immutable install-time state for the train injection.
@@ -653,10 +995,16 @@ pub unsafe fn install_trains(
     logger: log::Logger,
     trains: &[TrainRow],
     cfg_car_build: bool,
+    cfg_probe_consist: bool,
 ) -> Result<String, String> {
     unsafe {
         if trains.is_empty() {
             return Err("no trains to inject".into());
+        }
+        if cfg_probe_consist {
+            // DIAGNOSTIC ONLY (probe_consist = true): measure where the consist
+            // builder's per-car sub-index comes from.
+            install_consist_probe(base as usize, entry, &logger);
         }
         for name in [
             ANCHOR_REALLOC,
@@ -700,6 +1048,7 @@ pub unsafe fn install_trains(
                 running_cost: t.running_cost,
                 price: t.price,
                 form_cols: t.form_cols.clone(),
+                pattern_rows: t.pattern_rows.clone(),
             }));
         }
 
@@ -958,7 +1307,7 @@ unsafe fn probe_row_map(g: &TrainState, call: u32, mgr: *mut u8) {
                     lanes_at(421)
                 ));
             }
-            // DIAGNOSTIC: the raw first 0x60 bytes of the donor row and of the
+            // DIAGNOSTIC: the raw bytes of the donor row and of the
             // injected row. The panel's price/capacity/configuration are the train's
             // pattern-group aggregates (the group head for FORM_AR4 is at data row
             // 2322 with capacity 168 / price 528,000,000 — neither of which is what
@@ -973,17 +1322,15 @@ unsafe fn probe_row_map(g: &TrainState, call: u32, mgr: *mut u8) {
                     return "<unreadable>".into();
                 }
                 let mut s = String::new();
-                for i in 0..0x60 {
+                for i in 0..0x9e {
                     s.push_str(&format!("{:02x}", *row.add(i)));
                 }
                 s
             };
             g.logger
                 .debug(&format!("train probe bytes: donor(96) {}", hex_at(96)));
-            if count > 421 {
-                g.logger
-                    .debug(&format!("train probe bytes: injected(421) {}", hex_at(421)));
-            }
+            // (the reserved rows do not exist yet here — the raw byte dump happens
+            // in the car build, which runs after the injection)
         }
     }
 }
@@ -1244,6 +1591,8 @@ unsafe fn apply_form_row(row: *mut u8, cols: &[String]) {
 /// Car-build scratch: the live bytes each buffer needs, plus a canary tail that is
 /// checked after the game's loader returns.
 const CAR_ROW_BYTES: usize = 0x88; // 17 pattern-row cells, 8 bytes each
+/// The pattern group's car rows (one per car type / consist length).
+const CAR_ROWS_MAX: usize = 10;
 const CAR_WRAP_BYTES: usize = 0x38; // the pipeline's own wrapper local is `[rbp-0x38]`
 const CAR_CELL_BYTES: usize = 8; // one A9_RcStr pointer slot (the mesh-path cell)
 const CAR_CANARY: usize = 0x20;
@@ -1334,163 +1683,284 @@ unsafe fn build_cars(g: &TrainState) -> Result<usize, String> {
         };
         for i in 0..nrows {
             let Some((_, t)) = g.rows.get(i) else { break };
-            // This version authors one car per train (the compiler refuses cars > 1).
-            let path = format!("train\\{}\\{}.x", t.model_dir, t.model_mesh);
-            let mut cells: Vec<String> = vec![
-                t.form_name.clone(),
-                t.model_dir.clone(),
-                t.model_mesh.clone(),
-                t.capacity.to_string(),
-                t.running_cost.to_string(),
-                t.price.to_string(),
-            ];
-            // the block columns: the head car of the formation, then the trailing
-            // cells (one car -> nothing to couple). The loader reads 3/4/5 only.
-            cells.push("1".to_string());
-            for _ in 1..10 {
-                cells.push(String::new());
-            }
-            cells.push("1".to_string()); // the standard car
-
-            g.logger.debug(&format!(
-                "car build: constructing cells for '{}' (mesh {path})",
-                t.form_name
-            ));
-            let row = new_scratch(CAR_ROW_BYTES);
-            let wrapper = new_scratch(CAR_WRAP_BYTES);
-            let path_cell = new_scratch(CAR_CELL_BYTES);
-            let mut sources: Vec<Vec<u16>> = Vec::with_capacity(cells.len() + 1);
-            for (k, c) in cells.iter().enumerate() {
-                let w = wide(c);
-                let field = row.as_mut_ptr().add(k * 8);
-                rcstr_ctor(field);
-                let out = cell_ctor(field, fmt.as_ptr(), w.as_ptr() as usize);
-                if out.is_null() {
-                    return Err(format!("the cell constructor refused cell {k} ({c:?})"));
+            // ---- the car types: the pattern group's modelled rows -------------
+            //
+            // The group's rows ARE the consist's car types: row 1 is the lead (its
+            // ディレクトリ/モデル/定員積載/運行費用/購入価格 columns), further rows are more
+            // modelled types, and each row's coupling columns (6..15) say which types
+            // make up an N-car consist (row N = the trailing cars' type numbers, -1
+            // terminated). AR4 is the reference: rows 1-2 are two modelled types, row 4
+            // carries `1,2,2,-1`, and the shop's 4-car figures (708 / $20,160,000) are
+            // 2x type-1 + 2x type-2.
+            let cell = |r: &[String], i: usize| -> String {
+                r.get(i).map(|s| s.trim().to_string()).unwrap_or_default()
+            };
+            // (group row index, directory, mesh, capacity, running cost, price)
+            let mut types: Vec<(usize, String, String, u32, u64, u64)> = Vec::new();
+            for (ri, r) in t.pattern_rows.iter().take(CAR_ROWS_MAX).enumerate() {
+                let mesh = cell(r, 2);
+                if mesh.is_empty() {
+                    continue; // not a modelled type
                 }
-                sources.push(w);
+                types.push((
+                    ri,
+                    cell(r, 1),
+                    mesh,
+                    cell(r, 3).parse().unwrap_or(0),
+                    cell(r, 4).parse().unwrap_or(0),
+                    cell(r, 5).parse().unwrap_or(0),
+                ));
             }
-            intact("after the cell construction")?;
-            let path_w = wide(&path);
-            rcstr_ctor(path_cell.as_mut_ptr());
-            let path_cell_ok = cell_ctor(path_cell.as_mut_ptr(), fmt.as_ptr(), path_w.as_ptr() as usize);
-            sources.push(path_w);
-            if path_cell_ok.is_null() {
-                return Err(format!("the cell constructor refused the mesh path {path:?}"));
-            }
-            g.logger.debug(&format!(
-                "car build: cells built for '{}' (mesh {})",
-                t.form_name, path
-            ));
-
-            // The wrapper is OURS: capacity / running cost / price are the numbers
-            // the loader publishes per car, and the shop's panel aggregates them.
-            // one car, so its own values: the consist sum is ours alone
-            *(wrapper.as_mut_ptr().add(WRAP_CAPACITY) as *mut u32) = t.capacity as u32;
-            *(wrapper.as_mut_ptr().add(WRAP_RUNNING_COST) as *mut u32) = t.running_cost as u32;
-            *(wrapper.as_mut_ptr().add(WRAP_PRICE) as *mut u64) = t.price;
-            g.logger.debug(&format!(
-                "car build: calling the game's car-model loader ({path}; capacity {}, running \
-                 cost {}, price {})",
-                t.capacity, t.running_cost, t.price
-            ));
-            let ok = fetch(
-                wrapper.as_mut_ptr(),
-                path_cell.as_ptr() as *const *const u16,
-                row.as_ptr(),
-                0,
-            );
-            intact("after the model loader returned")?;
-            let obj = *(wrapper.as_ptr() as *const *mut u8);
-            g.logger.debug(&format!(
-                "car build: the loader returned {ok} (object {obj:p}) for {path}"
-            ));
-            // Canary check: the loader is handed pointers into all three buffers. If it
-            // wrote past one, say so loudly instead of letting the overrun surface later
-            // as something inexplicable (the buffers are ours and leaked, so nothing
-            // else is affected either way).
-            for (what, base, live) in [
-                ("pattern row", row.as_ptr(), CAR_ROW_BYTES),
-                ("wrapper", wrapper.as_ptr(), CAR_WRAP_BYTES),
-                ("mesh-path cell", path_cell.as_ptr(), CAR_CELL_BYTES),
-            ] {
-                if !canary_ok(base, live, live + CAR_CANARY) {
-                    g.logger.warn(&format!(
-                        "car build: the game's car-model loader wrote past our {what} buffer \
-                         for {path} — the scratch buffers are loader-owned, so nothing else \
-                         is affected"
-                    ));
-                }
-            }
-            if ok == 0 {
-                if !obj.is_null() {
-                    destroy_car(obj);
-                }
+            if types.is_empty() {
                 g.logger.warn(&format!(
-                    "car build: the game's loader refused {} (train '{}') — the row keeps the \
-                     donor's car data",
-                    path, t.form_name
+                    "car build: train '{}' has no modelled car type in its pattern group \
+                     (column 2 モデル) — the row keeps the donor's car data",
+                    t.form_name
                 ));
                 continue;
             }
-            register_fn(manager, wrapper.as_ptr());
-            let idx = index_fn(manager);
-            intact("after registering the car model")?;
-            g.logger.debug(&format!(
-                "car build: registered the car and took model index {idx} for {path}"
-            ));
+            // ---- one model per type -------------------------------------------
+            let mut indices: Vec<u16> = Vec::with_capacity(types.len());
+            for (ri, dir, mesh, capacity, running_cost, price) in &types {
+                let path = format!("train\\{dir}\\{mesh}.x");
+                let src = t.pattern_rows.get(*ri).cloned().unwrap_or_default();
+                let mut cells: Vec<String> = vec![
+                    t.form_name.clone(),
+                    dir.clone(),
+                    mesh.clone(),
+                    capacity.to_string(),
+                    running_cost.to_string(),
+                    price.to_string(),
+                ];
+                for k in 6..16 {
+                    cells.push(cell(&src, k)); // the row's coupling columns
+                }
+                // The cell the game's model loader parses as "this car is the standard
+                // one" must be a NUMBER (the pipeline `crt_atoi`s pattern col16), so a
+                // 標準 marker becomes 1 and anything else 0.
+                let flag = cell(&src, 16);
+                cells.push(if flag == "○" || flag == "1" { "1".into() } else { "0".into() });
 
+                g.logger.debug(&format!(
+                    "car build: constructing cells for '{}' (mesh {path})",
+                    t.form_name
+                ));
+                let row = new_scratch(CAR_ROW_BYTES);
+                let wrapper = new_scratch(CAR_WRAP_BYTES);
+                let path_cell = new_scratch(CAR_CELL_BYTES);
+                let mut sources: Vec<Vec<u16>> = Vec::with_capacity(cells.len() + 1);
+                for (k, c) in cells.iter().enumerate() {
+                    let w = wide(c);
+                    let field = row.as_mut_ptr().add(k * 8);
+                    rcstr_ctor(field);
+                    let out = cell_ctor(field, fmt.as_ptr(), w.as_ptr() as usize);
+                    if out.is_null() {
+                        return Err(format!("the cell constructor refused cell {k} ({c:?})"));
+                    }
+                    sources.push(w);
+                }
+                intact("after the cell construction")?;
+                let path_w = wide(&path);
+                rcstr_ctor(path_cell.as_mut_ptr());
+                let path_cell_ok =
+                    cell_ctor(path_cell.as_mut_ptr(), fmt.as_ptr(), path_w.as_ptr() as usize);
+                sources.push(path_w);
+                if path_cell_ok.is_null() {
+                    return Err(format!("the cell constructor refused the mesh path {path:?}"));
+                }
+                // the wrapper is ours: the numbers the shop publishes for this car
+                *(wrapper.as_mut_ptr().add(WRAP_CAPACITY) as *mut u32) = *capacity;
+                *(wrapper.as_mut_ptr().add(WRAP_RUNNING_COST) as *mut u32) = *running_cost as u32;
+                *(wrapper.as_mut_ptr().add(WRAP_PRICE) as *mut u64) = *price;
+                g.logger.debug(&format!(
+                    "car build: calling the game's car-model loader ({path}; capacity {}, \
+                     running cost {}, price {})",
+                    capacity, running_cost, price
+                ));
+                let ok = fetch(
+                    wrapper.as_mut_ptr(),
+                    path_cell.as_ptr() as *const *const u16,
+                    row.as_ptr(),
+                    0,
+                );
+                intact("after the model loader returned")?;
+                let obj = *(wrapper.as_ptr() as *const *mut u8);
+                g.logger.debug(&format!(
+                    "car build: the loader returned {ok} (object {obj:p}) for {path}"
+                ));
+                for (what, base, live) in [
+                    ("pattern row", row.as_ptr(), CAR_ROW_BYTES),
+                    ("wrapper", wrapper.as_ptr(), CAR_WRAP_BYTES),
+                    ("mesh-path cell", path_cell.as_ptr(), CAR_CELL_BYTES),
+                ] {
+                    if !canary_ok(base, live, live + CAR_CANARY) {
+                        g.logger.warn(&format!(
+                            "car build: the game's car-model loader wrote past our {what} \
+                             buffer for {path} — the scratch buffers are loader-owned, so \
+                             nothing else is affected"
+                        ));
+                    }
+                }
+                if ok == 0 {
+                    if !obj.is_null() {
+                        destroy_car(obj);
+                    }
+                    g.logger.warn(&format!(
+                        "car build: the game's loader refused {} (train '{}') — the row keeps \
+                         the donor's car data",
+                        path, t.form_name
+                    ));
+                    continue;
+                }
+                register_fn(manager, wrapper.as_ptr());
+                let idx = index_fn(manager);
+                intact("after registering the car model")?;
+                g.logger.debug(&format!(
+                    "car build: registered the car and took model index {idx} for {path}"
+                ));
+                indices.push(idx.wrapping_sub(1));
+            }
+            if indices.is_empty() {
+                g.logger.warn(&format!(
+                    "car build: none of train '{}''s car models could be loaded — the row \
+                     keeps the donor's car data",
+                    t.form_name
+                ));
+                continue;
+            }
+            // ---- the row: model slots, per-car block, counts -------------------
             let row_ptr = accessor(vec, t.id);
             if row_ptr.is_null() || !sys::is_readable(row_ptr as *const c_void, ROW_STRIDE) {
                 return Err(format!("reserved row {} is unreadable for the car build", t.id));
             }
-            let donor_block: Vec<u8> =
-                (0..0x10).map(|k| *row_ptr.add(ROW_CAR_BLOCK + k)).collect();
-            let donor_carcount = *row_ptr.add(ROW_CARC0UNT);
-            *(row_ptr.add(ROW_MODEL_SLOT) as *mut u16) = idx.wrapping_sub(1);
-            // The purchase panel walks the row's model slots and skips the ones whose
-            // index is out of range — shipped rows leave uninitialised slots holding
-            // heap junk, which is skipped exactly that way. The donor's *valid*
-            // leftover entries are therefore what the panel sums on top of our car
-            // (live: AR4's second car in slot 1 = index 208 added 186 capacity and
-            // 480,000,000 price). Park the remaining slots on an out-of-range value so
-            // the game's own range check skips them; a small value like 0 or 7 is a
-            // *valid* model index, so the panel would count an extra model.
-            for k in 1..6 {
-                *(row_ptr.add(ROW_MODEL_SLOT + k * 2) as *mut u16) = u16::MAX;
+            // DIAGNOSTIC (boot-time evidence): the reserved row's raw bytes. The probe
+            // runs BEFORE the injection, where these rows do not exist yet, so the dump
+            // lives here instead.
+            {
+                let mut hex = String::new();
+                for k in 0..0x140 {
+                    hex.push_str(&format!("{:02x}", *row_ptr.add(k)));
+                }
+                g.logger
+                    .debug(&format!("train row bytes: reserved({}) {}", t.id, hex));
             }
-            *row_ptr.add(ROW_CARC0UNT) = 1;
-            *(row_ptr.add(ROW_CONSIST_LEN) as *mut u16) = 1;
-            *(row_ptr.add(ROW_FIRST_CAR) as *mut u16) = 1;
-            *(row_ptr.add(ROW_LAST_CAR) as *mut u16) = 1;
-            *(row_ptr.add(ROW_STD_CAR) as *mut u16) = 1;
-            *row_ptr.add(ROW_CAR_FLAGS) = 1;
-            // The per-car block (+0x39, ten bytes per car) is what the game's consist
-            // builder reads to build a train object's car entries: the first byte of a
-            // car's ten is "this car exists", the rest is its coupling data, filled by
-            // the pipeline from the pattern row's columns 6..15 (the compiler writes
-            // "1" into column 6 for its one-car template). A cloned row inherits the
-            // donor's block, and our clone was taken mid-pipeline while the donor's was
-            // still zero — live 2026-10-15 that made the built car entry carry slot 0
-            // and selecting the train crashed in `train_row_car_wiring`
-            // (0x1401aba4e: `aModelIdx[slot - 1]` with slot 0 walks a wild index).
-            // A one-car consist therefore needs car 1's first byte set and the rest
-            // clear, exactly as the derived pattern row describes.
-            for k in 0..0x64 {
-                *row_ptr.add(ROW_CAR_BLOCK + k) = 0;
+            // The donor's own slots settle what this array MEANS (live row dump
+            // 2026-10-15): AR4's +0x2c reads 206, 207 — and the shipped FORM list's
+            // index 206 is FORM_123, 207 is FORM_125. So the slots hold the FORMS of
+            // the consist's cars, not model indices: `train_row_car_wiring` looks each
+            // up as a spec row and takes `aModelIdx[sub - 1]` from it. Our cars' models
+            // belong to OUR row, so the slot must name OUR form (which is what makes
+            // the lookup resolve back to the model slots below).
+            for k in 0..6 {
+                *(row_ptr.add(ROW_MODEL_SLOT + k * 2) as *mut u16) =
+                    indices.get(k).copied().unwrap_or(u16::MAX);
             }
-            *row_ptr.add(ROW_CAR_BLOCK) = 1;
-            let our_block: Vec<u8> =
-                (0..0x10).map(|k| *row_ptr.add(ROW_CAR_BLOCK + k)).collect();
+            // EXPERIMENTAL (see the note above): name OUR form in each consist slot so
+            // the wiring's row lookup lands back on this row's model slots.
+            for k in 0..indices.len().min(6) {
+                *(row_ptr.add(ROW_MODEL_SLOT + k * 2) as *mut u16) = t.id as u16;
+            }
+            // NOT written here: the per-car sub-index that `train_row_car_wiring` feeds
+            // to `aModelIdx[sub - 1]`. The live row dump (2026-10-15) shows +0x2c is the
+            // flat u16[6] MODEL array — the donor reads `ce 00 cf 00 …` = models 206/207
+            // — while the 0x18-stride consist array lives in the TRAIN OBJECT the
+            // builder creates, so the sub-index is the builder's business. Writing it at
+            // +0x2e + k*0x18 lands on the model array's second slot and corrupts the
+            // panel's figures (816 -> 564). Find the builder's source for it instead.
+            // The per-car block (+0x39, ten bytes per group row) is what the game's
+            // consist builder reads to build a train object's car entries: the first byte
+            // of a row's ten is "this car exists", the rest is its coupling data, filled
+            // by the pipeline from the pattern row's columns 6..15. A cloned row inherits
+            // the donor's block, and our clone was taken mid-pipeline while the donor's
+            // was still zero — live 2026-10-15 that made the built car entry carry slot 0
+            // and selecting the train crashed in `train_row_car_wiring` (0x1401aba4e:
+            // `aModelIdx[slot - 1]` with slot 0 walks a wild index).
+            // Every consist length needs a VALID record. A record's leading byte is
+            // that car's SUB-INDEX: `train_row_car_wiring` does
+            // `spec_row.aModelIdx[sub - 1]`, so a 0 (an untouched cell, or the donor's
+            // zero block) or a bare terminator makes it walk a wild index — live
+            // 2026-10-15, that crashed the game on the 1-car option and again on the
+            // 2-car one, once with each wrong fill I tried.
+            //
+            // The vanilla convention is visible in AR4's own row: its 4-car record
+            // reads `01 02 02 ff` — the cars' sub-indices, with `ff` meaning "the
+            // default type" (which is why the shop's 4-car figures are 2x type-1 +
+            // 2x type-2: 1,2,2,default). So an unspecified cell is `ff`, never 0, and
+            // a length the author does not describe is a consist of default-typed cars.
+            let (mut first, mut last, mut std_car, mut present, mut consist) =
+                (0u16, 0u16, 0u16, 0u8, 0u16);
+            for (i, r) in t.pattern_rows.iter().take(CAR_ROWS_MAX).enumerate() {
+                // only the data columns mark a car: a continuation row carries just its
+                // group index in col 17 and is not a car of its own.
+                if !r.iter().take(16).any(|c| !c.trim().is_empty()) {
+                    continue;
+                }
+                let pos = (i + 1) as u16;
+                if first == 0 {
+                    first = pos;
+                }
+                last = pos;
+                present = present.saturating_add(1);
+                // 標準 marks the consist the shop offers first
+                let flag = r.get(16).map(|c| c.trim()).unwrap_or("");
+                if flag == "○" || flag == "1" {
+                    std_car = pos;
+                    consist = pos;
+                }
+            }
+            if consist == 0 {
+                consist = if last > 0 { last } else { 1 };
+            }
+            if std_car == 0 {
+                std_car = last;
+            }
+            // Back to the fill that WORKS live (the user's U-Shape evidence disproved
+            // my "records only from the standard consist upwards" reading: a train
+            // whose default is 5 also offers 4, so the offered set is the records that
+            // carry data, not everything from the default up).
+            //
+            // Every cell reads `ff` — the default-type sentinel — so every offered
+            // length builds a consist of default-typed cars and none of them makes
+            // `train_row_car_wiring` walk `aModelIdx[sub - 1]` with sub = 0.
+            //
+            // STILL OPEN: the currently selected length is missing from the selector's
+            // list (every shipped train shows its own). This needs the editor's own
+            // list-building code read, not another fill experiment.
+            for i in 0..CAR_ROWS_MAX {
+                let rec = row_ptr.add(ROW_CAR_BLOCK + i * 10);
+                let src = t.pattern_rows.get(i);
+                for j in 0..10 {
+                    let v = src
+                        .and_then(|r| r.get(6 + j))
+                        .map(|s| s.trim())
+                        .and_then(|s| s.parse::<i8>().ok())
+                        .unwrap_or(0);
+                    *rec.add(j) = if v == 0 { 0xff } else { v as u8 };
+                }
+            }
+            *row_ptr.add(ROW_CARC0UNT) = indices.len().min(255) as u8;
+            *(row_ptr.add(ROW_CONSIST_LEN) as *mut u16) = consist;
+            // `preview_train_build` (the model viewer / the selector's preview) takes
+            // the consist length from +0x121, while the purchase panel reads +0x1a.
+            // Both must agree or the viewer shows a consist the panel does not.
+            *row_ptr.add(0x121) = consist.min(255) as u8;
+            *(row_ptr.add(ROW_FIRST_CAR) as *mut u16) = first;
+            *(row_ptr.add(ROW_LAST_CAR) as *mut u16) = last;
+            *(row_ptr.add(ROW_STD_CAR) as *mut u16) = std_car;
+            *row_ptr.add(ROW_CAR_FLAGS) = present;
             g.logger.line(&format!(
-                "car build: row {} now has 1 car (model index {}); the per-car block at \
-                 +0x39 was {donor_block:02x?} (donor carCount {donor_carcount}), now \
-                 {our_block:02x?}",
+                "car build: row {} now has {} car(s) (model indices {:?}), consist {} \
+                 (standard car {})",
                 t.id,
-                idx.wrapping_sub(1)
+                indices.len(),
+                indices,
+                consist,
+                std_car
             ));
             built += 1;
         }
+        // DIAGNOSTIC: print what the wiring hook recorded (it cannot log itself).
+        dump_consist_probe(&g.logger);
         Ok(built)
     }
 }
