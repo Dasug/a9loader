@@ -130,6 +130,16 @@ pub struct CompiledTrain {
     pub reverse_speed: Option<u16>,
     pub fare: u16,
     pub cars: u8,
+    /// the car model's directory and mesh (defaults `kh32` / `_t_kh32_a`): the
+    /// loader composes `train\<dir>\<mesh>.x` and drives the game's car-model
+    /// loader with it, because an injected row can never be reached by the CSV
+    /// pipeline's own car pass.
+    pub model_dir: String,
+    pub model_mesh: String,
+    /// the pattern-row profile values the shop reads (定員積載 / 運行費用 / 購入価格)
+    pub capacity: u32,
+    pub running_cost: u64,
+    pub price: u64,
     pub rows: TrainRows,
     pub icons: Vec<IconAsset>,
 }
@@ -385,6 +395,11 @@ fn compile_one(
         reverse_speed: t.reverse_speed,
         fare: t.fare.unwrap_or(DEFAULT_FARE),
         cars,
+        model_dir: dir,
+        model_mesh: mesh,
+        capacity: t.capacity.unwrap_or(DEFAULT_CAPACITY),
+        running_cost: t.running_cost.unwrap_or(DEFAULT_RUNNING_COST) as u64,
+        price: t.price.unwrap_or(DEFAULT_PRICE),
         rows,
         icons,
     })

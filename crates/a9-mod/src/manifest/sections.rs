@@ -199,13 +199,20 @@ pub struct TrainSection {
     /// the shipped KiHa-32 ones, whose mesh and liveries are present regardless.
     #[serde(default)]
     pub from: Option<String>,
-    /// purchase price (`train_pattern` 購入価格). Default `45000000`.
+    /// purchase price (`train_pattern` 購入価格), in the SAME unit the shipped
+    /// CSVs use — so a mod's number is directly comparable with a vanilla
+    /// train's. The game converts for display itself (the purchase panel showed
+    /// the value / 50 in one currency/language setting and / 100 in another, and
+    /// the Japanese prices are yen), so the loader never rescales it.
+    /// Default `45000000`.
     #[serde(default)]
     pub price: Option<u64>,
-    /// capacity (`train_pattern` 定員積載). Default `106`.
+    /// capacity (`train_pattern` 定員積載), shipped-CSV unit — the purchase
+    /// panel prints it 1:1 (live: a declared 111 shows as 111). Default `106`.
     #[serde(default)]
     pub capacity: Option<u32>,
-    /// running cost (`train_pattern` 運行費用). Default `26200`.
+    /// running cost (`train_pattern` 運行費用), shipped-CSV unit.
+    /// Default `26200`.
     #[serde(default)]
     pub running_cost: Option<u32>,
     /// cruise speed (`train_form` 巡航速度, u16). Default `65`.

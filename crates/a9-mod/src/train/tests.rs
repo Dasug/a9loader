@@ -91,7 +91,7 @@ fn derived_pattern_group_is_a_10_row_group_plus_separator() {
     assert_eq!(p[0][2], "_t_kh32_a");
     assert_eq!(p[0][3], "106");
     assert_eq!(p[0][4], "26200");
-    assert_eq!(p[0][5], "45000000");
+    assert_eq!(p[0][5], "45000000"); // the shipped CSV unit, unscaled
     assert_eq!(p[0][6], "1"); // the 1-car consist template
     assert_eq!(p[0][16], "○");
     assert_eq!(p[0][17], "1");

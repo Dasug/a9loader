@@ -189,6 +189,25 @@ unsafe fn row_count(base: usize) -> Option<usize> {
 
 /// Record one clamp and emit whatever it warrants. `rows` is the vector size at
 /// the moment of the clamp (for the log line).
+/// One debug line per boot for the slot repair (it is not an id clamp, and it is
+/// the normal state for a save written before the row carried a car block).
+fn note_slot(site: u8, car: usize) {
+    static ONCE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+    if ONCE.swap(true, core::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    let Some(m) = LOG.get() else { return };
+    let Ok(st) = m.lock() else { return };
+    if st.debug {
+        st.logger.debug(&format!(
+            "save clamp [{}]: car block row {car} carried slot 0 — repaired to {} \
+             (the game's car wiring computes slot - 1 and would walk a wild index)",
+            site_name(site),
+            1 + car
+        ));
+    }
+}
+
 fn note_clamp(site: u8, orig: u32, target: u32, rows: usize) {
     let Some(m) = LOG.get() else { return };
     let Ok(mut st) = m.lock() else { return };
@@ -239,15 +258,35 @@ unsafe extern "system" fn head_clamp(id: u32) -> u32 {
     HEAD_TARGET
 }
 
-/// Clamp the 10 per-car u16 ids in the freshly-read block at `dest`. Inert for
-/// every in-range id; a row whose id is 0 (unused) stays 0.
+/// Clamp the 10 per-car u16 ids in the freshly-read block at `dest` and repair a
+/// zero car slot. Inert for every in-range id; a row whose id is 0 (unused)
+/// stays untouched.
+///
+/// The block's per-car entry is `[u16 form id][u8 slot][u8 flags]` + padding —
+/// the same layout the consist object carries at `+0x50c`, `+0x50e`. The slot is
+/// the car's 1-based position, and `train_row_car_wiring` (0x1401ab990) uses it
+/// as `aModelIdx[slot - 1]`: a **zero** slot therefore computes index `-1` and
+/// walks a wild index into the spec table — live crash 2026-10-15
+/// (`0x1401aba4e`, `slot - 1` = 0xFFFFFFFF, faulting read past the heap). A save
+/// written while the row's per-car block was still empty carries that zero, so
+/// repair it here, where the same block is already in hand.
 unsafe fn clamp_car_block(cfg: &Config, dest: *mut u8) {
     let Some(rows) = (unsafe { row_count(cfg.base) }) else {
         return;
     };
     for i in 0..CAR_ROWS {
-        let slot = unsafe { dest.add(i * CAR_STRIDE) as *mut u16 };
+        let entry = unsafe { dest.add(i * CAR_STRIDE) };
+        let slot = entry as *mut u16;
         let id = unsafe { core::ptr::read_unaligned(slot) };
+        if id == 0 {
+            continue;
+        }
+        // the car's slot: 1-based, so 0 is never valid
+        let slot_byte = unsafe { entry.add(2) };
+        if unsafe { *slot_byte } == 0 {
+            unsafe { *slot_byte = (1 + i) as u8 };
+            note_slot(SITE_CAR, i);
+        }
         if (id as usize) < rows {
             continue;
         }

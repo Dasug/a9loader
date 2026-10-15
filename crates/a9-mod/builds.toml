@@ -497,3 +497,44 @@ expect = "40,53,48,83,ec,20,48,8b,d9,48,8b,0a,48,83,e9,18"
 [build."5.00.5634".anchors.preview_annotator_bound]
 rva = 0x3B0A7F              # CMP EBP,0x1a1 in preview_form_list_annotator
 expect = "81,fd,a1,01,00,00"
+
+#  * `train_model_fetch` 0x19b9f0 — the GENERIC car-model loader, i.e. the branch
+#    the game's own pattern loop takes for an ordinary car. The loop
+#    (train_csv_pipeline_builder, 0x14019cb20..0x14019cbe9) is a ladder:
+#    `FUN_14019bc80` = is-steam -> cmodeltrain_alloc_init 0x19bac0; `FUN_14019bdc0`
+#    = is-tender -> inline (new 0x2b0 + FUN_1403e2700 + vtable+8); `FUN_140066e70`
+#    = variant -> 0x19bb80; ELSE -> this function with R9B = `FUN_140066e60(kind)`
+#    (`(kind - 0x15f) <= 0x2e`, a flag selecting CModelCUTTrain 0x318 over
+#    CModelTrain 0x2b0). Args: RCX = the wrapper record, RDX = the address of the
+#    mesh-path cell, R8 = the 17-cell pattern row, R9B = the flag. Returns 1/0 in
+#    AL and stores the created object into wrapper[0]. A mod train's id is outside
+#    the flag's range, so the flag is always 0 for us.
+#    The wrapper record the pipeline hands it is `{+0x00 obj, +0x08 capacity u32,
+#    +0x0c running cost u32, +0x10 price u64}`, the three numbers read from the
+#    pattern row's CSV columns 3/4/5 (see the pipeline's calls to FUN_14019f6a0 /
+#    FUN_14019f6c0). After a successful call the pipeline registers the record
+#    (`model_register`) and stores the returned index-1 into the row's car slot.
+[build."5.00.5634".anchors.train_model_fetch]
+rva = 0x19B9F0              # FUN_14019b9f0 (wrapper, &path_cell, row, flag) -> u8
+expect = "48,89,5c,24,08,48,89,74,24,10,48,89,7c,24,18,41,56,48,83,ec,20"
+
+#  * the car build's helpers (see `rowinject::build_cars`). All are CALLED, never
+#    hooked; expect bytes read from the exe at their RVAs.
+#    `model_register` 0x140097a90(manager, wrapper) registers a freshly loaded
+#    car record; `model_index_alloc` 0x14019f120(manager) hands back the model
+#    index the spec row's slot stores (as index-1); the cell text is built with
+#    the printf-style constructor `row_name_ctor` above (rcstr_ctor first: both
+#    the empty-string constructor and the formatter ASSIGN into an existing
+#    A9_RcStr, so the destination must be live before either runs — calling the
+#    2-arg assign on a zeroed buffer dereferences NULL).
+[build."5.00.5634".anchors.model_register]
+rva = 0x97A90               # FUN_140097a90 (manager, wrapper)
+expect = "48,89,5c,24,08,57,48,83,ec,20,48,8b,d9,48,8b,49"
+
+[build."5.00.5634".anchors.model_index_alloc]
+rva = 0x19F120              # FUN_14019f120 (manager) -> the model index
+expect = "48,8b,51,08,48,b8,ab,aa,aa,aa,aa,aa,aa,2a,48,2b"
+
+[build."5.00.5634".anchors.rcstr_ctor]
+rva = 0x1D940               # FUN_14001d940 — constructs an empty A9_RcStr at dest
+expect = "40,53,48,83,ec,20,48,8b,d9,e8,36,e1,3e,00,48,8b"
