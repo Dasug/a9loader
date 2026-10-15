@@ -26,7 +26,7 @@ pub(super) struct PlanBuilder<'a> {
     build_id: &'a str,
     inject_mode: bool,
     logger: &'a log::Logger,
-    /// the compiled `[[train]]` rows (M7-2), expanded into the existing
+    /// the compiled `[[train]]` rows, expanded into the existing
     /// row-merge + asset primitives by [`PlanBuilder::trains`]
     trains: &'a [CompiledTrain],
     plan: crate::overlay::Plan,
@@ -234,7 +234,7 @@ impl<'a> PlanBuilder<'a> {
     }
 
     /// `[[asset]]` — new i.dat rows with payloads appended to a family-A host
-    /// pack (M5 W1). Always merge-served: inject has no family-A seam.
+    /// pack. Always merge-served: inject has no family-A seam.
     fn assets(&mut self, i: usize, m: &Manifest, dir: &Path) {
         // `host = "auto"` (the folder-form default) is resolved here, against
         // the embedded per-build dir index — the boot knows the build.
@@ -336,7 +336,7 @@ impl<'a> PlanBuilder<'a> {
     }
 
     /// `[[loose_asset]]` — game files opened by path, served from a
-    /// loader-managed cache copy (M6). The payload is materialized at overlay
+    /// loader-managed cache copy. The payload is materialized at overlay
     /// install time; a failure there drops the asset loudly.
     fn loose(&mut self, i: usize, m: &Manifest, dir: &Path) {
         for l in &m.loose_asset {
@@ -359,7 +359,7 @@ impl<'a> PlanBuilder<'a> {
         }
     }
 
-    /// `[[train]]` (M7-2) — the compiler's output expanded into the primitives
+    /// `[[train]]` — the compiler's output expanded into the primitives
     /// that already exist: four csvp row effects (three `Rows` + one positional
     /// `GroupAppend` for the `train_pattern` group) and the three preview-icon
     /// `[[asset]]` rows. The spec-row injection and the keep-bit contribution
@@ -378,48 +378,15 @@ impl<'a> PlanBuilder<'a> {
             return;
         }
         for t in mine {
-            // the four csvp rows
-            let rows: [(&str, a9_formats::overlay::CsvOpKind, Vec<u8>); 4] = [
-                (
-                    "train_form.csv",
-                    a9_formats::overlay::CsvOpKind::Rows,
-                    t.form_payload(),
-                ),
-                (
-                    "train_comment.csv",
-                    a9_formats::overlay::CsvOpKind::Rows,
-                    t.comment_payload(),
-                ),
-                (
-                    "train_custom.csv",
-                    a9_formats::overlay::CsvOpKind::Rows,
-                    t.custom_payload(),
-                ),
-                (
-                    "train_pattern.csv",
-                    a9_formats::overlay::CsvOpKind::GroupAppend,
-                    t.pattern_payload(),
-                ),
-            ];
-            for (name, kind, payload) in rows {
-                let key = format!("csv:{name}:{}", t.form_name);
-                if self.res.effect_refused(i, &key) {
-                    self.logger.err(&format!(
-                        "mod '{}': train {}: {key} refused (overlap loser)",
-                        m.id, t.form_name
-                    ));
-                    self.refused += 1;
-                    continue;
-                }
-                self.plan.csvs.push(crate::overlay::CsvOpPlan {
-                    mod_id: m.id.clone(),
-                    mod_version: m.version.to_string(),
-                    kind,
-                    name: name.to_string(),
-                    payload,
-                    row_keys: vec![t.form_name.clone()],
-                });
-            }
+            // NO csvp rows for a train. A `[[train]]`'s data is materialised by the
+            // loader into the injected spec row (rowinject reads the mod's `trains/`
+            // folder directly); the CSV pipeline can never attach these rows anyway —
+            // its per-form index buffers are fixed 417 entries, and an injected row is
+            // 421+. Pushing them was worse than useless: `trains/train_comment.csv`
+            // legitimately carries three columns (key + 日本語 + 英語) while the shipped
+            // table has eleven, so the merge refused and the ENTIRE csvp was served
+            // vanilla that boot — silently dropping every other mod's csvp patches too.
+            // (Was: "csv row patch "FORM_...": 3 columns but the base table has 11".)
             // the three preview icons (payloads ride their host via host = "auto",
             // dir = "previewtexture" -> the tp pack, and the loader auto-extends
             // the previewtexture.dir listing from exactly these rows)

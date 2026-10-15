@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# M7-2 harness — the `[[train]]` section. The fake host maps the real anchor
-# pages (filter/whitelist/FORM, cfile_open, the M7-0 clamp, the M7 tab/form
-# fixes, the M7-1 spec-table row helpers and the two M7-2 anchors) BEFORE the
+# The [[train]] harness. The fake host maps the real anchor pages
+# (filter/whitelist/FORM, cfile_open, the save-id clamp, the tab/form fixes,
+# the spec-table row helpers and the two [[train]] anchors) BEFORE the
 # proxy DLL loads, so the loader's REAL boot runs: it scans the scenario's
 # mods, compiles the `[[train]]`, installs the composed keep-set (with the
 # reserved ids), the overlay plan and the injection hook. The host then calls
@@ -110,9 +110,9 @@ for n in ("form_trainmod_sample_f.dds", "form_trainmod_sample_s.dds", "form_trai
     open(os.path.join(d, n), "wb").write(bytes(range(16)))
 EOF
 
-# M3/M5 both work through the merge overlay here; pin it so the derived rows are
+# The merge overlay serves the CSV rows here; pin it so the derived rows are
 # verified in a cache file the harness can extract.
-DEFAULT_CFG='pack_serving = "merge"\nasset_serving = "merge"\n'
+DEFAULT_CFG='pack_serving = "merge"\nasset_serving = "merge"\nprobe_rows = true\n'
 scen_fixtures() {
     cp "$RUN/csvp.bin" "$scen_dir/data/csvp.bin"
 }
@@ -191,22 +191,13 @@ check "injected jp name"    "train: injected names jp=30b5 30f3 30d7 30eb 6c17 5
 check "injected en name"    "en=0053 0061 006d 0070 006c 0065 0020 0052 0061 0069 006c 0063 0061 0072 " "$OUT"
 check "injected form name"  "form=0066 006f 0072 006d 005f 0074 0072 0061 0069 006e 006d 006f 0064 005f 0073 0061 006d 0070 006c 0065 " "$OUT"
 check "reserved id admitted" "train: reserved id 421 kept by the composed filter = 1" "$OUT"
-# the derived rows in the merged csvp (byte-exact text via extract-csv)
-check "csvp merged"         "4 row patch(es) (0 replaced, 3 added, 11 group-appended)" "$LOG"
-TF="$(dump_cache "$scen_dir" train_form.csv)"
-echo "$TF" > "$scen_dir/train_form.txt"
-check "train_form row derived" '"FORM_TRAINMOD_SAMPLE","ON","旅客列車","ＪＲ四国","70","","低","250","低速車両","低速車両","低速車両_貨物警笛","低速車両","0","0","0","1","","ディーゼル車","ディーゼル車","サンプル気動車","","","","","","","","",""' "$scen_dir/train_form.txt"
-TC="$(dump_cache "$scen_dir" train_comment.csv)"
-echo "$TC" > "$scen_dir/train_comment.txt"
-check "train_comment row derived" '"FORM_TRAINMOD_SAMPLE","サンプル気動車","Sample Railcar","","","","","","","",""' "$scen_dir/train_comment.txt"
-TU="$(dump_cache "$scen_dir" train_custom.csv)"
-echo "$TU" > "$scen_dir/train_custom.txt"
-check "train_custom row derived" '"FORM_TRAINMOD_SAMPLE","","","1","0","0","","","","","","","","","","","","","サンプル気動車"' "$scen_dir/train_custom.txt"
-TP="$(dump_cache "$scen_dir" train_pattern.csv)"
-echo "$TP" > "$scen_dir/train_pattern.txt"
-check "pattern head row derived" '"FORM_TRAINMOD_SAMPLE","kh32","_t_kh32_a","88","24000","42000000","1","","","","","","","","","","○","1"' "$scen_dir/train_pattern.txt"
-check "pattern continuation keyless" '"","","","","","","","","","","","","","","","","","2"' "$scen_dir/train_pattern.txt"
-check "pattern separator appended" '"","","","","","","","","","","","","","","","","",""' "$scen_dir/train_pattern.txt"
+# A [[train]]'s rows are NEVER merged into the csvp: the pipeline's per-form index
+# buffers are fixed 417 entries and an injected row is 421+, so they could never attach.
+# Pushing them was worse than useless — a 3-column `trains/train_comment.csv` row against
+# the shipped 11-column table made the merge REFUSE and serve the WHOLE csvp vanilla,
+# silently dropping every other mod's patches as well.
+checkq "no csv row patch from a train" "csv row patch" "$LOG"
+checkq "csvp merge not refused"        "serving the original this boot" "$LOG"
 
 echo "== T2: train-refuse — a bad model dir is refused, nothing injected"
 new_scen t2-refuse
@@ -356,7 +347,7 @@ else
     echo "   [FAIL] car build runs in the injection call (injection=$inj_line build=$car_line next-call=$next_call)"
     FAILED=$((FAILED + 1))
 fi
-check "row car fields"       "train: car build rcstr=18 register=1 index=1 slot=499 carCount=1 first=1 flags=1 block=01ff" "$OUT"
+check "row car fields"       "train: car build rcstr=19 register=1 index=1 slot=499 carCount=1 first=1 flags=1 block=0100" "$OUT"
 # a cloned row must not keep the donor's model slots or the recycled heap bytes in the
 # validity u32 (both were live regressions on 2026-10-15)
 check "validity u32"         "train: injected validity u32 = 1" "$OUT"
@@ -524,7 +515,7 @@ OUT="$scen_dir/out.txt"; LOG="$scen_dir/mods/a9loader.log"
 # the harness's fake model loader hands out a constant index, so both types read 499
 check "two models built"     "car build: row 421 now has 2 car(s) (model indices [499, 499])" "$LOG"
 check "consist from 標準"     "consist 4 (standard car 4)" "$LOG"
-check "both types registered" "train: car build rcstr=36 register=2 index=2" "$OUT"
+check "both types registered" "train: car build rcstr=38 register=2 index=2" "$OUT"
 check "type 1 mesh"          "car build: constructing cells for 'FORM_TRAINMOD_COMPOSE' (mesh train\kh32\_t_kh32_a.x)" "$LOG"
 check "type 2 mesh"          "car build: constructing cells for 'FORM_TRAINMOD_COMPOSE' (mesh train\kh32\_t_kh32_b.x)" "$LOG"
 # flags counts the cars with data columns (the coupling row 4 counts, the
@@ -533,7 +524,7 @@ check "type 2 mesh"          "car build: constructing cells for 'FORM_TRAINMOD_C
 # zero too: only the lengths it has data for are offered).
 # the block itself is the fake donor's filler; what the loader owns is which
 # lengths it writes (record 4 below) and that the undescribed ones are left alone
-check "row carCount two"     "train: car build rcstr=36 register=2 index=2 slot=499 carCount=2 first=1 flags=3 block=" "$OUT"
+check "row carCount two"     "train: car build rcstr=38 register=2 index=2 slot=499 carCount=2 first=4 flags=1 block=0000" "$OUT"
 check "record per length"    "train: car build block record 4 = 01 02 02 ff" "$OUT"
 check "injection intact"     "train: vector rows after injection = 422" "$OUT"
 

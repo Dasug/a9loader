@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# M6 harness — [[loose_asset]]: game files the game opens BY PATH (not content
+# The loose-asset harness — [[loose_asset]]: game files the game opens BY PATH (not content
 # inside a pack) served from a loader-managed cache copy, matched by a
 # case-insensitive glob over the game's own open path.
 #
@@ -42,7 +42,7 @@ py_mk "$RUN/data/mtfake.bin" 40 0x55 # the non-matching path's vanilla bytes
 printf 'FORM_DUMMY\x00' > "$RUN/form_list.bin"  # the host only needs a file here
 
 # debug so the per-match line is emitted (the boot line is info-level)
-DEFAULT_CFG='log_level = "debug"\n'
+DEFAULT_CFG='log_level = "debug"\nprobe_opens = true\n'
 scen_fixtures() {
     mkdir -p "$scen_dir/data/bmf"
     cp "$RUN/data/mtfake.bin" "$scen_dir/data/"

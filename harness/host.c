@@ -1361,7 +1361,7 @@ static unsigned g_fetch_calls, g_register_calls, g_index_calls, g_rcstr_calls;
 static unsigned g_fetch_capacity, g_fetch_running;
 static unsigned long long g_fetch_price;
 static wchar_t g_fetch_path[160];
-static unsigned char g_fake_car_obj[0x40];   /* the object the fake loader returns */
+static unsigned char g_fake_car_obj[0x2c8];  /* the object the fake loader returns (a real CModelTrain) */
 static unsigned char g_fake_car_model[0x2c8];
 
 void __attribute__((ms_abi)) fake_car_dtor(void *obj, unsigned flags)

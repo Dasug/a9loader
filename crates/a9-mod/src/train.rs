@@ -1,6 +1,6 @@
-//! `[[train]]` — the M7-2 train compiler (pure; no Win32, no game memory).
+//! `[[train]]` — the train compiler (pure; no Win32, no game memory).
 //!
-//! PLAN §M7: a mod can add brand-new train types beyond the 417-name FORM
+//! a mod can add brand-new train types beyond the 417-name FORM
 //! catalog without hand-picking a slot. This module is the *compiler*: it turns
 //! a [`TrainSection`] declaration into a [`CompiledTrain`] — an allocated spec
 //! row id + FORM name, the four derived `csvp` rows, the three preview-icon
@@ -124,7 +124,7 @@ pub struct CompiledTrain {
     pub name_en: String,
     /// the runtime livery name (default = the model dir): the shipped
     /// `_d_<livery>.dds` the reused model renders with. Documentation only in
-    /// this version — a new livery needs the M5 `[[asset]]` route.
+    /// this version — a new livery needs the `[[asset]]` route.
     pub livery: String,
     pub cruise_speed: u16,
     pub reverse_speed: Option<u16>,
@@ -148,19 +148,20 @@ impl CompiledTrain {
     /// The overlap/priority keys a `[[train]]` produces — the exact effect keys
     /// the expansion carries, so `resolve` composes them like any other effect.
     ///
-    /// * `csv:train_form.csv:<form>` / `csv:train_pattern.csv:<form>` /
-    ///   `csv:train_comment.csv:<form>` / `csv:train_custom.csv:<form>` — the
-    ///   four row effects (the pattern one is the positional group append);
     /// * `asset:<icon>` ×3 — the preview-icon rows;
     /// * `hook:train_list_filter` — the visibility entry (composable, like any
     ///   `train_list` contribution);
     /// * `train:<form>` — the spec-row injection (its own namespace).
     pub fn effect_keys(&self) -> Vec<String> {
+        // NO `csv:` effects. The train's rows are materialised by the LOADER from the
+        // mod's `trains/` folder (a `[[train]]` row can never be reached by the CSV
+        // pipeline — its per-form buffers are fixed 417 entries). The four `csv:` keys
+        // were left over from the scalar route, and they made the engine try to overlay
+        // the mod's rows onto the csvp: `trains/train_comment.csv` legitimately carries
+        // three columns (key + 日本語 + 英語) while the shipped table has eleven, so the
+        // merge refused and the WHOLE csvp was served vanilla that boot:
+        //   "csv row patch ...: 3 columns but the base table has 11 — serving the original"
         let mut keys = vec![
-            format!("csv:train_form.csv:{}", self.form_name),
-            format!("csv:train_pattern.csv:{}", self.form_name),
-            format!("csv:train_comment.csv:{}", self.form_name),
-            format!("csv:train_custom.csv:{}", self.form_name),
             "hook:train_list_filter".to_string(),
             format!("train:{}", self.form_name),
         ];

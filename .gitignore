@@ -25,3 +25,8 @@ rustc-ice-*.txt
 
 # harness runtime artifacts (built host exe, extracted FORM-list fixture, wine prefix)
 harness/run/
+
+# Local-only agent instructions: this file points at paths that exist on this machine only
+# (the Nextcloud corpus, the game install, the save dir). Keep it in the working tree, uncommitted;
+# a portable replacement is planned before anything here is published.
+AGENTS.md
