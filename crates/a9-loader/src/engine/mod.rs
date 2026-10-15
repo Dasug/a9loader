@@ -1016,6 +1016,7 @@ fn install_train_injection(
             capacity: t.capacity,
             running_cost: t.running_cost,
             price: t.price,
+            form_cols: t.rows.form.clone(),
         })
         .collect();
     match unsafe {

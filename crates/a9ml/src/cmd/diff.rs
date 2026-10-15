@@ -86,6 +86,7 @@ fn write_mod(
         hook: Vec::new(),
         pack,
         csv,
+        train_csv: Default::default(),
         asset: Vec::new(),
         loose_asset: Vec::new(),
         train: Vec::new(),

@@ -507,7 +507,19 @@ pub const ANCHOR_FORM_LIST: &str = "form_list";
 /// `A9_SpecRow_140` fields the injection writes (notes/52 §5).
 const ROW_CRUISE: usize = 0x0c;
 const ROW_REVERSE: usize = 0x0e;
+const ROW_ACCEL: usize = 0x10;
 const ROW_FARE: usize = 0x12;
+const ROW_SOUND_START: usize = 0x1c;
+const ROW_SOUND_DRIVE: usize = 0x1e;
+const ROW_SOUND_HORN: usize = 0x20;
+const ROW_SOUND_BRAKE: usize = 0x22;
+const ROW_PREVIEW_X: usize = 0x24;
+const ROW_PREVIEW_Y: usize = 0x26;
+const ROW_PREVIEW2D_X: usize = 0x28;
+const ROW_PREVIEW2D_Y: usize = 0x2a;
+const ROW_SPECIAL_FLAG: usize = 0x9e;
+const ROW_MODE_HORN: usize = 0x9f;
+const ROW_MODE_ACCEL: usize = 0xa0;
 const ROW_CARC0UNT: usize = 0x38;
 /// The consist length the purchase panel prints as "Train Configuration".
 /// Live evidence (2026-10-15): AR4's row carries 4 here and the panel said
@@ -570,6 +582,10 @@ pub struct TrainRow {
     pub capacity: u32,
     pub running_cost: u64,
     pub price: u64,
+    /// the train's `train_form.csv` row (the vanilla columns) — what the loader
+    /// writes into the spec row, so a mod that ships its own CSV rows controls
+    /// every field the game parses (see `apply_form_row`)
+    pub form_cols: Vec<String>,
 }
 
 /// Immutable install-time state for the train injection.
@@ -683,6 +699,7 @@ pub unsafe fn install_trains(
                 capacity: t.capacity,
                 running_cost: t.running_cost,
                 price: t.price,
+                form_cols: t.form_cols.clone(),
             }));
         }
 
@@ -1148,6 +1165,61 @@ pub unsafe extern "system" fn a9loader_m7_dump() -> u64 {
 /// ```
 ///
 /// `wrapper` is the record the pipeline hands the loader:
+/// One `train_form.csv` cell as a number (the vanilla cells are plain integers;
+/// the loader never guesses at a value it cannot read).
+fn cell_u16(cols: &[String], idx: usize) -> Option<u16> {
+    cols.get(idx)?.trim().parse::<u16>().ok()
+}
+
+/// Apply a train's `train_form` row — the CSV columns in the vanilla layout — to
+/// the cloned spec row. Column → field map from the RE agent's Ghidra pass
+/// (corpus notes/52 §7, instruction-level):
+///
+/// | col | header | field |
+/// |---|---|---|
+/// | 4 | 巡航速度 | `wCruiseSpeed` +0x0c |
+/// | 5 | 反転速度 | `wReverseSpeed` +0x0e |
+/// | 6 | 加速 | `wAccel` +0x10 |
+/// | 7 | 基本運賃 | `wBaseFare` +0x12 |
+/// | 8..11 | 発進/駆動/警笛/ブレーキ音ID | +0x1c / +0x1e / +0x20 / +0x22 |
+/// | 12..15 | preview x/y, 2D preview x/y | +0x24 / +0x26 / +0x28 / +0x2a |
+/// | 16 | 特殊車両フラグ | `bSpecialFlag` +0x9e |
+/// | 17 / 18 | 運転モード警笛 / 加減速 | +0x9f / +0xa0 |
+///
+/// The game resolves cols 2/3 (車両種別ID / 鉄道会社ID) and 8..11, 17, 18 through
+/// name tables, so only a *numeric* cell is taken here; anything else keeps the
+/// donor's value instead of writing a wrong id (fail open). Column 1 (有効) is
+/// forced to valid: a row the loader materialises is always meant to be live, and
+/// a mod disables a train through its own `enabled` flag, not through this cell.
+unsafe fn apply_form_row(row: *mut u8, cols: &[String]) {
+    let set16 = |off: usize, v: Option<u16>| {
+        if let Some(v) = v {
+            unsafe { core::ptr::write_unaligned(row.add(off) as *mut u16, v) };
+        }
+    };
+    let set8 = |off: usize, v: Option<u16>| {
+        if let Some(v) = v {
+            unsafe { *row.add(off) = v as u8 };
+        }
+    };
+    set16(ROW_CRUISE, cell_u16(cols, 4));
+    set16(ROW_REVERSE, cell_u16(cols, 5));
+    set16(ROW_ACCEL, cell_u16(cols, 6));
+    set16(ROW_FARE, cell_u16(cols, 7));
+    set16(ROW_SOUND_START, cell_u16(cols, 8));
+    set16(ROW_SOUND_DRIVE, cell_u16(cols, 9));
+    set16(ROW_SOUND_HORN, cell_u16(cols, 10));
+    set16(ROW_SOUND_BRAKE, cell_u16(cols, 11));
+    set16(ROW_PREVIEW_X, cell_u16(cols, 12));
+    set16(ROW_PREVIEW_Y, cell_u16(cols, 13));
+    set16(ROW_PREVIEW2D_X, cell_u16(cols, 14));
+    set16(ROW_PREVIEW2D_Y, cell_u16(cols, 15));
+    set8(ROW_SPECIAL_FLAG, cell_u16(cols, 16));
+    set8(ROW_MODE_HORN, cell_u16(cols, 17));
+    set8(ROW_MODE_ACCEL, cell_u16(cols, 18));
+    unsafe { *row = 1 }; // bValid
+}
+
 /// `{+0x00 obj, +0x08 capacity u32, +0x0c running cost u32, +0x10 price u64}` —
 /// those three numbers are the pattern row's CSV columns 3/4/5, i.e. the same
 /// per-car figures the shop's 定員積載 / 運行費用 / 購入価格 display aggregates
@@ -1481,8 +1553,22 @@ unsafe fn inject_trains_locked(g: &TrainState) -> Result<usize, String> {
             // row carries the whole u32 == 1, and a row outside the pipeline's 417-row
             // fill loop never has it rewritten, so set it explicitly.
             core::ptr::write_unaligned(s.as_mut_ptr() as *mut u32, 1);
-            // 1) clone every shared name lane (refcount bump) so the row owns them
-            for (base_off, lanes) in [(ROW_NAME_BASE, NAME_LANES), (ROW_NAMEALT_BASE, NAME_LANES)] {
+            // 1) clone every shared name lane (refcount bump) so the row owns them.
+            //
+            // `pFormName` (+0x138) is one of these shared strings, not a separate
+            // buffer: it is a single pointer, but the game's assign-style name
+            // constructor COWs it exactly like a lane. Leaving it out of the bump
+            // made the FIRST clone write into the donor's own object (the refcount
+            // was 1, so no copy happened), which then made the SECOND clone's write
+            // on that same object throw an unhandled C++ exception inside the game's
+            // `cstring_format_2args` — live 2026-10-15, the two-train mod died on
+            // `row 422 lane +0x138 text "form_train_acceptance_csvtrain"`. With the
+            // bump every clone COWs and the donor stays intact.
+            for (base_off, lanes) in [
+                (ROW_NAME_BASE, NAME_LANES),
+                (ROW_NAMEALT_BASE, NAME_LANES),
+                (ROW_PFORMNAME, 1),
+            ] {
                 for k in 0..lanes {
                     let off = base_off + k * NAME_LANE_STRIDE;
                     let field = s.as_mut_ptr().add(off) as *mut *const u16;
@@ -1543,9 +1629,8 @@ unsafe fn inject_trains_locked(g: &TrainState) -> Result<usize, String> {
             // 3) the declared numeric fields (the donor supplies the rest)
             s[ROW_BVALID] = 1;
             s[ROW_SPECIAL] = 0;
-            *(s.as_mut_ptr().add(ROW_CRUISE) as *mut u16) = t.cruise_speed;
-            *(s.as_mut_ptr().add(ROW_REVERSE) as *mut u16) = t.reverse_speed.unwrap_or(0);
-            *(s.as_mut_ptr().add(ROW_FARE) as *mut u16) = t.fare;
+            // the train's own train_form row (vanilla columns) drives every field
+            apply_form_row(s.as_mut_ptr(), &t.form_cols);
             s[ROW_CARC0UNT] = t.cars;
             scratches.push(s);
         }

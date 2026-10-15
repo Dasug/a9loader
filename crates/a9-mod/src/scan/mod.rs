@@ -3,13 +3,13 @@
 //! failures produce a per-mod error entry (the mod is skipped loudly; other
 //! mods still load).
 //!
-//! Manifests carrying `[native]` (mods that ship code — post-M4) are refused
+//! Manifests carrying `[native]` (mods that ship code — future work) are refused
 //! with a milestone pointer — refusing beats half-executing a design the
 //! current loader cannot honor.
 //!
 //! The `folder`-form `[[asset]]` expansion lives in [`folders`].
 
-use crate::manifest::{CsvMode, Manifest};
+use crate::manifest::{CsvMode, Manifest, TrainCsv};
 use crate::ModError;
 use std::path::{Path, PathBuf};
 
@@ -45,12 +45,13 @@ pub fn scan(mods_dir: &Path) -> Vec<ScannedMod> {
                 m.validate()?;
                 // expand `folder`-form [[asset]] sections into ordinary
                 // single-file-form ops so resolution/overlap/merge see only
-                // per-name ops (M5 W1b); then re-validate to catch duplicate
+                // per-name ops; then re-validate to catch duplicate
                 // basenames across the whole resolved set (bare i.dat names
                 // are globally unique per build)
                 expand_asset_folders(&mut m, &dir)?;
                 m.validate()?;
                 prime_csv_row_keys(&mut m, &dir);
+                read_train_csv(&mut m, &dir)?;
                 Ok(m)
             });
         out.push(ScannedMod { dir, manifest });
@@ -63,6 +64,57 @@ pub fn scan(mods_dir: &Path) -> Vec<ScannedMod> {
 /// effort: a file that cannot be read/parsed leaves the keys empty (the merge
 /// then refuses loudly at serve time; the resolver falls back to a
 /// whole-table key, which is fail-safe rather than silently permissive).
+/// Read a mod's own train CSVs when it ships them. The files live in `trains/`
+/// in the mod directory — a folder of its own, deliberately NOT `csv/`, which a
+/// mod may already use for its `[[csv]]` patch files (the shipped
+/// `new-train-template` ships `csv/train_form.csv` as exactly such a patch) —
+/// and use the SHIPPED layouts verbatim — the same names, the
+/// same column order — so a mod author copies a vanilla row and edits it. Rows
+/// are keyed by the FORM name in column 0, exactly like the shipped tables; the
+/// compiler matches them against each `[[train]]`'s allocated FORM name.
+///
+/// A file that exists but cannot be parsed refuses the mod loudly (its other
+/// trains would silently lose the data the author wrote), matching how a broken
+/// `[[asset]]` folder is treated.
+pub fn read_train_csv_public(m: &mut Manifest, dir: &Path) -> Result<(), ModError> {
+    read_train_csv(m, dir)
+}
+
+fn read_train_csv(m: &mut Manifest, dir: &Path) -> Result<(), ModError> {
+    const TABLES: [&str; 4] = [
+        "train_form.csv",
+        "train_pattern.csv",
+        "train_comment.csv",
+        "train_custom.csv",
+    ];
+    let root = dir.join("trains");
+    let mut set = TrainCsv::default();
+    let mut any = false;
+    for name in TABLES {
+        let path = root.join(name);
+        let Ok(bytes) = std::fs::read(&path) else {
+            continue; // absent: the derived defaults stand
+        };
+        let table = a9_formats::csv::Table::parse(&bytes).map_err(|e| {
+            ModError::Invalid(format!(
+                "trains/{name} could not be parsed ({e}) — a train table must use the \
+                 shipped layout verbatim (see the vanilla table of the same name)"
+            ))
+        })?;
+        any = true;
+        match name {
+            "train_form.csv" => set.form = Some(table),
+            "train_pattern.csv" => set.pattern = Some(table),
+            "train_comment.csv" => set.comment = Some(table),
+            _ => set.custom = Some(table),
+        }
+    }
+    if any {
+        m.train_csv = set;
+    }
+    Ok(())
+}
+
 fn prime_csv_row_keys(m: &mut Manifest, dir: &Path) {
     for c in &mut m.csv {
         if c.mode == CsvMode::Rows {

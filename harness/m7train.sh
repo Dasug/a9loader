@@ -182,7 +182,7 @@ check "icon host auto -> tp" "asset form_trainmod_sample_f.dds: host auto -> tp"
 check "injection installed" "train injection: train_list_builder rva=0x19d9c0 expect=verified (1 reserved row(s) queued" "$LOG"
 check "injection grew"      "train injection: grew the spec vector by 1 row(s)" "$LOG"
 check "builder ran"         "train tlb_body: purchase-list builder ran" "$OUT"
-check "clone fix exercised" "train: builder calls=1 clone_ref calls=4" "$OUT"
+check "clone fix exercised" "train: builder calls=1 clone_ref calls=5" "$OUT"
 check "vector grown"        "train: vector rows after injection = 422" "$OUT"
 check "annotator bound widened" "train: annotator bound now = 422 (was 417)" "$OUT"
 check "bound widening logged"  "preview annotator bound widened to 422 rows (was 417)" "$LOG"
@@ -289,7 +289,7 @@ check  "deferral is a warn"        "WARN: train injection deferred" "$LOG"
 checkq "no refusal ERR"            "train injection refused" "$LOG"
 check  "retried and injected"      "train injection: grew the spec vector by 1 row(s)" "$LOG"
 check  "injected at attempt 2"     "(attempt 2 of the builder hook)" "$LOG"
-check  "builder called 3x"         "train: builder calls=3 clone_ref calls=4" "$OUT"
+check  "builder called 3x"         "train: builder calls=3 clone_ref calls=5" "$OUT"
 check  "third call is probe-only" "train: third call (post-injection, probe only)" "$OUT"
 check  "injected lanes are ours"  "train probe lanes: injected(421) [n0=サンプル気動車 n1=Sample Railcar" "$LOG"
 check  "vector grown exactly once" "train: vector rows after injection = 422" "$OUT"
@@ -392,5 +392,89 @@ check "build skipped"        "car build skipped: the car-build helper anchors ar
 check "injection still ran"  "train injection: grew the spec vector by 1 row(s)" "$LOG"
 check "donor car data kept"  "train: car build rcstr=0 register=0 index=0 slot=0 carCount=1 first=0 flags=0 block=a95c" "$OUT"
 check "injection intact"     "train: vector rows after injection = 422" "$OUT"
+
+echo "== T8: a train whose data comes from the mod's own vanilla-format CSVs"
+new_scen t8-traincsv
+mod trainmod \
+    'id = "trainmod"' \
+    'name = "Train mod"' \
+    'version = "1.0.0"' \
+    'author = "test"' \
+    '' \
+    '[[train]]' \
+    'key = "csvtrain"' \
+    'name = "CSV train"' \
+    'name_en = "CSV train"'
+# The author ships the SHIPPED layouts verbatim in `trains/` (UTF-16LE + BOM + CRLF, comma
+# separated), keyed by the FORM name in column 0 — exactly like the vanilla
+# tables. The values are deliberately different from every default so the
+# assertions below can only pass if the mod's rows were really applied.
+python3 - "$scen_dir/mods/trainmod" <<'PYEOF'
+import os, sys
+root = os.path.join(sys.argv[1], "trains"); os.makedirs(root, exist_ok=True)
+def write(name, rows):
+    with open(os.path.join(root, name), "wb") as f:
+        f.write(b"\xff\xfe")
+        for r in rows:
+            f.write((",".join(r) + "\r\n").encode("utf-16-le"))
+form = [""] * 20
+form[0] = "FORM_TRAINMOD_CSVTRAIN"; form[1] = "ON"; form[2] = "3"; form[3] = "5"
+form[4] = "77"; form[5] = "44"; form[6] = "6"; form[7] = "9"
+form[8] = "1"; form[9] = "2"; form[10] = "3"; form[11] = "4"
+form[12] = "10"; form[13] = "11"; form[14] = "12"; form[15] = "13"
+form[16] = "0"; form[17] = "2"; form[18] = "2"
+write("train_form.csv", [["\u7de8\u6210\uff29\uff24", "\u6709\u52b9"], form])
+head = [""] * 18
+head[0] = "FORM_TRAINMOD_CSVTRAIN"; head[1] = "kh32"; head[2] = "_t_kh32_a"
+head[3] = "999"; head[4] = "111"; head[5] = "222222"; head[6] = "1"; head[16] = "\u25cb"; head[17] = "1"
+write("train_pattern.csv", [["\u7de8\u6210\uff29\uff24", "\u30c7\u30a3\u30ec\u30af\u30c8\u30ea"], head])
+write("train_comment.csv", [["\u7de8\u6210\uff29\uff24", "\u65e5\u672c\u8a9e", "\u82f1\u8a9e"],
+                            ["FORM_TRAINMOD_CSVTRAIN", "CSV\u5217\u8eca", "CSV Railcar"]])
+PYEOF
+printf 'car_build = true\nlog_level = "debug"\n' >> "$scen_dir/a9loader.toml"
+run_host train_carbuild
+OUT="$scen_dir/out.txt"; LOG="$scen_dir/mods/a9loader.log"
+check "mod csv read"          "train injection: grew the spec vector by 1 row(s)" "$LOG"
+check "form row applied"      "train: injected row 421 bValid=1 special=0 cruise=77 fare=9 carCount=1" "$OUT"
+check "pattern row applied"   "car build: calling the game's car-model loader (train\kh32\_t_kh32_a.x; capacity 999, running cost 111, price 222222)" "$LOG"
+check "wrapper from csv"      "train: fetch wrapper capacity=999 running=111 price=222222 flag=0" "$OUT"
+# the host prints wide strings as hex: "CSV" + 列車 proves the comment row came
+# from the mod's CSV (the derived default would be plain "CSV train")
+check "csv names"             "train: injected names jp=0043 0053 0056 5217 8eca" "$OUT"
+
+echo "== T9: two trains in one mod (the live acceptance shape) — both rows injected"
+new_scen t9-twotrains
+mod trainmod \
+    'id = "trainmod"' \
+    'name = "Train mod"' \
+    'version = "1.0.0"' \
+    'author = "test"' \
+    '' \
+    '[[train]]' \
+    'key = "one"' \
+    'name = "Train one"' \
+    'name_en = "Train one"' \
+    'price = 42000000' \
+    'capacity = 88' \
+    'running_cost = 24000' \
+    'cruise_speed = 70' \
+    'fare = 250' \
+    '' \
+    '[[train]]' \
+    'key = "two"' \
+    'name = "Train two"' \
+    'name_en = "Train two"' \
+    'cruise_speed = 55' \
+    'fare = 66'
+printf 'car_build = true\nlog_level = "debug"\n' >> "$scen_dir/a9loader.toml"
+run_host train_carbuild
+OUT="$scen_dir/out.txt"; LOG="$scen_dir/mods/a9loader.log"
+check "both rows queued"     "2 reserved row(s) queued" "$LOG"
+check "grew by two"          "train injection: grew the spec vector by 2 row(s)" "$LOG"
+check "annotator widened"    "preview annotator bound widened to 423 rows" "$LOG"
+check "car one built"        "car build: row 421 now has 1 car" "$LOG"
+check "car two built"        "car build: row 422 now has 1 car" "$LOG"
+check "both cars summary"    "car build: 2 car(s) loaded through the game's own model loader" "$LOG"
+check "injection intact"     "train: vector rows after injection = 423" "$OUT"
 
 harness_done "M7-2 TRAIN HARNESS"
