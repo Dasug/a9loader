@@ -538,3 +538,41 @@ expect = "48,8b,51,08,48,b8,ab,aa,aa,aa,aa,aa,aa,2a,48,2b"
 [build."5.00.5634".anchors.rcstr_ctor]
 rva = 0x1D940               # FUN_14001d940 — constructs an empty A9_RcStr at dest
 expect = "40,53,48,83,ec,20,48,8b,d9,e8,36,e1,3e,00,48,8b"
+
+#  * the consist wiring (DIAGNOSTIC hook only): `train_row_car_wiring`
+#    0x1401ab990(object, param_2) walks the train OBJECT's per-car records —
+#    `object + car*0x18 + 0x50c` (the car's model/form slot) and `+0x50e` (a
+#    1-based sub-index fed to `spec_row.aModelIdx[sub - 1]`) — and builds each car.
+#    Expect bytes read from the exe at the RVA.
+[build."5.00.5634".anchors.train_row_car_wiring]
+rva = 0x1AB990              # train_row_car_wiring (object, param_2)
+expect = "48,8b,c4,55,56,57,41,54,41,55,41,56,41,57,48,8d,68,a1,48,81,ec,b0,00,00,00"
+
+#  * the consist PREVIEW builder (DIAGNOSTIC hook only): `preview_train_build`
+#    0x1403aecc0(param_1, spec_row, ...) builds the 0x6b8 preview train object for
+#    the shop/model viewer, memcpys the spec row into it and calls
+#    `train_row_car_wiring`. Its prologue has NO RSP-as-value read, so it is safe to
+#    trampoline (unlike train_row_car_wiring itself).
+[build."5.00.5634".anchors.preview_train_build]
+rva = 0x3AECC0              # preview_train_build (param_1, spec_row, ...)
+expect = "40,56,57,41,56,48,83,ec,30,48,c7,44,24,20,fe,ff,ff,ff"
+
+#  * the consist builder (DIAGNOSTIC hook only): FUN_1401ab530(object) fills the
+#    train object's per-car records from the spec row and calls
+#    `train_row_car_wiring`. No RSP-as-value read in the prologue, so it is safe to
+#    trampoline (unlike the wiring itself).
+[build."5.00.5634".anchors.train_consist_build]
+rva = 0x1AB530              # FUN_1401ab530 (train object)
+expect = "48,89,5c,24,08,48,89,74,24,10,57,48,83,ec,20,41,8b"
+
+#  * another consist-wiring caller (DIAGNOSTIC hook only): FUN_1401bdf90. RSP-safe
+#    prologue.
+[build."5.00.5634".anchors.train_consist_build2]
+rva = 0x1BDF90              # FUN_1401bdf90
+expect = "40,57,41,56,41,57,48,83,ec,30,48,c7,44,24,20,fe"
+
+#  * the remaining consist-wiring caller (DIAGNOSTIC hook only): `preview_lists_free`
+#    0x1403aead0.
+[build."5.00.5634".anchors.train_consist_build3]
+rva = 0x3AEAD0
+expect = "40,56,57,41,54,41,56,41,57,48,83,ec,30,48,c7,44"

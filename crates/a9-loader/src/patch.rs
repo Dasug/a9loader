@@ -257,6 +257,26 @@ pub unsafe fn install_trampoline(
         if expect.is_empty() {
             return Err("no expect bytes recorded for this anchor".into());
         }
+        // A trampoline relocates the prologue into a separate thunk, where RSP is the
+        // THUNK's stack pointer. Any instruction that reads RSP as a value therefore
+        // gets the wrong one — `train_row_car_wiring` starts `MOV RAX,RSP` /
+        // `LEA RBP,[RAX-0x5F]` and uses RBP as its frame, so trampolining it corrupted
+        // every local and crashed the boot (live 2026-10-15; the resulting broken frame
+        // chain also produced a misleading backtrace). Refuse loudly instead.
+        for (i, w) in expect.windows(3).enumerate() {
+            let rsp_read = matches!(w, [0x48, 0x8b, 0xc4]      // mov rax,rsp
+                | [0x48, 0x89, 0xe5]                            // mov rbp,rsp
+                | [0x48, 0x8b, 0xe0]                            // mov rsp,rax (hmm: harmless)
+                | [0x4c, 0x8b, 0xe4]);                          // mov r12,rsp
+            if rsp_read && !matches!(w, [0x48, 0x8b, 0xe0]) {
+                return Err(format!(
+                    "anchor at {entry:p} reads RSP as a value at prologue byte {i} ({w:02x?}) — \
+                     a trampoline would relocate it into a thunk with a different stack \
+                     pointer, corrupting the frame; use a different hook site or an \
+                     inline-replay stub"
+                ));
+            }
+        }
         if expect.len() < 12 {
             return Err("expect bytes shorter than the 12-byte hook write".into());
         }

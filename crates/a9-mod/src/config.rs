@@ -113,6 +113,10 @@ pub struct Config {
     /// loader (see the loader's `build_cars`). Off by default: it calls into game
     /// code with a loader-built pattern row, so it is opt-in until proven.
     pub car_build: bool,
+    /// DIAGNOSTIC ONLY: hook `train_row_car_wiring` and log the train object's
+    /// per-car records (the sub-index it feeds to `aModelIdx[sub - 1]`). Off by
+    /// default; not part of normal loader operation.
+    pub probe_consist: bool,
     /// M7-2 diagnostic — **OFF BY DEFAULT, not part of normal operation**: see
     /// `probe_save.rs`. When true the loader hooks the four save-side mmf
     /// helpers (`mmf_paged_write` / `mmf_paged_write_bulk` /
@@ -154,6 +158,7 @@ impl Default for Config {
             probe_fetch: false,
             probe_window: false,
             car_build: false,
+            probe_consist: false,
             probe_save: false,
             pack_serving: PackServing::Inject,
             asset_serving: AssetServing::Tailgate,
@@ -224,6 +229,12 @@ pub fn read(path: &Path) -> Config {
                 None => cfg
                     .warnings
                     .push(format!("probe_window must be a bool, got {val:?}")),
+            },
+            "probe_consist" => match val.as_bool() {
+                Some(b) => cfg.probe_consist = b,
+                None => cfg
+                    .warnings
+                    .push(format!("probe_consist must be a bool, got {val:?}")),
             },
             "car_build" => match val.as_bool() {
                 Some(b) => cfg.car_build = b,
