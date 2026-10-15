@@ -17,6 +17,14 @@
 rva = 0x1A13B0              # FUN_1401a13b0 (file 0x1a07b0)
 expect = "48,89,5c,24,08,48,89,74,24,18,48,89,7c,24,20,48"
 
+[build."5.00.5634".anchors.consist_row_copy]
+rva = 0x1AB530              # FUN_1401ab530(obj, src, n) — memcpy of `src` into obj+0x4e0, then obj+0xbc = the spec row's +0x121, then TAIL-CALLS train_row_car_wiring (file 0x1aa930)
+expect = "48,89,5c,24,08,48,89,74,24,10,57,48,83,ec,20,41,8b,f0,48,8b,fa"
+
+[build."5.00.5634".anchors.consist_object_create]
+rva = 0x1BE070              # FUN_1401be070(manager, index, ?, src, n) — allocates the 0x6b8 consist object, parks it at [rdi]+index*8, calls FUN_1401ab530 (file 0x1bd470)
+expect = "40,56,57,41,56,48,83,ec,30,48,c7,44,24,20,fe,ff,ff,ff"
+
 [build."5.00.5634".anchors.train_list_whitelist]
 rva = 0x6FC1C0              # 97-entry u32 table (file 0x6fb5c0)
 expect = "5f,00,00,00"        # entry 0 fingerprint
@@ -494,6 +502,10 @@ expect = "40,53,48,83,ec,20,48,8b,d9,48,8b,0a,48,83,e9,18"
 #    the 4-byte immediate to the live row count is the whole fix (the loop's
 #    `JC` at 0x1403b0a85 keeps the `below` semantics). This is why the shipped
 #    template's icons work: it repurposes FORM_DUMMY_02, index 62, inside 417.
+[build."5.00.5634".anchors.roster_form_clamp]
+rva = 0x60FCA               # roster_row_builder 0x140060f50: `MOV R12D,0x1a1` (imm32 at 0x60fcc) — every car entry's form is written as min(candidate, 0x1a1), so an injected id resolves through spec[417] (file 0x603ca)
+expect = "41,bc,a1,01,00,00"
+
 [build."5.00.5634".anchors.preview_annotator_bound]
 rva = 0x3B0A7F              # CMP EBP,0x1a1 in preview_form_list_annotator
 expect = "81,fd,a1,01,00,00"

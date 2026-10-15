@@ -162,11 +162,11 @@ fn declarations_override_the_defaults() {
 fn effect_keys_are_the_documented_set() {
     let c = one(sec("sample", "サンプル"));
     let keys = c.effect_keys();
+    // NO csv: keys — the rows are materialised by the loader from the mod's
+    // `trains/` folder; emitting csv effects made the engine overlay those rows onto
+    // the csvp, where a 3-column train_comment row cannot fit the 11-column table and
+    // the whole csvp merge was refused.
     for want in [
-        "csv:train_form.csv:FORM_MYMOD_SAMPLE",
-        "csv:train_pattern.csv:FORM_MYMOD_SAMPLE",
-        "csv:train_comment.csv:FORM_MYMOD_SAMPLE",
-        "csv:train_custom.csv:FORM_MYMOD_SAMPLE",
         "asset:form_mymod_sample_f.dds",
         "asset:form_mymod_sample_s.dds",
         "asset:form_mymod_sample_s_1.dds",
@@ -175,7 +175,7 @@ fn effect_keys_are_the_documented_set() {
     ] {
         assert!(keys.iter().any(|k| k == want), "missing key {want} in {keys:?}");
     }
-    assert_eq!(keys.len(), 9);
+    assert_eq!(keys.len(), 5);
 }
 
 #[test]

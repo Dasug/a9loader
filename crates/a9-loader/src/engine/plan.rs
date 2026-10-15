@@ -378,48 +378,15 @@ impl<'a> PlanBuilder<'a> {
             return;
         }
         for t in mine {
-            // the four csvp rows
-            let rows: [(&str, a9_formats::overlay::CsvOpKind, Vec<u8>); 4] = [
-                (
-                    "train_form.csv",
-                    a9_formats::overlay::CsvOpKind::Rows,
-                    t.form_payload(),
-                ),
-                (
-                    "train_comment.csv",
-                    a9_formats::overlay::CsvOpKind::Rows,
-                    t.comment_payload(),
-                ),
-                (
-                    "train_custom.csv",
-                    a9_formats::overlay::CsvOpKind::Rows,
-                    t.custom_payload(),
-                ),
-                (
-                    "train_pattern.csv",
-                    a9_formats::overlay::CsvOpKind::GroupAppend,
-                    t.pattern_payload(),
-                ),
-            ];
-            for (name, kind, payload) in rows {
-                let key = format!("csv:{name}:{}", t.form_name);
-                if self.res.effect_refused(i, &key) {
-                    self.logger.err(&format!(
-                        "mod '{}': train {}: {key} refused (overlap loser)",
-                        m.id, t.form_name
-                    ));
-                    self.refused += 1;
-                    continue;
-                }
-                self.plan.csvs.push(crate::overlay::CsvOpPlan {
-                    mod_id: m.id.clone(),
-                    mod_version: m.version.to_string(),
-                    kind,
-                    name: name.to_string(),
-                    payload,
-                    row_keys: vec![t.form_name.clone()],
-                });
-            }
+            // NO csvp rows for a train. A `[[train]]`'s data is materialised by the
+            // loader into the injected spec row (rowinject reads the mod's `trains/`
+            // folder directly); the CSV pipeline can never attach these rows anyway —
+            // its per-form index buffers are fixed 417 entries, and an injected row is
+            // 421+. Pushing them was worse than useless: `trains/train_comment.csv`
+            // legitimately carries three columns (key + 日本語 + 英語) while the shipped
+            // table has eleven, so the merge refused and the ENTIRE csvp was served
+            // vanilla that boot — silently dropping every other mod's csvp patches too.
+            // (Was: "csv row patch "FORM_...": 3 columns but the base table has 11".)
             // the three preview icons (payloads ride their host via host = "auto",
             // dir = "previewtexture" -> the tp pack, and the loader auto-extends
             // the previewtexture.dir listing from exactly these rows)

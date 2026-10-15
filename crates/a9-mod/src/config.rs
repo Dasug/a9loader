@@ -117,6 +117,18 @@ pub struct Config {
     /// per-car records (the sub-index it feeds to `aModelIdx[sub - 1]`). Off by
     /// default; not part of normal loader operation.
     pub probe_consist: bool,
+    /// DIAGNOSTIC ONLY — **OFF BY DEFAULT**: one line per file open the loader
+    /// intercepts (`open trace: <path>`). This used to follow `log_level = debug`,
+    /// which made a debug boot 150+ lines of noise; `a9ml classify` answers the same
+    /// "where is this file consumed" question offline.
+    pub probe_opens: bool,
+    /// DIAGNOSTIC ONLY — **OFF BY DEFAULT**: at every `train_list_builder` call,
+    /// dump named spec rows (the model array, the per-car block and the scalar
+    /// fields the panel/selector read) plus the 18 name lanes of the injected
+    /// rows. This is the instrument that solved the wrong-mesh and selector
+    /// questions, so it is kept — but it is the most verbose diagnostic in the
+    /// loader and no longer belongs in a normal boot.
+    pub probe_rows: bool,
     /// M7-2 diagnostic — **OFF BY DEFAULT, not part of normal operation**: see
     /// `probe_save.rs`. When true the loader hooks the four save-side mmf
     /// helpers (`mmf_paged_write` / `mmf_paged_write_bulk` /
@@ -159,6 +171,8 @@ impl Default for Config {
             probe_window: false,
             car_build: false,
             probe_consist: false,
+            probe_rows: false,
+            probe_opens: false,
             probe_save: false,
             pack_serving: PackServing::Inject,
             asset_serving: AssetServing::Tailgate,
@@ -235,6 +249,18 @@ pub fn read(path: &Path) -> Config {
                 None => cfg
                     .warnings
                     .push(format!("probe_consist must be a bool, got {val:?}")),
+            },
+            "probe_opens" => match val.as_bool() {
+                Some(b) => cfg.probe_opens = b,
+                None => cfg
+                    .warnings
+                    .push(format!("probe_opens must be a bool, got {val:?}")),
+            },
+            "probe_rows" => match val.as_bool() {
+                Some(b) => cfg.probe_rows = b,
+                None => cfg
+                    .warnings
+                    .push(format!("probe_rows must be a bool, got {val:?}")),
             },
             "car_build" => match val.as_bool() {
                 Some(b) => cfg.car_build = b,

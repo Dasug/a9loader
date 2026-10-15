@@ -90,11 +90,14 @@ check "probe enabled line"        "probe: fetch hooks on (diagnostic)"    "$LOG"
 check "pack hook installed"        "probe: pack_fetch hook installed rva=0x306e20 expect=verified" "$LOG"
 check "texture hook installed"     "probe: texture_fetch hook installed rva=0x3010d0 expect=verified" "$LOG"
 check "ccommon hook installed"     "probe: ccommon_fetch hook installed rva=0x2ec0e0 expect=verified" "$LOG"
-check "cache hook installed"       "probe: fetch_cache_get hook installed rva=0x3089b0 expect=verified" "$LOG"
+# fetch_cache_get (0x3089b0) starts with `mov rax,rsp` (48 8b c4), so the trampoline
+# guard refuses it: a trampoline would relocate the function's own frame pointer.
+# The refusal is the correct behaviour — asserting it keeps the guard honest.
+check "cache hook refused"         "probe refused: fetch_cache_get rva=0x3089b0" "$LOG"
+check "refusal names the cause"    "reads RSP as a value at prologue byte 0 ([48, 8b, c4])" "$LOG"
 check "pack call logged"           "probe: pack_fetch obj=0x0 name=\"train\\\\113\\\\_d_113.dds\" dest=" "$LOG"
 check "texture call logged"        'probe: texture_fetch ctx=0x0 src="train\\113\\_t_113_a.x" name="./_d_113.dds" mode=7' "$LOG"
 check "ccommon call logged"        "probe: ccommon_fetch mgr=0x0 name=\"train\\\\113\\\\_d_113.dds\"" "$LOG"
-check "cache call logged"          "probe: cache_get cache=0x0 name=\"train\\\\113\\\\_d_113.dds\"" "$LOG"
 check "fakes still ran (via the trampolines)" "pack_fetch_body: called" "$scen_dir/out.txt"
 checkf "all four probe bodies"     grep -c "called" "$scen_dir/out.txt"
 
@@ -182,9 +185,11 @@ LOG="$scen_dir/mods/a9loader.log"
 OUT="$scen_dir/out.txt"
 check "probe enabled"       "probe: window hooks on (diagnostic)"      "$LOG"
 check "tab hook installed"  "probe: tab rebuild (FUN_14019e760 — the type-cycle engine) hook installed rva=0x19e760 expect=verified" "$LOG"
-check "window hook installed" "probe: window (train_list_big_list_window — the frame bracket) hook installed rva=0x2ca400 expect=verified" "$LOG"
-check "window entry dump"   "probe: window #1 (entry) lists +0x30="   "$LOG"
-check "window change dump"  "probe: window #2 (entry) lists +0x30="   "$LOG"
+# train_list_big_list_window (0x2ca400) has the same `mov rax,rsp` prologue, so it is
+# refused for the same reason. The tab-rebuild hook (0x19e760) is not RSP-derived and
+# still installs, and that is the probe that produced the type-filter evidence.
+check "window hook refused" "probe refused: window (train_list_big_list_window — the frame bracket) rva=0x2ca400" "$LOG"
+check "tab dump carries counts" "probe: tab rebuild #1 lists +0x30="  "$LOG"
 check "tab dump"            "probe: tab rebuild #1 lists +0x30="      "$LOG"
 check "delta line"          "probe: tab rebuild   +0x48 delta:"       "$LOG"
 check "per-row dump"        "probe: tab rebuild   +0x48 id="          "$LOG"

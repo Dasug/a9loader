@@ -169,6 +169,7 @@ pub unsafe fn boot(hinst: sys::HMODULE) {
         &trains,
         cfg.car_build,
         cfg.probe_consist,
+        cfg.probe_rows,
     );
     }
 
@@ -794,7 +795,7 @@ fn install_overlay_hooked(
             anchor.rva as usize,
             &anchor.expect_bytes().unwrap_or_default(),
             log::Logger::new(&mods_dir.join("a9loader.log")),
-            cfg.log_level >= a9_mod::config::LogLevel::Debug,
+            cfg.probe_opens,
         )
     } {
         Ok(())
@@ -1000,6 +1001,7 @@ fn install_train_injection(
     trains: &[a9_mod::train::CompiledTrain],
     car_build: bool,
     probe_consist: bool,
+    probe_rows: bool,
 ) {
     let rows: Vec<crate::rowinject::TrainRow> = trains
         .iter()
@@ -1030,6 +1032,7 @@ fn install_train_injection(
             &rows,
             car_build,
             probe_consist,
+            probe_rows,
         )
     } {
         Ok(line) => logger.line(&line),

@@ -148,19 +148,20 @@ impl CompiledTrain {
     /// The overlap/priority keys a `[[train]]` produces — the exact effect keys
     /// the expansion carries, so `resolve` composes them like any other effect.
     ///
-    /// * `csv:train_form.csv:<form>` / `csv:train_pattern.csv:<form>` /
-    ///   `csv:train_comment.csv:<form>` / `csv:train_custom.csv:<form>` — the
-    ///   four row effects (the pattern one is the positional group append);
     /// * `asset:<icon>` ×3 — the preview-icon rows;
     /// * `hook:train_list_filter` — the visibility entry (composable, like any
     ///   `train_list` contribution);
     /// * `train:<form>` — the spec-row injection (its own namespace).
     pub fn effect_keys(&self) -> Vec<String> {
+        // NO `csv:` effects. The train's rows are materialised by the LOADER from the
+        // mod's `trains/` folder (a `[[train]]` row can never be reached by the CSV
+        // pipeline — its per-form buffers are fixed 417 entries). The four `csv:` keys
+        // were left over from the scalar route, and they made the engine try to overlay
+        // the mod's rows onto the csvp: `trains/train_comment.csv` legitimately carries
+        // three columns (key + 日本語 + 英語) while the shipped table has eleven, so the
+        // merge refused and the WHOLE csvp was served vanilla that boot:
+        //   "csv row patch ...: 3 columns but the base table has 11 — serving the original"
         let mut keys = vec![
-            format!("csv:train_form.csv:{}", self.form_name),
-            format!("csv:train_pattern.csv:{}", self.form_name),
-            format!("csv:train_comment.csv:{}", self.form_name),
-            format!("csv:train_custom.csv:{}", self.form_name),
             "hook:train_list_filter".to_string(),
             format!("train:{}", self.form_name),
         ];

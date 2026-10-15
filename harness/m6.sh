@@ -42,7 +42,7 @@ py_mk "$RUN/data/mtfake.bin" 40 0x55 # the non-matching path's vanilla bytes
 printf 'FORM_DUMMY\x00' > "$RUN/form_list.bin"  # the host only needs a file here
 
 # debug so the per-match line is emitted (the boot line is info-level)
-DEFAULT_CFG='log_level = "debug"\n'
+DEFAULT_CFG='log_level = "debug"\nprobe_opens = true\n'
 scen_fixtures() {
     mkdir -p "$scen_dir/data/bmf"
     cp "$RUN/data/mtfake.bin" "$scen_dir/data/"
