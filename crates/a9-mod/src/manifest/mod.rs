@@ -79,7 +79,25 @@ pub struct Manifest {
     /// four csvp rows, the icons and the visibility entry
     #[serde(default)]
     pub train: Vec<TrainSection>,
+
+    /// The mod's own train CSVs (the vanilla layouts) when it ships a `trains/`
+    /// folder — read by the scan, never part of the TOML. The train compiler
+    /// overlays these rows on its derived defaults, so a mod can declare a train
+    /// exactly the way the shipped tables do (see `a9_mod::train`).
+    #[serde(skip)]
+    pub train_csv: TrainCsv,
 }
+/// The four vanilla train tables a mod may ship under `trains/` (the same names and
+/// column layouts as the shipped `csvp` entries). Each is optional: a mod may
+/// ship only the tables it wants to override.
+#[derive(Debug, Clone, Default)]
+pub struct TrainCsv {
+    pub form: Option<a9_formats::csv::Table>,
+    pub pattern: Option<a9_formats::csv::Table>,
+    pub comment: Option<a9_formats::csv::Table>,
+    pub custom: Option<a9_formats::csv::Table>,
+}
+
 
 fn default_priority() -> i64 {
     DEFAULT_PRIORITY

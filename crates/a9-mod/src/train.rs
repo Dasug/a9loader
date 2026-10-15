@@ -415,6 +415,83 @@ pub fn effect_keys_of(mod_id: &str, trains: &[TrainSection]) -> Vec<String> {
 /// Compile every enabled mod's trains in resolved order, threading the id base
 /// across mods so allocations never collide. Returns the compiled trains and
 /// one refusal line per skipped train.
+/// Overlay a mod's own vanilla-format CSV rows on a compiled train's derived
+/// rows. The author's tables win, keyed by the FORM name in column 0 — exactly
+/// the way the shipped tables are keyed — so a mod can copy a vanilla row and
+/// edit it.
+///
+/// The pattern table is positional: the keyed head row plus the continuation
+/// rows that follow it form one group. The head's profile columns (ディレクトリ /
+/// モデル / 定員積載 / 運行費用 / 購入価格) also update the compiled scalars,
+/// because those are what the car build hands to the game's own model loader.
+/// The comment row's 日本語 / 英語 columns likewise refresh the display names.
+///
+/// The derived rows stay the fallback for any table or row the mod does not
+/// provide, so a scalar-only `[[train]]` behaves exactly as before.
+fn overlay_csv_rows(c: &mut CompiledTrain, csv: &crate::manifest::TrainCsv) {
+    let key = c.form_name.clone();
+    if let Some(t) = &csv.form {
+        if let Some(r) = t.rows.iter().find(|r| r.key() == key) {
+            c.rows.form = r.fields.clone();
+        }
+    }
+    if let Some(t) = &csv.comment {
+        if let Some(r) = t.rows.iter().find(|r| r.key() == key) {
+            c.rows.comment = r.fields.clone();
+            if let Some(v) = r.fields.get(1) {
+                if !v.trim().is_empty() {
+                    c.name_jp = v.clone();
+                }
+            }
+            if let Some(v) = r.fields.get(2) {
+                if !v.trim().is_empty() {
+                    c.name_en = v.clone();
+                }
+            }
+        }
+    }
+    if let Some(t) = &csv.custom {
+        if let Some(r) = t.rows.iter().find(|r| r.key() == key) {
+            c.rows.custom = r.fields.clone();
+        }
+    }
+    if let Some(t) = &csv.pattern {
+        if let Some(start) = t.rows.iter().position(|r| r.key() == key) {
+            let mut group: Vec<Vec<String>> = Vec::new();
+            for r in t.rows.iter().skip(start) {
+                if !group.is_empty() && !r.key().is_empty() {
+                    break; // the next group starts
+                }
+                group.push(r.fields.clone());
+            }
+            // keep the compiler's shape: PATTERN_GROUP_ROWS car rows + separator
+            group.truncate(PATTERN_GROUP_ROWS + 1);
+            while group.len() < PATTERN_GROUP_ROWS + 1 {
+                group.push(Vec::new());
+            }
+            if let Some(head) = group.first() {
+                let cell = |i: usize| head.get(i).map(|s| s.trim()).unwrap_or("");
+                if !cell(1).is_empty() {
+                    c.model_dir = cell(1).to_string();
+                }
+                if !cell(2).is_empty() {
+                    c.model_mesh = cell(2).to_string();
+                }
+                if let Ok(v) = cell(3).parse::<u32>() {
+                    c.capacity = v;
+                }
+                if let Ok(v) = cell(4).parse::<u64>() {
+                    c.running_cost = v;
+                }
+                if let Ok(v) = cell(5).parse::<u64>() {
+                    c.price = v;
+                }
+            }
+            c.rows.pattern = group;
+        }
+    }
+}
+
 pub fn compile_all(
     manifests: &[Manifest],
     order: &[usize],
@@ -423,7 +500,10 @@ pub fn compile_all(
     let mut refused = Vec::new();
     let mut base = BASE_ID;
     for &i in order {
-        let (c, r) = compile(&manifests[i].id, &manifests[i].train, base);
+        let (mut c, r) = compile(&manifests[i].id, &manifests[i].train, base);
+        for t in &mut c {
+            overlay_csv_rows(t, &manifests[i].train_csv);
+        }
         base += manifests[i].train.len(); // keep ids stable across skips
         out.extend(c);
         refused.extend(r.into_iter().map(|m| format!("mod '{}': {m}", manifests[i].id)));

@@ -52,8 +52,12 @@ pub fn run(game: Option<&Path>, mod_dir: Option<&Path>) -> Result<()> {
         (None, Some(m)) => {
             let text = fs::read_to_string(m.join("mod.toml"))
                 .with_context(|| format!("reading {}", m.join("mod.toml").display()))?;
-            let manifest = Manifest::parse(&text)?;
+            let mut manifest = Manifest::parse(&text)?;
             manifest.validate()?;
+            // the loader scans the mod dir, which also reads the mod's own train
+            // CSVs (`trains/`); the dry run must see the same data or it would
+            // report rows the loader never uses.
+            a9_mod::scan::read_train_csv_public(&mut manifest, m)?;
             let (t, r) = train::compile(&manifest.id, &manifest.train, BASE_ID);
             let forms = m
                 .parent()

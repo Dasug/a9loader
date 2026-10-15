@@ -267,6 +267,7 @@ fn compile_all_threads_ids_across_mods() {
         hook: Vec::new(),
         pack: Vec::new(),
         csv: Vec::new(),
+        train_csv: Default::default(),
         asset: Vec::new(),
         loose_asset: Vec::new(),
         train: vec![sec("x", "X"), sec("y", "Y")],
