@@ -1050,6 +1050,8 @@ extern void rows_ctor_undo(void);
 __asm__(
     ".globl rows_resize_undo\n"
     "rows_resize_undo:\n"
+    "  movq 0x40(%rsp), %rbx\n"
+    "  movq 0x48(%rsp), %rsi\n"
     "addq $0x30, %rsp\n"
     "popq %rdi\n"
     "jmp rows_resize_body\n"
@@ -1092,6 +1094,11 @@ __attribute__((used, noinline)) void rows_realloc_body(void *vec, unsigned long 
     *(void **)vec = nb;
     *(void **)((char *)vec + 8) = nb + old_count * ROWS_ROW_STRIDE;
     *(void **)((char *)vec + 0x10) = nb + new_count * ROWS_ROW_STRIDE;
+    /* the accessor derives the row address from the vector, so the stand-in must
+     * follow the reallocation the way the game's own vector does — otherwise the
+     * loader's row writes and the host's verification would read two different
+     * blocks (the old one's slack). */
+    g_rows_base = nb;
     printf("rows realloc_body: %lu -> %lu rows (game-allocator stand-in, block=%p)\n",
            old_count, new_count, (void *)nb);
 }
@@ -1099,16 +1106,38 @@ __attribute__((used, noinline)) void rows_realloc_body(void *vec, unsigned long 
 /* the fake name constructor: the real one builds a valid A9_RcStr from a wide
  * format + one integer arg (the builder's `form_id_%d`). `g_rows_ctor_null`
  * models the failure the mechanism must refuse. */
-__attribute__((used, noinline)) void rows_ctor_body(void **dest, const wchar_t *fmt, unsigned id)
+/* `row_name_ctor` is the printf-style wide-string constructor. The M7 row build
+ * calls it with a TEXT format and an unused value; the car build (and the lane
+ * re-format) call it with a static `%s` and a wide-string POINTER in the value
+ * slot — so the value must be read as a pointer when the format says `%s`. */
+__attribute__((used, noinline)) void **rows_ctor_body(void **dest, const wchar_t *fmt,
+                                                     unsigned long long value)
 {
-    static wchar_t bufs[8][64];
+    static wchar_t bufs[32][64];
     static unsigned n;
+    int is_text = (fmt && wcscmp(fmt, L"%s") == 0);
     g_rows_ctor_calls++;
-    if (g_rows_ctor_null) { *dest = NULL; return; }
-    wchar_t *b = bufs[n++ & 7];
-    swprintf(b, 64, fmt ? fmt : L"%u", (int)id);
-    *dest = b;
-    printf("rows ctor_body: fmt=%ls id=%u -> %ls\n", fmt ? fmt : L"(null)", id, b);
+    if (g_rows_ctor_null && !is_text) { *dest = NULL; return NULL; }
+    {
+        wchar_t *b = bufs[n++ & 31];
+        if (is_text) {
+            const wchar_t *src = (const wchar_t *)(unsigned long long)value;
+            swprintf(b, 64, L"%s", src ? src : L"(null)");
+        } else {
+            swprintf(b, 64, fmt ? fmt : L"%u", (int)value);
+        }
+        *dest = b;
+        /* two shapes: the engine's own `form_id_%d` / `modrow_%d` auto-name (the value
+         * is an id) and the `%s` assignment the M7-2 lanes and the car-build cells use
+         * (the value is a wide-string pointer). Print what the call actually carried. */
+        if (is_text) {
+            printf("rows ctor_body: fmt=%ls text -> %ls\n", fmt, b);
+        } else {
+            printf("rows ctor_body: fmt=%ls id=%d -> %ls\n", fmt ? fmt : L"(null)",
+                   (int)value, b);
+        }
+    }
+    return dest;
 }
 
 /* the shipped valid template row (row 0): bValid=1, a car, three names and a
@@ -1199,6 +1228,32 @@ static int setup_rows_pages(void)
 #define RVA_TLB          0x19D9C0u   /* train_list_builder (injection site) */
 #define RVA_CLONEREF     0x1D7D0u    /* wstr_clone_ref (called) */
 #define RVA_ANNOT_BOUND  0x3B0A7Fu   /* preview_form_list_annotator: CMP EBP,0x1a1 */
+#define RVA_MODEL_FETCH    0x19B9F0u /* train_model_fetch(wrapper,&path_cell,row,flag) */
+#define RVA_MODEL_REGISTER 0x97A90u  /* model_register(manager, wrapper) */
+#define RVA_MODEL_INDEX    0x19F120u /* model_index_alloc(manager) -> index */
+#define RVA_RCSTR_CTOR     0x1D940u  /* rcstr_ctor(dest): an empty A9_RcStr at dest */
+#define RVA_RCSTR_CALLTGT  0x40BA84u /* the accessor rcstr_ctor's prologue calls */
+/* The car build CALLS these four game functions — it hooks nothing — so the fakes
+ * must both satisfy the address book's expect bytes (the loader verifies them
+ * before it will call) and survive execution: the recorded prologue runs, a
+ * synthetic byte completes the cut last instruction, then an E9 jumps to a body
+ * that undoes the prologue's frame and restores the register it pushed. */
+/* These must be EXACTLY the address book's expect lengths: a longer array
+ * appends implicit 0x00 bytes that then execute (`add [rax],al`) before the E9. */
+static const unsigned char g_fetch_orig[21] = {
+    0x48,0x89,0x5c,0x24,0x08,0x48,0x89,0x74,0x24,0x10,0x48,0x89,0x7c,0x24,0x18,0x41,0x56,
+    0x48,0x83,0xec,0x20
+};
+static const unsigned char g_register_orig[16] = {
+    0x48,0x89,0x5c,0x24,0x08,0x57,0x48,0x83,0xec,0x20,0x48,0x8b,0xd9,0x48,0x8b,0x49
+};
+static const unsigned char g_index_orig[16] = {
+    0x48,0x8b,0x51,0x08,0x48,0xb8,0xab,0xaa,0xaa,0xaa,0xaa,0xaa,0xaa,0x2a,0x48,0x2b
+};
+static const unsigned char g_rcstr_orig[16] = {
+    0x40,0x53,0x48,0x83,0xec,0x20,0x48,0x8b,0xd9,0xe8,0x36,0xe1,0x3e,0x00,0x48,0x8b
+};
+extern void fetch_undo(void), register_undo(void), index_undo(void), rcstr_undo(void);
 static const unsigned char g_annot_orig[6] = { 0x81, 0xfd, 0xa1, 0x01, 0x00, 0x00 };
 
 static const unsigned char g_tlb_orig[17] = {
@@ -1243,10 +1298,21 @@ __attribute__((used, noinline)) void tlb_body(void *mgr)
 }
 
 /* the fake wstr_clone_ref: a stand-in refcount bump (shares the pointer) */
-__attribute__((used, noinline)) void cloneref_body(void **dest, void **src)
+/* The fake wstr_clone_ref. NOTE the entry contract: the site's first 16 bytes are
+ * the REAL prologue and they are replayed before this body runs, so the registers
+ * are already the post-prologue ones — rcx holds the RcStr OBJECT (`*src - 0x18`,
+ * what the real 0x14001d800 refcount-bumps) and rdx the src slot. Treating rcx as a
+ * destination slot (the obvious reading) writes 8 bytes at `*src - 0x18`, which for
+ * this harness's string literals lands in the harness's own .data and, when the
+ * source string is a heap one, corrupts a Rust String header — that was the source
+ * of the spurious "capacity overflow" panics and the garbage error payloads. The
+ * real function's refcount bump is meaningless for literals, so the stand-in only
+ * records the call. */
+__attribute__((used, noinline)) void cloneref_body(void *obj, void **src)
 {
+    (void)obj;
+    (void)src;
     g_clone_calls++;
-    if (dest && src) *dest = *src;
 }
 
 /* a locale-independent view of a wide string: its UTF-16 code units as hex
@@ -1285,6 +1351,73 @@ static int form_id_of(const wchar_t *name)
     return -1;
 }
 
+/* ---- car-build fakes: the game functions the loader CALLS during the build ---- */
+static unsigned g_fetch_calls, g_register_calls, g_index_calls, g_rcstr_calls;
+static unsigned g_fetch_capacity, g_fetch_running;
+static unsigned long long g_fetch_price;
+static wchar_t g_fetch_path[160];
+static unsigned char g_fake_car_obj[0x40];   /* the object the fake loader returns */
+static unsigned char g_fake_car_model[0x2c8];
+
+void __attribute__((ms_abi)) fake_car_dtor(void *obj, unsigned flags)
+{
+    (void)obj; (void)flags;
+    printf("train: fake car dtor called\n");
+}
+/* train_model_fetch(wrapper, &path_cell, row, flag): report success, store a
+ * non-NULL object in the wrapper's first field, and dump what the loader handed
+ * over — the wrapper's three numbers (capacity / running cost / price) and the 17
+ * pattern-row cells (the caller keeps the A9_RcStr objects alive). */
+unsigned char __attribute__((used, ms_abi)) fake_fetch_body(unsigned char *wrapper,
+                                                            const void *path_cell,
+                                                            const unsigned char *row,
+                                                            unsigned flag)
+{
+    unsigned i;
+    g_fetch_calls++;
+    g_fetch_capacity = *(unsigned *)(wrapper + 0x08);
+    g_fetch_running  = *(unsigned *)(wrapper + 0x0c);
+    g_fetch_price    = *(unsigned long long *)(wrapper + 0x10);
+    if (path_cell && *(const void **)path_cell) {
+        const wchar_t *w = *(const wchar_t *const *)path_cell;
+        wcsncpy(g_fetch_path, w, 159);
+        g_fetch_path[159] = 0;
+    }
+    printf("train: fetch wrapper capacity=%u running=%u price=%llu flag=%u path=%ls\n",
+           g_fetch_capacity, g_fetch_running, g_fetch_price, flag, g_fetch_path);
+    for (i = 0; i < 17; i++) {
+        const wchar_t *c = *(const wchar_t *const *)(row + i * 8);
+        printf("train: fetch row cell[%u] = %ls\n", i, c ? c : L"(null)");
+    }
+    *(void **)wrapper = g_fake_car_obj;
+    return 1;
+}
+/* model_register(manager, wrapper): the manager copies what it needs. */
+void __attribute__((used, ms_abi)) fake_register_body(const unsigned char *manager,
+                                                      const unsigned char *wrapper)
+{
+    (void)manager;
+    g_register_calls++;
+    printf("train: model_register called (capacity=%u running=%u price=%llu)\n",
+           *(const unsigned *)(wrapper + 0x08), *(const unsigned *)(wrapper + 0x0c),
+           *(const unsigned long long *)(wrapper + 0x10));
+}
+/* model_index_alloc(manager): the pipeline stores index-1 in the row's slot. */
+unsigned short __attribute__((used, ms_abi)) fake_index_body(const unsigned char *manager)
+{
+    (void)manager;
+    g_index_calls++;
+    return 500;
+}
+/* rcstr_ctor(dest): leave a non-NULL object at dest (the printf-style cell ctor
+ * then assigns over it). */
+void *__attribute__((used, ms_abi)) fake_rcstr_body(void **dest)
+{
+    g_rcstr_calls++;
+    *dest = g_fake_car_model;
+    return dest;
+}
+
 static int setup_train_pages(void)
 {
     /* the clone-ref anchor sits in the image tail: verify the padded .bss
@@ -1315,6 +1448,85 @@ static int setup_train_pages(void)
     }
     g_clone_calls = 0;
     g_tlb_calls = 0;
+    /* the rcstr_ctor site's own prologue contains a `call` (0x1403ee144) inside the
+     * planted bytes, so it EXECUTES before the E9 reaches the fake. The harness's
+     * image at that target is unmapped/zero code, and executing it scribbles over
+     * whatever the registers point at (that noise showed up as corrupted Rust
+     * strings and host .data). Redirect the call to a bare `xor eax,eax; ret` stub. */
+    {
+        BYTE *site = (BYTE *)g_base + RVA_RCSTR_CTOR;
+        for (size_t i = 0; i + 5 <= sizeof(g_rcstr_orig); i++) {
+            if (g_rcstr_orig[i] != 0xE8) continue;
+            int32_t rel;
+            memcpy(&rel, g_rcstr_orig + i + 1, 4);
+            BYTE *target = site + i + 5 + rel;
+            if (map_fixed((UINT_PTR)target & ~(UINT_PTR)0xFFF, 0x1000, PAGE_EXECUTE_READWRITE)) {
+                target[0] = 0x31; /* xor eax,eax */
+                target[1] = 0xC0;
+                target[2] = 0xC3; /* ret */
+                printf("fake: rcstr prologue call redirected to a ret stub at %p\n",
+                       (void *)target);
+            } else {
+                printf("WARN: could not map the rcstr prologue call target %p\n",
+                       (void *)target);
+            }
+        }
+    }
+    /* the four car-build helpers: the loader calls them, so plant the address
+     * book's expect bytes + a synthetic byte completing the cut last instruction
+     * + an E9 to the undo thunk (see the layout comment above the arrays). */
+    {
+        struct { UINT_PTR rva; const unsigned char *orig; size_t len; void *undo;
+                 int completing; } cfakes[] = {
+            { RVA_MODEL_FETCH,    g_fetch_orig,    sizeof(g_fetch_orig),    (void *)&fetch_undo,    -1 },
+            { RVA_MODEL_REGISTER, g_register_orig, sizeof(g_register_orig), (void *)&register_undo, 0x00 },
+            { RVA_MODEL_INDEX,    g_index_orig,    sizeof(g_index_orig),    (void *)&index_undo,    0xc2 },
+            { RVA_RCSTR_CTOR,     g_rcstr_orig,    sizeof(g_rcstr_orig),    (void *)&rcstr_undo,    0x03 },
+        };
+        unsigned k;
+        for (k = 0; k < sizeof(cfakes) / sizeof(cfakes[0]); k++) {
+            BYTE *site = (BYTE *)g_base + cfakes[k].rva;
+            DWORD old;
+            MEMORY_BASIC_INFORMATION mbi;
+            if (!VirtualQuery(site, &mbi, sizeof mbi) || mbi.State != MEM_COMMIT) {
+                /* model_register (0x97A90) is not inside any other mode's block */
+                if (!map_fixed((UINT_PTR)(site - 0x90), 0x1000, PAGE_EXECUTE_READWRITE)) {
+                    printf("WARN: could not map the car helper page 0x%lx\n",
+                           (unsigned long)cfakes[k].rva);
+                    continue;
+                }
+            } else if (!VirtualProtect(site, 0x100, PAGE_EXECUTE_READWRITE, &old)) {
+                printf("WARN: could not unprotect the car helper 0x%lx\n",
+                       (unsigned long)cfakes[k].rva);
+                continue;
+            }
+            memcpy(site, cfakes[k].orig, cfakes[k].len);
+            {
+                BYTE *tail = site + cfakes[k].len;
+                intptr_t rel;
+                if (cfakes[k].completing >= 0) *tail++ = (BYTE)cfakes[k].completing;
+                rel = (intptr_t)cfakes[k].undo - (intptr_t)(tail + 5);
+                tail[0] = 0xE9;
+                memcpy(tail + 1, &rel, 4);
+            }
+        }
+        /* rcstr_ctor's prologue CALLS a game accessor at a fixed RVA: give that
+         * page bare `ret`s so the recorded prologue can run exactly as recorded. */
+        {
+            /* VirtualAlloc rounds the base down to the 64K granularity, so ask
+             * for an aligned 64K and fill it: the call target 0x40BA84 (inside
+             * this block) then holds `ret`. */
+            BYTE *pg = (BYTE *)map_fixed((UINT_PTR)g_base + 0x400000u, 0x10000,
+                                         PAGE_EXECUTE_READWRITE);
+            if (!pg) printf("WARN: could not map the rcstr call-target block\n");
+            else memset(pg, 0xC3, 0x10000);
+        }
+        *(void **)g_fake_car_obj = (void *)&fake_car_dtor;
+        g_fetch_calls = g_register_calls = g_index_calls = g_rcstr_calls = 0;
+        g_fetch_capacity = g_fetch_running = 0;
+        g_fetch_price = 0;
+        g_fetch_path[0] = 0;
+    }
     /* the preview annotator's 417-row loop bound: plain bytes the loader rewrites
      * in place (no hook). The 0x3b0000 block is inside the reserved fake image
      * but not committed, so commit it (the earlier read-back crashed until it
@@ -1819,15 +2031,23 @@ static int mode_clamp(void)
     memset(src, 0, sizeof src);
     for (unsigned i = 0; i < 10; i++) {
         *(unsigned short *)(src + i * 0x18) = car_ids[i];
-        src[i * 0x18 + 2] = 1;   /* aux */
+        src[i * 0x18 + 2] = 1;   /* slot (1-based car position) */
         src[i * 0x18 + 3] = 0;   /* f   */
     }
+    /* a save written while the row's per-car block was empty carries slot 0 —
+     * the guard must repair it (live crash 2026-10-15) */
+    src[2 * 0x18 + 2] = 0;   /* a *real* car (id 400) with slot 0 */
+    src[7 * 0x18 + 2] = 0;
     src[0xf5] = 10;              /* the trailer's car count at block+0xf0+5 */
     memset(dst, 0xAA, sizeof dst);
     g_clamp_read_src = src;
     g_clamp_car_ptr = (void *)(g_base + RVA_CLAMP_CAR);
     unsigned long rr = clamp_car_call(NULL, dst, 0xf8);
     printf("clamp car: ret=%lu\n", rr);
+    printf("clamp car slots:");
+    for (unsigned i = 0; i < 10; i++)
+        printf(" %u", (unsigned)dst[i * 0x18 + 2]);
+    printf("\n");
     printf("clamp car ids:");
     for (unsigned i = 0; i < 10; i++) {
         unsigned short got = *(unsigned short *)(dst + i * 0x18);
@@ -1948,6 +2168,39 @@ static int mode_rows(const char *scen)
  * once per boot and the FIRST call happens before the CSV pipeline populates
  * the rows, so the loader must defer and retry — the `train_retry` mode below
  * fires phase 1 with this helper deliberately NOT yet called. */
+/* The four undo thunks: each site holds the REAL prologue, so execution arrives
+ * here with the prologue's frame built — undo it, restore the register it pushed
+ * (saved at rsp+0x20 => entry_rsp-8), then jump to the body. `index_undo` has no
+ * frame to undo (that prologue only touches registers). */
+__asm__(
+    ".text\n"
+    ".globl fetch_undo\n"
+    "fetch_undo:\n"
+    /* The site saved rbx/rsi/rdi into the caller's shadow space and pushed r14; the
+     * real epilogue restores all four, so the fake must be entered with them
+     * restored too. Skipping that leaves the CALLER's callee-saved registers
+     * clobbered - for `model_register` (whose site does `mov rbx,rcx`) that silently
+     * redirected the caller's sret pointer and produced garbage results. */
+    "  movq 0x30(%rsp), %rbx\n"
+    "  movq 0x38(%rsp), %rsi\n"
+    "  movq 0x40(%rsp), %rdi\n"
+    "  movq 0x20(%rsp), %r14\n"
+    "  addq $0x28, %rsp\n"
+    "  jmp fake_fetch_body\n"
+    ".globl register_undo\n"
+    "register_undo:\n"
+    "  movq 0x30(%rsp), %rbx\n"
+    "  movq 0x20(%rsp), %rdi\n"
+    "  addq $0x28, %rsp\n"
+    "  jmp fake_register_body\n"
+    ".globl index_undo\n"
+    "index_undo:\n"
+    "  jmp fake_index_body\n"
+    ".globl rcstr_undo\n"
+    "rcstr_undo:\n"
+    "  movq 0x20(%rsp), %rbx\n"
+    "  addq $0x28, %rsp\n"
+    "  jmp fake_rcstr_body\n");
 static void train_populate_donor(void)
 {
     int id = form_id_of(L"FORM_AR4");
@@ -1963,6 +2216,8 @@ static void train_populate_donor(void)
         *(void **)(r + ROWS_NAME_JP + 2 * 8) = djp;
         *(void **)(r + ROWS_NAMEALT) = djp;
         *(void **)(r + ROWS_PFORMNAME) = dfn;
+        r[0x39] = 0xA9;  /* the donor's formation block: the car build must NOT touch it */
+        r[0x3a] = 0x5C;
         printf("train: donor row %d (FORM_AR4) populated\n", id);
     } else {
         printf("train: WARN: FORM_AR4 not found in the FORM list\n");
@@ -2012,10 +2267,26 @@ static int mode_train(const char *scen, int retry)
 
     typedef unsigned char *(*acc_fn)(const unsigned char *, unsigned long);
     acc_fn acc = (acc_fn)(g_base + RVA_ROWS_ACCESSOR);
+    if ((e - b) / ROWS_ROW_STRIDE > 421) {
+        unsigned char *r = (unsigned char *)acc((const unsigned char *)vec, 421);
+        printf("train: car build rcstr=%u register=%u index=%u slot=%u carCount=%u first=%u flags=%u block=%02x%02x\n",
+               (unsigned)g_rcstr_calls, (unsigned)g_register_calls, (unsigned)g_index_calls,
+               (unsigned)*(unsigned short *)(r + 0x2c), (unsigned)r[0x38],
+               (unsigned)*(unsigned short *)(r + 0x14), (unsigned)r[0x9d],
+               (unsigned)r[0x39], (unsigned)r[0x3a]);
+    }
     unsigned char *row = acc((const unsigned char *)vec, ROWS_RESERVED_ID);
     printf("train: injected row %u bValid=%u special=%u cruise=%u fare=%u carCount=%u\n",
            ROWS_RESERVED_ID, row[0], row[0x9e],
            *(unsigned short *)(row + 0x0c), *(unsigned short *)(row + 0x12), row[0x38]);
+    /* the two row invariants the car build must establish (live regressions
+     * 2026-10-15): the validity u32 is exactly 1 on every shipped row, and unused
+     * model slots carry the pipeline's empty marker (7), never a valid index. */
+    printf("train: injected validity u32 = %u\n", *(unsigned int *)row);
+    printf("train: leftover model slots = %u %u %u %u %u\n",
+           *(unsigned short *)(row + 0x2e), *(unsigned short *)(row + 0x30),
+           *(unsigned short *)(row + 0x32), *(unsigned short *)(row + 0x34),
+           *(unsigned short *)(row + 0x36));
     printf("train: injected names jp=%s en=%s form=%s\n",
            whex(*(wchar_t **)(row + ROWS_NAME_JP)),
            whex(*(wchar_t **)(row + ROWS_NAME_EN)),
@@ -2281,6 +2552,12 @@ int main(int argc, char **argv)
     if (!strncmp(mode, "train", 5)) {
         if (!setup_rows_pages()) return 3;
         if (!setup_train_pages()) return 3;
+        /* the car-build refusal shape: break ONE helper anchor's bytes BEFORE the
+         * DLL loads, so the loader's boot-time verify refuses the car build while
+         * the injection itself still proceeds (fail-open). */
+        if (strstr(mode, "badhelper")) {
+            ((BYTE *)g_base + RVA_MODEL_FETCH)[0] ^= 0xFF;
+        }
     }
 
     /* real FORM list bytes -> the mapped region (NUL-terminated UTF-16). Heap,
@@ -2339,6 +2616,8 @@ int main(int argc, char **argv)
     if (!strncmp(mode, "rows", 4)) return mode_rows(mode);
     if (!strcmp(mode, "train") || !strcmp(mode, "train-nodump")) return mode_train(mode, 0);
     if (!strcmp(mode, "train_retry")) return mode_train(mode, 1);
+    if (!strcmp(mode, "train_carbuild")) return mode_train(mode, 1);
+    if (!strcmp(mode, "train_badhelper")) return mode_train(mode, 1);
     if (!strcmp(mode, "inject")) return mode_inject();
     if (!strcmp(mode, "tailgate") || !strcmp(mode, "tailgate-mismatch")
         || !strcmp(mode, "tailgate-ws"))

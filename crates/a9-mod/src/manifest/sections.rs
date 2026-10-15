@@ -1,4 +1,4 @@
-//! The M3/M5/M6 manifest sections — `[[pack]]`, `[[csv]]`, `[[asset]]` and
+//! The manifest sections — `[[pack]]`, `[[csv]]`, `[[asset]]` and
 //! `[[loose_asset]]` — with their serde shapes and per-field findings. The M2
 //! core sections (`[[patch]]`/`[[hook]]`) and the root
 //! [`Manifest`](super::Manifest) stay in [`super`].
@@ -77,7 +77,7 @@ pub(super) fn default_host() -> String {
 }
 
 /// `[[asset]]` — a genuinely-new i.dat row whose payload is appended to a
-/// family-A host pack's decoded stream (M5 W1). Served only through the merge
+/// family-A host pack's decoded stream. Served only through the merge
 /// overlay (inject has no family-A seam).
 ///
 /// Exactly one of two forms:
@@ -133,7 +133,7 @@ pub struct AssetSection {
 /// Motivating case: the game builds its bitmap-font atlases at every boot,
 /// writes them to a PER-BOOT RANDOM temp directory
 /// (`%TEMP%\<random>.adk\fe01.bin` … `fs02.bin`), then reads them back through
-/// the same `CFile::Open` funnel the M3 overlay hooks — so the match must be a
+/// the same `CFile::Open` funnel the overlay hooks — so the match must be a
 /// PATTERN, never an exact path. An exact game path (`data\bmf\fy01.bin`)
 /// works too (a `match` with no `*` is an exact, case-insensitive path).
 ///
@@ -152,7 +152,7 @@ pub struct LooseAssetSection {
     pub file: String,
 }
 
-/// `[[train]]` — a brand-new train type (M7-2), the one section that adds
+/// `[[train]]` — a brand-new train type, the one section that adds
 /// trains BEYOND the 417-name FORM catalog without the author hand-picking a
 /// slot.
 ///
@@ -176,7 +176,7 @@ pub struct LooseAssetSection {
 ///   FORM literal, so the CSV pipeline does not attach them to the injected
 ///   row; the row's runtime data comes from the donor clone + the declared
 ///   overrides (price/capacity/running cost live only in `train_pattern` and
-///   are therefore not applied to the row — an M7-3 live-acceptance item).
+///   are therefore not applied to the row).
 #[derive(Deserialize, Serialize, Debug, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct TrainSection {
@@ -199,13 +199,20 @@ pub struct TrainSection {
     /// the shipped KiHa-32 ones, whose mesh and liveries are present regardless.
     #[serde(default)]
     pub from: Option<String>,
-    /// purchase price (`train_pattern` 購入価格). Default `45000000`.
+    /// purchase price (`train_pattern` 購入価格), in the SAME unit the shipped
+    /// CSVs use — so a mod's number is directly comparable with a vanilla
+    /// train's. The game converts for display itself (the purchase panel showed
+    /// the value / 50 in one currency/language setting and / 100 in another, and
+    /// the Japanese prices are yen), so the loader never rescales it.
+    /// Default `45000000`.
     #[serde(default)]
     pub price: Option<u64>,
-    /// capacity (`train_pattern` 定員積載). Default `106`.
+    /// capacity (`train_pattern` 定員積載), shipped-CSV unit — the purchase
+    /// panel prints it 1:1 (live: a declared 111 shows as 111). Default `106`.
     #[serde(default)]
     pub capacity: Option<u32>,
-    /// running cost (`train_pattern` 運行費用). Default `26200`.
+    /// running cost (`train_pattern` 運行費用), shipped-CSV unit.
+    /// Default `26200`.
     #[serde(default)]
     pub running_cost: Option<u32>,
     /// cruise speed (`train_form` 巡航速度, u16). Default `65`.

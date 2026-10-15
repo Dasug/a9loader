@@ -294,7 +294,103 @@ check  "third call is probe-only" "train: third call (post-injection, probe only
 check  "injected lanes are ours"  "train probe lanes: injected(421) [n0=サンプル気動車 n1=Sample Railcar" "$LOG"
 check  "vector grown exactly once" "train: vector rows after injection = 422" "$OUT"
 check  "annotator bound widened"    "train: annotator bound now = 422 (was 417)" "$OUT"
+check  "car build opt-in"         "car build skipped: disabled (set car_build = true" "$LOG"
 check  "injected fields"           "train: injected row 421 bValid=1 special=0 cruise=70 fare=250 carCount=1" "$OUT"
 check  "reserved id admitted"      "train: reserved id 421 kept by the composed filter = 1" "$OUT"
+
+echo "== T6: train-carbuild — the loader builds the car through the game's own model loader"
+# The car build calls four game functions (train_model_fetch / model_register /
+# model_index_alloc / rcstr_ctor) whose fakes live in setup_train_pages; the
+# assertions pin the call shape (the 17-cell pattern row, the wrapper's three
+# numbers), the returned index landing in the reserved row, and that the loader
+# leaves the donor's formation block alone.
+new_scen t6-carbuild
+mod trainmod \
+    'id = "trainmod"' \
+    'name = "Train mod"' \
+    'version = "1.0.0"' \
+    'author = "test"' \
+    '' \
+    '[[train]]' \
+    'key = "sample"' \
+    'name = "サンプル気動車"' \
+    'name_en = "Sample Railcar"' \
+    'price = 42000000' \
+    'capacity = 88' \
+    'running_cost = 24000' \
+    'cruise_speed = 70' \
+    'fare = 250'
+for n in f s s_1; do
+    pay trainmod "assets/form_trainmod_sample_$n.dds" "form_trainmod_sample_$n.dds"
+done
+printf 'car_build = true\nlog_level = "debug"\n' >> "$scen_dir/a9loader.toml"
+run_host train_carbuild
+OUT="$scen_dir/out.txt"; LOG="$scen_dir/mods/a9loader.log"
+check "helpers verified"     "car build: 4/4 helper anchors verified" "$LOG"
+check "phase 2 fired"        "train: retry phase 2 fired with the donor populated" "$OUT"
+check "cells constructed"    "car build: constructing cells for 'FORM_TRAINMOD_SAMPLE' (mesh train\kh32\_t_kh32_a.x)" "$LOG"
+check "loader call shape"    "car build: calling the game's car-model loader (train\kh32\_t_kh32_a.x; capacity 88, running cost 24000, price 42000000)" "$LOG"
+check "wrapper capacity"     "train: fetch wrapper capacity=88 running=24000 price=42000000 flag=0 path=train\kh32\_t_kh32_a.x" "$OUT"
+check "cell key"             "train: fetch row cell[0] = FORM_TRAINMOD_SAMPLE" "$OUT"
+check "cell dir"             "train: fetch row cell[1] = kh32" "$OUT"
+check "cell mesh"            "train: fetch row cell[2] = _t_kh32_a" "$OUT"
+check "cell capacity"        "train: fetch row cell[3] = 88" "$OUT"
+check "cell running cost"    "train: fetch row cell[4] = 24000" "$OUT"
+check "cell price"           "train: fetch row cell[5] = 42000000" "$OUT"
+check "cell block head"      "train: fetch row cell[6] = 1" "$OUT"
+check "cell standard flag"   "train: fetch row cell[16] = 1" "$OUT"
+check "registered"           "train: model_register called (capacity=88 running=24000 price=42000000)" "$OUT"
+check "index taken"          "car build: registered the car and took model index 500" "$LOG"
+check "row written"          "car build: row 421 now has 1 car (model index 499)" "$LOG"
+check "build summary"        "car build: 1 car(s) loaded through the game's own model loader" "$LOG"
+# The car build must run in the SAME builder call as the injection: that call is inside
+# the pack-load window, where the game's model loader can still resolve the mesh out of
+# the resident pack. A later call (a scenario load) has no window left and the live game
+# refused the car (2026-10-15) — so assert the build happened before the next call.
+inj_line=$(grep -an "train injection: grew the spec vector" "$LOG" | head -1 | cut -d: -f1)
+car_line=$(grep -an "car build: 1 car(s) loaded" "$LOG" | head -1 | cut -d: -f1)
+next_call=$(awk -v a="${inj_line:-0}" 'NR>a && /train probe: call/ {print NR; exit}' "$LOG")
+if [ -n "$inj_line" ] && [ -n "$car_line" ] && [ -n "$next_call" ] && [ "$car_line" -lt "$next_call" ]; then
+    echo "   [ ok ] car build runs in the injection call"
+else
+    echo "   [FAIL] car build runs in the injection call (injection=$inj_line build=$car_line next-call=$next_call)"
+    FAILED=$((FAILED + 1))
+fi
+check "row car fields"       "train: car build rcstr=18 register=1 index=1 slot=499 carCount=1 first=1 flags=1 block=0100" "$OUT"
+# a cloned row must not keep the donor's model slots or the recycled heap bytes in the
+# validity u32 (both were live regressions on 2026-10-15)
+check "validity u32"         "train: injected validity u32 = 1" "$OUT"
+check "leftover slots"       "train: leftover model slots = 65535 65535 65535 65535 65535" "$OUT"
+check "injection intact"     "train: vector rows after injection = 422" "$OUT"
+
+echo "== T7: train-badhelper — a helper whose bytes shifted refuses the car build (fail-open)"
+new_scen t7-badhelper
+mod trainmod \
+    'id = "trainmod"' \
+    'name = "Train mod"' \
+    'version = "1.0.0"' \
+    'author = "test"' \
+    '' \
+    '[[train]]' \
+    'key = "sample"' \
+    'name = "サンプル気動車"' \
+    'name_en = "Sample Railcar"' \
+    'price = 42000000' \
+    'capacity = 88' \
+    'running_cost = 24000' \
+    'cruise_speed = 70' \
+    'fare = 250'
+for n in f s s_1; do
+    pay trainmod "assets/form_trainmod_sample_$n.dds" "form_trainmod_sample_$n.dds"
+done
+printf 'car_build = true\nlog_level = "debug"\n' >> "$scen_dir/a9loader.toml"
+run_host train_badhelper
+OUT="$scen_dir/out.txt"; LOG="$scen_dir/mods/a9loader.log"
+check "anchor refused"       "car build: train_model_fetch failed its byte check" "$LOG"
+check "3/4 verified"         "car build: 3/4 helper anchors verified" "$LOG"
+check "build skipped"        "car build skipped: the car-build helper anchors are not all verified" "$LOG"
+check "injection still ran"  "train injection: grew the spec vector by 1 row(s)" "$LOG"
+check "donor car data kept"  "train: car build rcstr=0 register=0 index=0 slot=0 carCount=1 first=0 flags=0 block=a95c" "$OUT"
+check "injection intact"     "train: vector rows after injection = 422" "$OUT"
 
 harness_done "M7-2 TRAIN HARNESS"

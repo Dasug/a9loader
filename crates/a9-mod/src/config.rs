@@ -109,6 +109,10 @@ pub struct Config {
     /// way out of every call that CHANGES a size — the observable of the
     /// notes/23 type-cycle quirk. Diagnostics only; no behaviour change.
     pub probe_window: bool,
+    /// Build the injected trains' car data by driving the game's own car-model
+    /// loader (see the loader's `build_cars`). Off by default: it calls into game
+    /// code with a loader-built pattern row, so it is opt-in until proven.
+    pub car_build: bool,
     /// M7-2 diagnostic — **OFF BY DEFAULT, not part of normal operation**: see
     /// `probe_save.rs`. When true the loader hooks the four save-side mmf
     /// helpers (`mmf_paged_write` / `mmf_paged_write_bulk` /
@@ -149,6 +153,7 @@ impl Default for Config {
             warnings: Vec::new(),
             probe_fetch: false,
             probe_window: false,
+            car_build: false,
             probe_save: false,
             pack_serving: PackServing::Inject,
             asset_serving: AssetServing::Tailgate,
@@ -219,6 +224,12 @@ pub fn read(path: &Path) -> Config {
                 None => cfg
                     .warnings
                     .push(format!("probe_window must be a bool, got {val:?}")),
+            },
+            "car_build" => match val.as_bool() {
+                Some(b) => cfg.car_build = b,
+                None => cfg
+                    .warnings
+                    .push(format!("car_build must be a bool, got {val:?}")),
             },
             "probe_save" => match val.as_bool() {
                 Some(b) => cfg.probe_save = b,

@@ -161,7 +161,14 @@ pub unsafe fn boot(hinst: sys::HMODULE) {
     // rows are populated. Fail-open: a refusal logs and the game boots with the
     // trains' CSV/asset effects only.
     if !trains.is_empty() {
-        install_train_injection(&entry, base, &mods_dir, &logger, &trains);
+        install_train_injection(
+        &entry,
+        base,
+        &mods_dir,
+        &logger,
+        &trains,
+        cfg.car_build,
+    );
     }
 
     // ---- M4 fetch probe (opt-in diagnostics; trampoline-only, fail-open)
@@ -990,6 +997,7 @@ fn install_train_injection(
     mods_dir: &Path,
     logger: &log::Logger,
     trains: &[a9_mod::train::CompiledTrain],
+    car_build: bool,
 ) {
     let rows: Vec<crate::rowinject::TrainRow> = trains
         .iter()
@@ -1003,6 +1011,11 @@ fn install_train_injection(
             reverse_speed: t.reverse_speed,
             fare: t.fare,
             cars: t.cars,
+            model_dir: t.model_dir.clone(),
+            model_mesh: t.model_mesh.clone(),
+            capacity: t.capacity,
+            running_cost: t.running_cost,
+            price: t.price,
         })
         .collect();
     match unsafe {
@@ -1011,6 +1024,7 @@ fn install_train_injection(
             base,
             log::Logger::new(&mods_dir.join("a9loader.log")),
             &rows,
+            car_build,
         )
     } {
         Ok(line) => logger.line(&line),
