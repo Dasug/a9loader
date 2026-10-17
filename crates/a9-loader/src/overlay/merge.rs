@@ -7,7 +7,7 @@
 //! atomically (tmp + rename) beside its staleness key.
 //!
 //! Two keys are special. `csvp` merges the collected table ops; `i.dat` is the
-//! M5 W1 master-index merge ([`merge_idat`]) whose order is load-bearing for
+//! master-index merge ([`merge_idat`]) whose order is load-bearing for
 //! atomicity: host packs are built FIRST, then rows whose `off` comes from the
 //! same `plan_family_a` the host merges used — so no row can point past a
 //! vanilla image when a host cache fails.
@@ -88,7 +88,7 @@ pub(super) fn ensure_cache(inner: &Inner, key: &str) -> Result<PathBuf, String> 
 /// atomically (tmp + rename) + the key file. Returns (serve path,
 /// cache-was-fresh-reused).
 ///
-/// `key == "i.dat"` is the M5 W1 master-index merge (see [`merge_idat`]):
+/// `key == "i.dat"` is the master-index merge (see [`merge_idat`]):
 /// host packs first (atomicity), then rows whose `off` comes from the same
 /// `plan_family_a` the host merges used.
 fn build_cache(inner: &Inner, key: &str) -> Result<(PathBuf, bool), String> {
@@ -343,7 +343,7 @@ fn merge_family_a_host(inner: &Inner, key: &str, original: &[u8]) -> Result<Vec<
     Ok(b)
 }
 
-/// The M5 W1 master-index merge. Order is load-bearing for atomicity:
+/// The master-index merge. Order is load-bearing for atomicity:
 /// 1. read + parse the shipped `i.dat`;
 /// 2. refuse unresolved name collisions — a name that exists in the shipped
 ///    index without `override_vanilla` (**the authoritative check**: this is

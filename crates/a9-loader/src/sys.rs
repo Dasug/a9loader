@@ -1,6 +1,6 @@
 //! Minimal hand-declared Win32 surface — exactly the functions the loader
 //! needs, minus what std already covers (files via `std::fs`, exe path via
-//! `std::env::current_exe`). M3 may migrate this to the `windows-sys` crate
+//! `std::env::current_exe`). A later pass may migrate this to the `windows-sys` crate
 //! when the overlay grows the API surface.
 #![allow(non_camel_case_types)]
 

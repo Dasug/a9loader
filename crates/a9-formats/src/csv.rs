@@ -1,18 +1,18 @@
-//! UTF-16 CSV tables inside the `csvp` container — the row-merge tier (M5 W2).
+//! UTF-16 CSV tables inside the `csvp` container — the row-merge tier.
 //!
 //! The game's own tables are UTF-16LE, BOM-prefixed, comma-delimited, with
 //! `"`-quoting and CRLF record separators; quoted fields may contain embedded
 //! commas and newlines (the `train_comment.csv` comment column does exactly
-//! that). The game parses them with `FUN_1401a0000` (`,`/newline/`"` aware,
-//! notes/08). The table is what the reservoir stores: one variable-length blob
-//! per table (notes/09), so cell edits do not exist — the modifier tier is
+//! that). The game parses them with its CSV parser (`,`/newline/`"` aware,
+//!). The table is what the reservoir stores: one variable-length blob
+//! per table, so cell edits do not exist — the modifier tier is
 //! **row-level**: parse the blob, apply row ops, re-encode.
 //!
 //! Model:
 //! - [`Table::parse`] keeps every row's bytes **verbatim** (its raw content
 //!   plus its own line terminator) alongside the decoded fields. [`Table::serialize`]
 //!   concatenates them, so `parse` -> `serialize` is byte-identical on every
-//!   real table (the M1 lesson: decode/re-encode must not drift).
+//!   real table (round-trips must not drift).
 //! - Row identity is the **first column** string, case-sensitive. A patch row
 //!   whose key exists REPLACES that base row; a key that does not exist
 //!   APPENDS a new row after the last one. Row order is base order, then
@@ -337,7 +337,7 @@ pub struct MergeStats {
     pub group_appended: usize,
 }
 
-/// Append `rows` **positionally** at the end of `base` — the M7-2 GROUP
+/// Append `rows` **positionally** at the end of `base` — the GROUP
 /// append primitive, a first-class operation next to [`merge_rows`].
 ///
 /// Why it must exist: `train_pattern.csv` rows come in 10-row groups where only

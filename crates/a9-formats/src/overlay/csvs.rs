@@ -22,12 +22,12 @@ pub struct CsvOp {
 /// Whether a [`CsvOp`] replaces the whole table or row-patches it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CsvOpKind {
-    /// the payload IS the table (M3 whole-table replace)
+    /// the payload IS the table (whole-table replace)
     Replace,
     /// the payload is a set of row patches merged into the table
     Rows,
     /// the payload is a set of rows appended POSITIONALLY at the end of the
-    /// table (M7-2: a `train_pattern` group — only the head row is keyed, so a
+    /// table (a `train_pattern` group: only the head row is keyed, so a
     /// keyed [`CsvOpKind::Rows`] patch cannot address the continuation rows).
     /// The rows are placed verbatim; no first-column matching happens.
     GroupAppend,

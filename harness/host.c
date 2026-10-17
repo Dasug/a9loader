@@ -22,10 +22,10 @@
  *   [faked bodies]   the bodies the faked CRT prologues call into (malloc,
  *                    the row/refcount constructors, ...)
  *   [fake pages]     setup_*: map pages at the real RVAs — filter/whitelist/
- *                    FORM, cfile_open, M4 fetch-probe fakes, M4 inject fakes,
- *                    M5 tailgate fakes, M5-T workspace env, M7 tab/form/
- *                    window fakes, M7-0 clamp fakes, M7-1 spec-table fakes,
- *                    M7-2 train/car-build fakes
+ *                    FORM, cfile_open, fetch-probe fakes, inject fakes,
+ *                    tailgate fakes, the fake workspace env, tab/form/
+ *                    window fakes, save-id clamp fakes, spec-table row fakes,
+ *                    [[train]] / car-build fakes
  *   [mode handlers]  mode_* — one per scenario family; main() dispatches on
  *                    the mode string (argv[2])
  * Modes (the dispatch tail in main is authoritative):
@@ -48,26 +48,26 @@
 #define RVA_FILTER 0x1A13B0u
 #define RVA_TABLE  0x6FC1C0u
 #define RVA_FORMS  0x6FC430u
-#define RVA_CFILE  0x41D40Cu   /* MFC CFile::Open — the M3 overlay hook point */
+#define RVA_CFILE  0x41D40Cu   /* MFC CFile::Open — the overlay hook point */
 
-/* M4 fetch-probe anchors (the four runtime fetch hooks the probe pins) */
-#define RVA_PACK 0x306E20u   /* FUN_140306e20 CPackFileBuffer::fetch */
-#define RVA_TEX  0x3010D0u   /* FUN_1403010d0 texture_fetch_miss_path */
-#define RVA_CCOM 0x2EC0E0u   /* FUN_1402ec0e0 CCommonShader::fetch */
-#define RVA_CACHE 0x3089B0u  /* FUN_1403089b0 global fetch-cache get */
+/* Fetch-probe anchors (the four runtime fetch hooks the probe pins) */
+#define RVA_PACK 0x306E20u   /* CPackFileBuffer::fetch */
+#define RVA_TEX  0x3010D0u   /* texture_fetch_miss_path */
+#define RVA_CCOM 0x2EC0E0u   /* CCommonShader::fetch */
+#define RVA_CACHE 0x3089B0u  /* global fetch-cache get */
 
-/* M4 inject-mode anchors (builds.toml famb_runner_call + the per-build
+/* Inject-mode anchors (builds.toml famb_runner_call + the per-build
  * constants the injector stub pins for build 5.00.5634) */
 #define RVA_INJ_SITE 0x3F0259u   /* the famb loader's pool-runner call (E8) */
-#define RVA_FAKE_RUNNER 0x504C0u /* the runner the E8 named = FUN_1400504c0 */
+#define RVA_FAKE_RUNNER 0x504C0u /* the pool runner the spliced E8 names */
 #define RVA_POOL 0xF02470u       /* pool object {rows ptr, count, chunk arr} */
 #define RVA_POOL_ROWS 0xF02700u  /* the fake rows array (0x148 stride) */
 #define RVA_POOL_CHUNK 0xF02660u /* the chunk-size array (u32[8]) */
-#define RVA_POOL_CAP 0xD65DF0u   /* DAT_140d65df0 worker-row capacity */
-#define RVA_WSOUT 0x4F86088u     /* DAT_144f86088 workspace out ptr */
+#define RVA_POOL_CAP 0xD65DF0u   /* worker-row capacity global */
+#define RVA_WSOUT 0x4F86088u     /* the workspace's out pointer */
 #define RVA_OUTBUF 0x4F87000u    /* the fake decoded family-B stream */
 
-/* M5 family-A tailgate anchors (builds.toml pack_lzss_*; the fake pages the
+/* Family-A tailgate anchors (builds.toml pack_lzss_*; the fake pages the
  * loader's expect-verification reads) */
 #define RVA_TG_DECODE 0x314BF0u  /* pack_lzss_decode — the fake family-A decoder */
 #define RVA_TG_IDAT_SITE 0x31516Fu /* i.dat's CALL pack_lzss_decode */
@@ -78,7 +78,7 @@
 #define RVA_TG_IN 0x4F89000u     /* the fake encoded family-A file (in-buffer) */
 #define RVA_TG_WORK 0x1000u      /* the fake workspace out span we clear per call */
 
-/* M5-T family-A decode workspace swap (builds.toml workspace_*). The site is
+/* The family-A decode workspace swap (builds.toml workspace_*). The site is
  * boot_pack_system_driver's CALL pack_master_map_access, right after both
  * _aligned_malloc calls; the fake pages carry the address book's site/cave
  * bytes AND reproduce the game's own _aligned_malloc/_aligned_free prologues
@@ -88,7 +88,7 @@
 #define RVA_WS_CALLEE 0x314F20u  /* the site's pinned target (page 0x314000 exists) */
 #define RVA_WS_MALLOC 0x597BA8u  /* _aligned_malloc */
 #define RVA_WS_FREE 0x597B8Cu    /* _aligned_free */
-#define RVA_WS_CAVE 0x592363u    /* the M5-T relay cave (19-byte CC run) */
+#define RVA_WS_CAVE 0x592363u    /* the workspace-swap relay cave (19-byte CC run) */
 #define RVA_WS_GLOBALS 0x4F86088u /* the workspace singleton (== RVA_WSOUT) */
 #define RVA_WS_OLDOUT 0x4F8A000u /* the "game-allocated" OUT buffer */
 #define RVA_WS_OLDIN 0x4F8B000u  /* the "game-allocated" IN buffer */
@@ -124,7 +124,7 @@ __asm__(
     "callq *%rcx\n"           /* the site's E8 -> cave -> version.dll stub */
     "retq\n");
 
-/* the ORIGINAL bytes the M2 engine's address book records at its anchors —
+/* the ORIGINAL bytes the engine's address book records at its anchors —
  * the engine verifies these before any write, so the fake pages must carry
  * them (from the international Steam exe, file offset 0x1a07b0 / 0x6fb5c0) */
 static const unsigned char g_filter_orig[16] = {
@@ -140,12 +140,12 @@ static const unsigned char g_cfile_orig[16] = {
     0x40,0x53,0x55,0x56,0x57,0x41,0x56,0x41,0x57,0x48,0x81,0xec,0x88,0x02,0x00,0x00
 };
 
-/* M6: the path the LAST CFile::Open actually used — the loose-asset redirect
+/* Loose-asset mode: the path the LAST CFile::Open actually used — the redirect
  * evidence (cfile_open_body records it; the `loose` host mode reads it back so
  * each open's tag can be tied to the path the loader handed over) */
 static wchar_t g_last_path[1024];
 
-/* the M4 fetch-probe prologue RECORDS (the address book's expect bytes;
+/* the fetch-probe prologue records (the address book's expect bytes;
  * machine-verified boundaries — each ends at an instruction boundary
  * >= 16 so the 16-byte hook write fits and the trampoline re-enters
  * cleanly) */
@@ -165,7 +165,7 @@ static const unsigned char g_cache_orig[16] = {
     0x48,0x8b,0xc4,0x57,0x41,0x54,0x41,0x55,0x41,0x56,0x41,0x57,0x48,0x83,0xec,0x40
 };  /* mov rax,rsp; pushes rdi,r12..r15; sub rsp,0x40 */
 
-/* the famb pool-runner call bytes the M4 inject address book records —
+/* the famb pool-runner call bytes the inject address book records —
  * E8 rel32 (the original call target = RVA_FAKE_RUNNER; RVA-relative, so
  * the same bytes also aim the fake host's E8 at ITS image + 0x504c0) plus
  * the two bytes that follow: `85 db` test ebx,ebx at site+5 (READ-ONLY
@@ -173,7 +173,7 @@ static const unsigned char g_cache_orig[16] = {
  * continuation so a plain call of the site entry returns cleanly */
 static const unsigned char g_famb_orig[7] = { 0xE8,0x62,0x02,0xC6,0xFF,0x85,0xDB };
 
-/* the M5 tailgate call-site bytes (builds.toml pack_lzss_*_call expect values;
+/* the tailgate call-site bytes (builds.toml pack_lzss_*_call expect values;
  * the same RVA-relative E8s also aim the fake host's calls at ITS image +
  * 0x314bf0 — the fake family-A decoder) */
 static const unsigned char g_tg_vp_orig[5]   = { 0xE8,0xB7,0x37,0xF2,0xFF };
@@ -227,7 +227,7 @@ __attribute__((used, noinline)) int cfile_open_body(void *cfile, const wchar_t *
 
 typedef int (*cfile_open_fn)(void *, const wchar_t *, unsigned, void *);
 
-/* ---- M4 fetch-probe fakes: for each anchor the fake page ends with an
+/* ---- Fetch-probe fakes: for each anchor the fake page ends with an
  * undo thunk (cancels the record's stack effects and pops the pushed
  * registers) then the plain C body. Page-base-only content: the loader's
  * trampoline re-enters at entry + record_len where the E9 lands in the
@@ -312,7 +312,7 @@ __attribute__((used, noinline)) void *cache_get_body(void *cache, const wchar_t 
     return 0;
 }
 
-/* ---- M4 inject fakes: the pool-runner stand-in (the spliced E8's target)
+/* ---- Inject fakes: the pool-runner stand-in (the spliced E8's target)
  * reports the pool state the injector rebuilt, and an asm thunk calls the
  * spliced site under caller-register discipline (a live EBX sentinel that
  * the loader's own `test ebx,ebx` at site+5 makes load-bearing in-game). */
@@ -370,7 +370,7 @@ __asm__(
 
 typedef void *(*fn_t)(void *, DWORD *, DWORD *, void *);
 
-/* ---- M5 tailgate fakes. The loader splices the family-A decode call sites
+/* ---- Tailgate fakes. The loader splices the family-A decode call sites
  * over to a relay cave → the version.dll stub, which CALLS the original
  * decoder at RVA_TG_DECODE (the shim below) and then appends into the fake
  * workspace. The fake decoder copies a canned decoded stream into dest and
@@ -410,7 +410,7 @@ __attribute__((used, noinline)) int tg_decode_body(unsigned char *dest, unsigned
 /* calls the spliced decode site with the loader's argument shape (rcx=dest,
  * rdx=&cap, r8=src, r9d=srclen) and the loader's stack discipline: at the
  * `callq` RSP is 16-aligned so the site's own E8 pushes its continuation and
- * the stub sees RSP ≡ 8 (the M4 lesson — a misaligned entry faults the stub's
+ * the stub sees RSP ≡ 8 (an extra push would misalign and fault the stub's
  * movaps). The 5th C argument (srclen) sits in the caller shadow space. */
 extern uintptr_t tg_call_site(uintptr_t site, void *dest, unsigned *cap, void *src, uintptr_t srclen);
 
@@ -433,7 +433,7 @@ static void *map_fixed(UINT_PTR addr, SIZE_T size, DWORD prot) {
     return VirtualAlloc((void *)addr, size, MEM_RESERVE | MEM_COMMIT, prot);
 }
 
-/* small file helpers for the M5 tailgate host mode (canned decoded streams
+/* small file helpers for the tailgate host mode (canned decoded streams
  * in, the post-decode workspace out) */
 static long read_whole(const char *path, unsigned char *buf, size_t cap) {
     FILE *f = fopen(path, "rb");
@@ -450,7 +450,7 @@ static void write_whole(const char *path, const unsigned char *buf, size_t n) {
     fclose(f);
 }
 
-/* ---- M5-T: build the fake swap environment (see the RVA_WS_* block above).
+/* ---- Build the fake workspace-swap environment (see the RVA_WS_* block).
  * `fail_alloc` makes the fake _aligned_malloc return NULL (the fail-open case). */
 static void ws_setup(int fail_alloc)
 {
@@ -505,7 +505,7 @@ static int g_probe_ok;
  * Each helper preserves the original print order (the harness greps them). */
 
 /* the filter fn page + the whitelist/FORM data page. The fn page is mapped as
- * the whole 64K block 0x1A0000..0x1B0000 (VirtualAlloc's granularity): the M7-1
+ * the whole 64K block 0x1A0000..0x1B0000 (VirtualAlloc's granularity): the row
  * spec-table row accessor 0x1AACB0 lives in that block, so its page must be
  * mapped too (a 4K mapping at 0x1AA000 would round DOWN to 0x1A0000 and clash
  * with the filter's own page). */
@@ -548,7 +548,7 @@ static int setup_cfile_page(void)
     return 1;
 }
 
-/* the four M4 fetch-probe fake pages (same mechanics as the cfile fake,
+/* the four fetch-probe fake pages (same mechanics as the cfile fake,
  * each with its own undo thunk — constexpr amounts above). VirtualAlloc
  * honors the base hint only at the 64K allocation granularity, so the
  * pages are aligned: pack/tex/cache anchors share the 0x300000 page,
@@ -603,23 +603,23 @@ static int setup_probe_pages(void)
     return probe_ok;
 }
 
-/* ---- M7 purchase-window type-cycle fakes (builds.toml train_list_tab_*).
+/* ---- Purchase-window type-cycle fakes (builds.toml train_list_tab_*).
  * The tab rebuild entry carries its real 17-byte prologue + an undo thunk into
  * a plain C body; the scan site carries the 25 real bytes the fix rewrites; the
  * cave page stays 0xCC (the fix's expect bytes). The fake spec-table manager +
  * rows live in host-owned storage (the probe reads them). */
 #define RVA_TAB_SCAN 0x19E7EEu   /* the vanilla-whitelist scan the fix rewrites */
-#define RVA_TAB      0x19E760u   /* FUN_14019e760 type-tab rebuild entry */
+#define RVA_TAB      0x19E760u   /* the type-tab rebuild entry */
 #define RVA_TAB_CAVE 0x5B1E96u   /* the fix's relay cave */
 #define RVA_WINDOW   0x2CA400u   /* train_list_big_list_window */
-#define RVA_MGR      0xE14510u   /* DAT_140e14510 spec-table manager */
+#define RVA_MGR      0xE14510u   /* the spec-table manager global */
 #define MGR_ROWS_N   400u
 #define MGR_VEC_CAP  512u
 
-/* M7b: the custom-train-form editor's SECOND vanilla-whitelist scan
+/* The custom-train-form editor's SECOND vanilla-whitelist scan
  * (builds.toml train_form_scan + train_form_cave). Both live inside the
  * 0x190000 / 0x5B1000 pages setup_tab_pages already maps. */
-#define RVA_FORM_SCAN 0x19E9DFu  /* the scan FUN_14019e950 the fix rewrites */
+#define RVA_FORM_SCAN 0x19E9DFu  /* the scan site the form fix rewrites */
 #define RVA_FORM_CAVE 0x5B2015u  /* the fix's relay cave */
 #define FORM_FOUND_OFF 0x73u     /* 0x14019ea52 — the primary admit path */
 
@@ -666,7 +666,7 @@ __asm__(
     "popq %rbp\n"
     "jmp window_body\n");
 
-/* M7b: run the rewritten custom-train-form scan with the game's stack shape.
+/* Run the rewritten custom-train-form scan with the game's stack shape.
  * The scan is reached by fall-through in the game with RSP == 0 (mod 16), so
  * the thunk pushes rbx (RSP 8 -> 0) and jumps — the scan's own `call cave`
  * then presents the ABI's RSP == 8 at the composed-keep stub. The branch
@@ -683,7 +683,7 @@ __asm__(
 
 __attribute__((used, noinline)) void tab_body(void *manager, const int *tab)
 {
-    /* replicate the PATCHED FUN_14019e760: valid row + composed membership
+    /* replicate the PATCHED type-tab rebuild: valid row + composed membership
      * (through the loader's relay cave) + tab type match -> append to +0x48 */
     if (*(BYTE *)(g_base + RVA_TAB_SCAN) != 0x4D) {
         printf("tab_body: fix not installed — no-op\n");
@@ -718,7 +718,7 @@ __attribute__((used, noinline)) void window_body(void *obj)
     printf("window_body: called\n");
 }
 
-/* map the M7 fake pages and lay down the expect bytes + undo thunks. Called
+/* Map the window/row fix-up fake pages and lay the expect bytes + undo thunks. Called
  * before the proxy loads, like every other fake page. */
 static int setup_tab_pages(void)
 {
@@ -737,7 +737,7 @@ static int setup_tab_pages(void)
         memset((BYTE *)g_base + prooms[i].page, 0xCC, prooms[i].span);
     }
     /* the fake manager's rows + index vectors: heap, so the host image size
-     * stays below the M4 inject fake runner (RVA 0x504c0) */
+     * stays below the inject fake runner (RVA 0x504c0) */
     g_mgr_rows = (unsigned *)VirtualAlloc(NULL, (SIZE_T)MGR_ROWS_N * 0x140,
                                           MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     g_vec_unf = (unsigned *)VirtualAlloc(NULL, MGR_VEC_CAP * 4, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
@@ -761,7 +761,7 @@ static int setup_tab_pages(void)
         w[0] = 0xE9;
         memcpy(w + 1, &rel, 4);
     }
-    /* M7b: the custom-train-form scan + the two branch-target markers the
+    /* the custom-train-form scan + the two branch-target markers the
      * rewritten scan reaches: +0x14 (fall-through = not kept) and +0x73
      * (found = kept). `mov eax,N; pop rbx; ret` — pop rbx undoes the call
      * thunk's push, so the host reads the scan's own decision. */
@@ -800,7 +800,7 @@ static void mgr_setup(void)
     *(void **)(m + 0x70) = g_vec_typ + MGR_VEC_CAP;
 }
 
-/* ---- M7-2 save-path probe fakes (builds.toml mmf_paged_write /
+/* ---- Save-path probe fakes (builds.toml mmf_paged_write /
  * mmf_paged_write_bulk / save_mmf_write_block / mmf_read_u32_vector).
  * The four save-side mmf helpers carry their real position-independent
  * prologues (expect-verified by the loader's address book) + an E9 into an
@@ -924,7 +924,7 @@ static void setup_save_pages(void)
     }
 }
 
-/* ---- M7-0 save-id clamp guard fakes (builds.toml save_group_head /
+/* ---- Save-id clamp guard fakes (builds.toml save_group_head /
  * save_group_head_cave / save_car_read / save_car_read_cave). The head site
  * carries the 7 real bytes the rewrite overwrites (+ a `ret` continuation at
  * +7); the car site carries the real E8 whose target (0x308f20) is the fake
@@ -1023,7 +1023,7 @@ __asm__(
     "  callq *g_clamp_car_ptr(%rip)\n"
     "  retq\n");
 
-/* ---- M7-1 direct spec-row injection fakes (builds.toml spec_table_resize /
+/* ---- Direct spec-row injection fakes (builds.toml spec_table_resize /
  * spec_table_realloc / spec_table_row_accessor / row_name_ctor). The three
  * CALLED helpers carry their real prologues + an E9 into an undo thunk that
  * reverses the prologue and jumps to a plain C body; the accessor is
@@ -1043,7 +1043,7 @@ __asm__(
 #define ROWS_NAME_EN      0xb0u
 #define ROWS_MARKER_OFF   0x100u     /* a clone-property marker the host sets */
 #define ROWS_MARKER       0xA9C0DE01u
-#define ROWS_NAMEALT      0xf0u      /* awNameAlt[0] (M7-2 clone-fix exercise) */
+#define ROWS_NAMEALT      0xf0u      /* awNameAlt[0] (clone-fix exercise) */
 
 static const unsigned char g_rows_resize_orig[19] = {
     0x48,0x89,0x5c,0x24,0x08,0x48,0x89,0x74,0x24,0x10,0x57,0x48,0x83,0xec,0x30,
@@ -1130,7 +1130,7 @@ __attribute__((used, noinline)) void rows_realloc_body(void *vec, unsigned long 
 /* the fake name constructor: the real one builds a valid A9_RcStr from a wide
  * format + one integer arg (the builder's `form_id_%d`). `g_rows_ctor_null`
  * models the failure the mechanism must refuse. */
-/* `row_name_ctor` is the printf-style wide-string constructor. The M7 row build
+/* `row_name_ctor` is the printf-style wide-string constructor. The row build
  * calls it with a TEXT format and an unused value; the car build (and the lane
  * re-format) call it with a static `%s` and a wide-string POINTER in the value
  * slot — so the value must be read as a pointer when the format says `%s`. */
@@ -1152,7 +1152,7 @@ __attribute__((used, noinline)) void **rows_ctor_body(void **dest, const wchar_t
         }
         *dest = b;
         /* two shapes: the engine's own `form_id_%d` / `modrow_%d` auto-name (the value
-         * is an id) and the `%s` assignment the M7-2 lanes and the car-build cells use
+         * is an id) and the `%s` assignment the train lanes and the car-build cells use
          * (the value is a wide-string pointer). Print what the call actually carried. */
         if (is_text) {
             printf("rows ctor_body: fmt=%ls text -> %ls\n", fmt, b);
@@ -1184,7 +1184,7 @@ static void rows_make_template(void)
     *(void **)(r + ROWS_NAME_EN) = en;
     *(void **)(r + ROWS_PFORMNAME) = tname;
     *(unsigned int *)(r + ROWS_MARKER_OFF) = ROWS_MARKER;
-    /* two extra non-NULL lanes so the M7-2 clone fix has something to clone
+    /* two extra non-NULL lanes so the clone fix has something to clone
      * (awName[2] and awNameAlt[0]) */
     *(void **)(r + ROWS_NAME_JP + 2 * 8) = jp;
     *(void **)(r + ROWS_NAMEALT) = jp;
@@ -1241,7 +1241,7 @@ static int setup_rows_pages(void)
     return 1;
 }
 
-/* ---- M7-2 train-injection fakes. The `[[train]]` compiler is pure (a9-mod);
+/* ---- Train-injection fakes. The `[[train]]` compiler is pure (a9-mod);
  * this mode drives the BOOT half: the engine's real boot (which runs when the
  * DLL loads) compiles the scenario's `[[train]]`, installs the composed
  * keep-set (with the reserved ids), the overlay plan and the injection hook.
@@ -1295,11 +1295,11 @@ static const unsigned char g_cloneref_orig[16] = {
 static unsigned g_clone_calls;
 static unsigned g_tlb_calls;
 
-/* Padding so the host image's .bss reaches RVA 0x1D7D0: the M7-2 clone-fix
+/* Padding so the host image's .bss reaches RVA 0x1D7D0: the clone-fix
  * anchor (wstr_clone_ref) lives in the image's own tail, which VirtualAlloc
  * cannot commit (ERROR_INVALID_ADDRESS) — so the host grows its .bss over that
  * RVA and writes the fake bytes in place. SizeOfImage stays < 0x30000, so the
- * M7-1 row_name_ctor page (RVA 0x372f0) remains mappable. */
+ * row_name_ctor page (RVA 0x372f0) remains mappable. */
 static unsigned char g_train_pad[0x3000];
 
 extern void tlb_undo(void);
@@ -1575,7 +1575,7 @@ static int setup_train_pages(void)
     return 1;
 }
 
-/* ---- M5 tailgate fakes (same page set as the inject pages). The family-A * decode entry carries a movabs+branch shim to the plain C decoder; the
+/* ---- Tailgate fakes (same page set as the inject pages). The family-A * decode entry carries a movabs+branch shim to the plain C decoder; the
  * vp/tp/i.dat call sites carry the address book's E8 expect bytes followed by
  * a clean `ret` continuation the spliced stub returns into; the relay cave
  * page stays 0xCC (the cave expect bytes). */
@@ -1606,7 +1606,7 @@ static void setup_tailgate_pages(void)
     printf("fake: tailgate pages mapped\n");
 }
 
-/* M5-T: the fake workspace environment (the singleton, the alloc tail site,
+/* The fake workspace environment (the singleton, the alloc tail site,
  * the CRT fakes) — written BEFORE the DLL is loaded, because the loader
  * verifies those bytes at boot. Only for the workspace modes: it repoints the
  * workspace singleton, which the other modes set up for themselves. */
@@ -1623,7 +1623,7 @@ static void setup_workspace_pages(const char *mode)
     printf("fake: workspace pages mapped\n");
 }
 
-/* ---- the M4 inject fake pages. The site page carries the address
+/* ---- The inject fake pages. The site page carries the address
  * book's famb_runner_call bytes (E8 + the read-only test ebx,ebx pair +
  * a ret) — the split's rel32 is RVA-relative so the same bytes aim the
  * fake host's call at ITS image + 0x504c0 (the fake runner). Data pages
@@ -1638,12 +1638,12 @@ static void setup_inject_pages(const char *mode)
         { 0x50000,  0x10000, PAGE_EXECUTE_READWRITE }, /* the fake runner */
         { 0xF02000, 0x4000,  PAGE_READWRITE },         /* pool + rows */
         { 0xD65000, 0x1000,  PAGE_READWRITE },         /* capacity global */
-        { 0x4F86000, 0x10000, PAGE_READWRITE },        /* workspace + stream + in-buffer; M5-T: the game out/in + new out */
-        { 0x59A000, 0x2000, PAGE_EXECUTE_READWRITE },  /* the M4 relay cave (0x59a071) */
-        { 0x314000, 0x6000, PAGE_EXECUTE_READWRITE },  /* M5: decode + i.dat site; M5-T: the alloc-tail site 0x31981a */
-        { 0x5A1000, 0x1000, PAGE_EXECUTE_READWRITE },  /* M5: the tailgate relay cave */
-        { 0x597000, 0x1000, PAGE_EXECUTE_READWRITE },  /* M5-T: malloc/free fakes */
-        { 0x592000, 0x1000, PAGE_EXECUTE_READWRITE },  /* M5-T: the workspace relay cave */
+        { 0x4F86000, 0x10000, PAGE_READWRITE },        /* workspace + stream + in-buffer; the swap's game out/in + new out */
+        { 0x59A000, 0x2000, PAGE_EXECUTE_READWRITE },  /* the famb relay cave (0x59a071) */
+        { 0x314000, 0x6000, PAGE_EXECUTE_READWRITE },  /* the decode + i.dat site; the swap's alloc-tail site 0x31981a */
+        { 0x5A1000, 0x1000, PAGE_EXECUTE_READWRITE },  /* the tailgate relay cave */
+        { 0x597000, 0x1000, PAGE_EXECUTE_READWRITE },  /* the swap's malloc/free fakes */
+        { 0x592000, 0x1000, PAGE_EXECUTE_READWRITE },  /* the workspace relay cave */
     };
     for (unsigned i = 0; i < sizeof(irooms) / sizeof(irooms[0]); i++) {
         BYTE *want = (BYTE *)g_base + irooms[i].page;
@@ -1712,7 +1712,7 @@ static void setup_inject_pages(const char *mode)
     }
     /* the hook only consults the workspace pointer */
     *(void **)((BYTE *)g_base + RVA_WSOUT) = (void *)((BYTE *)g_base + RVA_OUTBUF);
-    /* ---- M5 tailgate fakes (same page set), then M5-T's workspace env for
+    /* ---- Tailgate fakes (same page set), then the workspace env for
      * the workspace modes (it repoints the singleton, so it runs last) */
     setup_tailgate_pages();
     if (!strcmp(mode, "workspace") || !strcmp(mode, "workspace-fail")
@@ -1731,7 +1731,7 @@ static int mode_none(void)
     return 0;
 }
 
-/* the M3 game: open the pack through the (possibly hooked) CFile::Open
+/* Merge-scene game: open the pack through the (possibly hooked) CFile::Open
  * at RVA_CFILE, read it whole through the returned handle, and report
  * WHICH path the open used + its size — the redirect evidence; the
  * content is verified offline by the harness script via a9ml */
@@ -1767,7 +1767,7 @@ static int mode_overlaypackcsv(const char *mode)
     return 0;
 }
 
-/* M5 W1: open data\i.dat (stage 1 — the loader builds every host
+/* The [[asset]] scene: open data\i.dat (stage 1 — the loader builds every host
  * pack's cache first, then the merged index) and data\vp.bin (stage 2
  * — the family-A host the appended asset bytes ride) through the
  * (possibly hooked) CFile::Open. Evidence: WHICH path each open used
@@ -1801,7 +1801,7 @@ static int mode_overlaydat(void)
     return 0;
 }
 
-/* M5-U: stage 1 opens data\i.dat (the loader builds every host pack's
+/* The `.dir` merge scene: stage 1 opens data\i.dat (the loader builds every host pack's
  * cache — tp for a preview-listing mod — then the merged index), stage 2
  * opens data\tp.bin. Same evidence shape as overlaydat. */
 static int mode_overlaytp(void)
@@ -1833,7 +1833,7 @@ static int mode_overlaytp(void)
     return 0;
 }
 
-/* M6 [[loose_asset]]: open game files BY PATH through the (possibly
+/* [[loose_asset]]: open game files BY PATH through the (possibly
  * hooked) CFile::Open — an ABSOLUTE path matching the mod's
  * `*.adk\fe01.bin` glob (the per-boot random temp-dir shape), an exact
  * RELATIVE path, and a non-matching path. Evidence: the path the open
@@ -1887,13 +1887,13 @@ static int mode_probe(void)
         printf("FAIL: probe anchor pages could not be mapped\n");
         return 1;
     }
-    /* the M4 evidence call: run every fetch-probe anchor through its
+    /* The probe-scene evidence call: run every fetch-probe anchor through its
      * (possibly hooked) entry once — the loader's probe logs the four
      * lines when installed; without the probe these run the fakes */
     static const wchar_t composed_key[] = L"train\\113\\_d_113.dds";
     static const wchar_t mesh_src[] = L"train\\113\\_t_113_a.x";
     static const wchar_t mesh_ref[] = L"./_d_113.dds";
-    /* the wstring-OBJECT shape FUN_140306e20's r8 expects ([r8] = data) */
+    /* the wstring-OBJECT shape the fetch's r8 expects ([r8] = data) */
     static const void *name_obj[2];
     static void *dest[64];
     void *bo = NULL;
@@ -1916,7 +1916,7 @@ static int mode_probe(void)
     return 0;
 }
 
-/* the M7 fix evidence: with a train_list mod, the loader rewrote the vanilla
+/* The tab-fix evidence: with a train_list mod, the loader rewrote the vanilla
  * whitelist scan to call its composed-keep test through the relay cave. The
  * host calls the CAVE directly with a few ids (the patched scan's exact call
  * shape) and reads back the patched site's bytes. */
@@ -1944,7 +1944,7 @@ static int mode_tabfix(void)
     return 0;
 }
 
-/* the M7b custom-train-form fix evidence: check the site was rewritten, call
+/* The form-fix evidence: check the site was rewritten, call
  * the composed-keep cave for a few ids, and (through the rewritten scan's own
  * two branch markers) read the keep/drop decision end-to-end. */
 static int mode_formfix(void)
@@ -1977,7 +1977,7 @@ static int mode_formfix(void)
     return 0;
 }
 
-/* the M7 probe evidence: call the (possibly hooked) window + tab-rebuild
+/* The probe evidence: call the (possibly hooked) window + tab-rebuild
  * entries so the diagnostic dumps the manager lists; shrink +0x48 between
  * calls so the delta line fires. */
 static int mode_window(void)
@@ -1997,7 +1997,7 @@ static int mode_window(void)
     return 0;
 }
 
-/* the M7-2 save-path probe evidence: call the four (possibly hooked) save-side
+/* The save-path probe evidence: call the four (possibly hooked) save-side
  * mmf helpers through in-image caller stubs, so the probe logs the caller RVA
  * + size of each write, the two verbatim-block lines, and the read-side line.
  * The fakes run through their undo thunks either way. */
@@ -2028,7 +2028,7 @@ static int mode_save(void)
     return 0;
 }
 
-/* the M7-0 clamp evidence: (1) the head clamp — call the head site with a set
+/* The clamp evidence: (1) the head clamp — call the head site with a set
  * of ids through the r14 thunk; (2) the car clamp — fill a 0xf8 car block with
  * a mix of in/out-of-range ids, call the car site (which reads through the fake
  * paged reader, then clamps), and read the block back. The manager carries
@@ -2087,7 +2087,7 @@ static int mode_clamp(void)
     return 0;
 }
 
-/* the M7-1 direct spec-row injection evidence. The host maps the fake manager
+/* The direct spec-row injection evidence. The host maps the fake manager
  * + spec-table pages, then drives the loader's `a9loader_m7_rows` export:
  *   rows             — op 0 (install the resize hook) then call the resize site;
  *                      the hook must inject AFTER the original re-pin
@@ -2166,7 +2166,7 @@ static int mode_rows(const char *scen)
     printf("rows: realloc calls=%u new_count=%lu ctor calls=%u\n",
            g_rows_realloc_calls, g_rows_realloc_new, g_rows_ctor_calls);
     /* the row-walk consumer (mirrors train_list_builder 0x14019d9c0 /
-       FUN_14019e760 / FUN_14019e950: walk the LIVE vector, skip row[0]==0) */
+       the rebuilt tab/scan sites: walk the LIVE vector, skip row[0]==0) */
     {
         unsigned char *b = *(unsigned char **)vec;
         unsigned char *e = *(unsigned char **)((char *)vec + 8);
@@ -2186,13 +2186,13 @@ static int mode_rows(const char *scen)
     return 0;
 }
 
-/* the M7-2 `[[train]]` host path: the engine's boot already ran (on load) and
+/* The `[[train]]` host path: the engine's boot already ran (on load) and
  * compiled/queued the scenario's train. Call the `train_list_builder` site to
  * fire the injection hook, read the injected row through the game's OWN
  * accessor, print the composed-filter verdict for its reserved id, open
  * data\csvp.bin through the (hooked) CFile::Open so the overlay merges the
  * derived rows, and dump the merged tables. */
-/* M7-2 retry scenario: mark the FORM_AR4 donor row valid with the lane shape
+/* The retry scenario: mark the FORM_AR4 donor row valid with the lane shape
  * the clone fix exercises. A live boot showed the builder is called more than
  * once per boot and the FIRST call happens before the CSV pipeline populates
  * the rows, so the loader must defer and retry — the `train_retry` mode below
@@ -2261,7 +2261,7 @@ static int mode_train(const char *scen, int retry)
     typedef unsigned long long (*m7dump_fn)(void);
     m7kept_fn kept = (m7kept_fn)(void *)GetProcAddress(v, "a9loader_m7_kept");
     m7dump_fn dump = (m7dump_fn)(void *)GetProcAddress(v, "a9loader_m7_dump");
-    if (!kept || !dump) { printf("FAIL: the M7-2 exports are missing\n"); return 1; }
+    if (!kept || !dump) { printf("FAIL: the train exports are missing\n"); return 1; }
 
     BYTE *m = (BYTE *)g_base + RVA_MGR;
     void *vec = m + 0x18;
@@ -2354,7 +2354,7 @@ static int mode_train(const char *scen, int retry)
     printf("train: done\n");
     return 0;
 }
-/* the M4 inject scenario host path: (1) open the pack through the
+/* The inject scenario host path: (1) open the pack through the
  * (possibly hooked) CFile::Open — the injector's capture seam fires
  * INSIDE that open for planned packs; (2) fill the fake pool the
  * way the vanilla loader's refill leaves it at the call site;
@@ -2413,7 +2413,7 @@ static int mode_inject(void)
     return 0;
 }
 
-/* the M5 tailgate scenario host path: feed the two spliced decode
+/* The tailgate scenario host path: feed the two spliced decode
  * sites the way the loaders do — a fake in-buffer whose +0x10 carries
  * the declared size, dest = the workspace out the stub checks, and
  * the canned vanilla decoded bytes the fake decoder hands back — then
@@ -2459,7 +2459,7 @@ static int mode_tailgate(const char *mode)
     return 0;
 }
 
-/* M5-U: the same tailgate host path, but for the `tp` host — stage 1
+/* The `.dir` merge variant: the same tailgate host path, but for the `tp` host — stage 1
  * feeds the i.dat site (its declared size + canned decoded bytes), stage
  * 2 the tp site. The mod's preview assets + the rebuilt
  * `previewtexture.dir` listing ride the tp append. */
@@ -2501,7 +2501,7 @@ static int mode_tailgate_tp(void)
     return 0;
 }
 
-/* the M5-T swap: the loader splices boot_pack_system_driver's alloc
+/* The workspace swap: the loader splices boot_pack_system_driver's alloc
  * tail, so calling the site must hand the workspace over to a bigger
  * buffer allocated through the game's own _aligned_malloc (cap raised,
  * the game's buffer freed), and the shim's tail-jump must reach the
@@ -2587,7 +2587,7 @@ int main(int argc, char **argv)
     if (!strcmp(mode, "save")) setup_save_pages();
     setup_clamp_pages();   /* always-on guard: its anchors must exist on every boot */
     setup_inject_pages(mode);
-    /* M7-2: the train anchors are verified DURING the boot (on load), so their
+    /* The train anchors are verified DURING the boot (on load), so their
      * fake pages must exist before the proxy DLL loads. setup_rows_pages also
      * repoints the spec-table manager at the 421-row fake table (it must run
      * after setup_tab_pages, which installs the 400-row one). */
@@ -2604,7 +2604,7 @@ int main(int argc, char **argv)
 
     /* real FORM list bytes -> the mapped region (NUL-terminated UTF-16). Heap,
      * not .bss: a 64K static pushed SizeOfImage past 0x30000, which would make
-     * the M7-1 row_name_ctor page (RVA 0x372f0) unmappable (VirtualAlloc's 64K
+     * the row_name_ctor page (RVA 0x372f0) unmappable (VirtualAlloc's 64K
      * granularity block is partially occupied by the image's tail). */
     FILE *f = fopen(argv[1], "rb");
     if (!f) {

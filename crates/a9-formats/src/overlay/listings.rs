@@ -1,15 +1,15 @@
-//! The `.dir` group listings the loader **auto-merges** (M5-U) — parse,
+//! The `.dir` group listings the loader **auto-merges** — parse,
 //! extend and the narrow allow-list of listings a consumer provably matches by
 //! exact name.
 
 use crate::Error;
 
-/// The `.dir` group listings the loader **auto-merges** (M5-U): only those a
+/// The `.dir` group listings the loader **auto-merges**: only those a
 /// consumer PROVABLY matches by exact name, so listing order — and therefore
 /// our append position — cannot matter.
 ///
 /// `previewtexture.dir` is proven name-keyed: the preview annotator
-/// (`preview_form_list_annotator`, memory #310) composes `form_<token>_*.dds`
+/// (the shipped preview annotator) composes `form_<token>_*.dds`
 /// and looks each up by exact name, so the entry order is not load-bearing.
 /// The other shipped listings (`base.dir`, `tree.dir`, …) are consumed by
 /// paths whose order dependence has not been established — those stay on the
@@ -24,7 +24,7 @@ pub fn listing_auto_merge(name: &str) -> bool {
 
 /// Parse a `.dir` group listing: a flat run of NUL-terminated UTF-16LE file
 /// names — no count prefix, no stride, no padding (the row's `len` is the only
-/// bound, memory #311). Returns the names in order.
+/// bound; the run is the row's exact declared size). Returns the names in order.
 ///
 /// `Err` when the payload is not a well-formed name run: an odd byte length
 /// (not UTF-16LE units), a missing NUL terminator, an empty segment (two

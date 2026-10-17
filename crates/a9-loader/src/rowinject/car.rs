@@ -47,7 +47,7 @@ fn cell_u16(cols: &[String], idx: usize) -> Option<u16> {
 
 /// Apply a train's `train_form` row — the CSV columns in the vanilla layout — to
 /// the cloned spec row. Column → field map from the RE agent's Ghidra pass
-/// (corpus notes/52 §7, instruction-level):
+///:
 ///
 /// | col | header | field |
 /// |---|---|---|

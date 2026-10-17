@@ -4,23 +4,21 @@ A mod loader for A-Train 9 v5 — a Rust workspace. Everything a mod declares
 executes at boot, inside the game process, through a `version.dll` proxy:
 installing a mod is copying its folder; the game directory stays vanilla.
 
-**Status: M4 — in-memory inject serving.** Mods are data (`mod.toml`
+**Status: in-memory inject serving.** Mods are data (`mod.toml`
 manifests in `mods/`); the engine gates on the running build's identity,
 resolves dependencies/conflicts, applies expect-verified, journaled memory
 effects at boot, and — for content mods — serves the mod's image-pack
 entries **straight from loader memory** by extending the game's own pack
 loader at work (window-scoped injection, no file written anywhere; the game
 directory stays vanilla). `[[csv]]` tables still go through the merge
-overlay (`pack_serving = "merge"` switches image packs back to it). The
-architecture plan lives in the research corpus: `projects/mod-loader/PLAN.md`
-(A-Train 9 Decompilation folder).
+overlay (`pack_serving = "merge"` switches image packs back to it). 
 
 ## Supported builds
 
-- **International Steam build** — version 5.00, build 5634. The M0 port hard-
+- **International Steam build** — version 5.00, build 5634. The initial port hard-
 codes this build's addresses.
 
-From M2 on, the loader reads the running build's identity itself and refuses
+The loader reads the running build's identity itself and refuses
 to patch on a mismatch, so a game update fails loudly instead of corrupting
 memory. Supporting further builds (e.g. the Japanese retail editions) then
 means adding an entry to the per-build address book — no mod changes needed
@@ -36,7 +34,7 @@ crates/a9-mod      the mod model: manifest schema, dependency resolution,
                    embedded per-build dir index
 crates/a9-loader   the cdylib product (lib name "version" -> version.dll)
 crates/a9ml        authoring & diagnostics CLI (verify, inspect, list, doctor)
-harness/           wine harness: the full M2 engine scenarios (m2.sh)
+harness/           wine harness: the engine and serving scenarios (m*.sh)
 ```
 
 ## Build
@@ -65,8 +63,7 @@ cargo build --release --target x86_64-pc-windows-gnu
 
 ## Install (game dir, next to ATrain9v5.exe)
 
-- `version.dll` (replaces the C reference proxy — the C original stays in the
-  corpus `projects/dll-proxy/`)
+- `version.dll` (the C reference proxy is obsolete and was outside this repo)
 - launch via Steam launch options: `WINEDLLOVERRIDES="version=n,b" %command%`
 - the loader logs to `mods/a9loader.log`
 
@@ -117,19 +114,19 @@ file = "entries/_d_h510_keifu_8000_tr_01.dds"   # inside the mod folder
 name = "train_form.csv"
 file = "csv/train_form.csv"
 
-[[csv]]                         # …or row-level patches (M5 W2): row identity
+[[csv]]                         # …or row-level patches: row identity
 name = "train_comment.csv"      # is the first column, so independent mods can
 file = "csv/train_comment.patch.csv"   # edit one table and append rows without
 mode = "rows"                   # taking the whole table over
 
-[[asset]]                       # a NEW i.dat row (M5 W1): the payload is
+[[asset]]                       # a NEW i.dat row: the payload is
 name = "_t_mynew_a.x"           # appended to a family-A host pack's decoded
 dir  = "train\\mynew"           # stream and the merged i.dat gets the row
 host = "vp"                     # host pack: vp/tp/mcp/ep/cp, or "auto" (default)
 file = "assets/_t_mynew_a.x"    # exact pack chunk (len = file size)
 override_vanilla = false        # true = allowed to REPLACE a shipped i.dat row
 
-[[asset]]                       # …or a whole FOLDER (M5 W1b): every file under
+[[asset]]                       # …or a whole FOLDER: every file under
 folder = "assets"               # it, recursively, becomes one row — the file's
 host = "auto"                   # basename is the row name and its subfolder
 override_vanilla = false        # path is the row dir
@@ -191,7 +188,7 @@ own per-entry texture creation registers them. Nothing is written to disk
 and the game reads its own original file. If the row pool, an anchor byte
 or a payload is wrong, the loader logs loudly and the packs serve vanilla.
 
-`pack_serving = "merge"` selects the M3 path instead: the loader decodes
+`pack_serving = "merge"` selects the cache path instead: the loader decodes
 the original pack, applies the mods' entries, re-encodes (LZSS + MD5/XOR
 via `a9-formats`) and redirects the game's open to a content-hashed cache
 under `mods/cache/`. `[[csv]]` tables always use the merge path. A
@@ -229,21 +226,21 @@ same format primitives the loader runs.
 
 ```
 cargo test                      # unit tests (codecs, mod model, engine logic)
-harness/m2.sh [game-exe-path]   # M2 engine scenarios under wine: manifest
+harness/m2.sh [game-exe-path]   # boot-engine scenarios under wine: manifest
                                 # mods, deny, wrong-build gate, overlap,
                                 # requires/conflicts, patches, game_builds
                                 # gate, broken lists; exits nonzero on failure
-harness/m3.sh                   # M3 merge scenarios under wine: redirect,
+harness/m3.sh                   # merge scenarios under wine: redirect,
                                 # add/replace merges (byte-exact vs expected
                                 # packs), csv tables, csv ROW patches (two mods
                                 # on one table, byte-exact), row overlaps,
                                 # cache staleness/reuse, fail-open on
                                 # broken mods
-harness/m4probe.sh              # M4 fetch-probe scenarios (diagnostic hooks)
-harness/m4inj.sh                # M4 inject scenarios: the pack-window splice,
+harness/m4probe.sh              # fetch-probe scenarios (diagnostic hooks)
+harness/m4inj.sh                # inject scenarios: the pack-window splice,
                                 # row extension, pack capture, fail-open, and
                                 # the runner's register/retry discipline
-harness/m5.sh                   # M5 W1/W1b [[asset]] scenarios: a family-A
+harness/m5.sh                   # [[asset]] scenarios: a family-A
                                 # append + its i.dat row, the folder form with
                                 # host = "auto" (host resolved from the embedded
                                 # dir index), and the auto refusals (unknown /
@@ -275,11 +272,11 @@ a9ml merge-assets --game DIR --mod-dir M --out DIR
                                 # installed; the loader's own primitives)
 ```
 
-`a9ml verify` proves the format library against real game data (the M1
-acceptance: the live repacked packs re-materialize byte-identically);
-`harness/m2.sh` is the M2 engine acceptance; `harness/m3.sh` is the M3
-overlay acceptance (its byte-exact cache comparisons re-derive the M0
-parity baseline through the whole overlay pipeline).
+`a9ml verify` proves the format library against real game data (the live
+repacked packs re-materialize byte-identically); `harness/m2.sh` is the
+engine acceptance; `harness/m3.sh` is the overlay acceptance (its byte-exact
+comparisons re-derive the original-build parity baseline through the whole
+overlay pipeline).
 
 ## AI usage disclosure
 

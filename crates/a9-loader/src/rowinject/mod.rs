@@ -1,12 +1,11 @@
-//! M7-1 — **direct spec-row injection** (the mechanism). Corpus notes/57 §6.2
-//! (architecture Q), notes/62 §1/§4, PLAN §M7. M7-2 extends this module with
-//! the `[[train]]` path (`train.rs`): N rows, each with its own allocated name
-//! + donor, hooked at `train_list_builder` (after the pipeline's fill loop)
-//! instead of `spec_table_resize`, with the name-pointer clone fix. The M7-1
+//! **Direct spec-row injection** (the mechanism). The `[[train]]` path
+//! (`train.rs`): N rows, each with its own allocated name + donor, hooked at
+//! `train_list_builder` (after the pipeline's fill loop) instead of
+//! `spec_table_resize`, with the name-pointer clone fix. The simpler
 //! resize-hook path (`spec.rs`) stays the harness seam (`a9loader_m7_rows`)
 //! and is unchanged.
 //!
-//! The goal (PLAN §M7): add trains BEYOND the 417-name FORM catalog without
+//! The goal: add trains BEYOND the 417-name FORM catalog without
 //! touching the FORM literal or the boot-time matcher. Post-boot everything
 //! addresses spec rows by **index** (`base = [0x140e14528]`, `row = base +
 //! id*0x140`), so an injected row's name never has to be in the FORM list.
@@ -24,7 +23,7 @@
 //!    destroys + frees the old block and sets `{begin,end,cap}`. Using the
 //!    engine's realloc is the point: the block is owned by the same allocator
 //!    family the vector destructor frees with, so the teardown stays clean (the
-//!    M5-T lesson).
+//!    allocator lesson).
 //! 3. an injected row is a **CLONE of a shipped template row** (`memcpy` of the
 //!    whole 0x140 row) with the fields that matter patched: the JP/EN display
 //!    lanes (`row+0xa8`/`row+0xb0` = `awName[0]`/`awName[1]`; the lane is chosen
@@ -40,33 +39,33 @@
 //!    zero-filled reserved row dereferences a wild pointer. The mechanism
 //!    refuses (fail-open, loud) when the template's `pFormName` is NULL or when
 //!    the name constructor returns NULL for any of the three name fields.
-//! 5. row stride is 0x140 and ids are **u16 in the save** (notes/62 §3.1), so
-//!    the reserved range must stay ≤ 65535. M7-1 also keeps it under
+//! 5. row stride is 0x140 and ids are **u16 in the save**, so
+//!    the reserved range must stay ≤ 65535. It is also kept under
 //!    [`crate::forms::FORMS_MAX`] = 1024 — the composed keep-set bitmap's width —
 //!    so the loader can still admit its own trains; a reserved range above that
-//!    would need the bitmap widened (M7-2), and the mechanism refuses rather
+//!    would need the bitmap widened, and the mechanism refuses rather
 //!    than inject rows it could never show.
 //!
 //! Every row address is resolved through the engine's own
 //! `spec_table_row_accessor` 0x1401aacb0 (`*(vec) + id*0x140`, no bounds
 //! check) so the id→row contract is the engine's, not a re-implementation.
 //!
-//! # Honest limits (see the report)
+//! # Honest limits
 //!
-//! * The M7-1 clone shares the template's *other* name pointers (`awName[2..8]`,
+//! * The direct-injection clone shares the template's *other* name pointers (`awName[2..8]`,
 //!   `awNameAlt[0..8]`) without a refcount increment, so the LIVE teardown could
-//!   double-free them. The M7-2 `[[train]]` path fixes this with `wstr_clone_ref`
-//!   0x14001d7d0 (`train.rs`); the M7-1 seam is left as-is (harness-only).
+//!   the template's same pointers (double-free risk), the `[[train]]` path fixes this with `wstr_clone_ref`
+//!   0x14001d7d0 (`train.rs`); the plain seam is left as-is (harness-only).
 //! * `spec::ensure` / `spec::inject_now` are driven from the harness through the
-//!   [`a9loader_m7_rows`] export; the M7-2 train path IS wired into
+//!   [`a9loader_m7_rows`] export; the `[[train]]` path IS wired into
 //!   `engine::boot` (`install_trains`).
 //!
 //! Module map:
 //!
-//! * [`spec`] — M7-1: the resolved state, the reserve primitive, the resize
+//! * [`spec`] — the resolved state, the reserve primitive, the resize
 //!   hook and the `a9loader_m7_rows` harness export + the shared row-layout
 //!   facts both paths read.
-//! * [`train`] — M7-2: `TrainRow` / `install_trains` (what `engine::boot`
+//! * [`train`] — `TrainRow` / `install_trains` (what `engine::boot`
 //!   drives) + the `train_list_builder` hook + the `a9loader_m7_dump` export.
 //! * [`car`] — the car build: the game's own model loader driven per declared
 //!   car, and the CSV-column → row-field mapping.

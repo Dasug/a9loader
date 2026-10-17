@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# M7-2 harness — the `[[train]]` section. The fake host maps the real anchor
-# pages (filter/whitelist/FORM, cfile_open, the M7-0 clamp, the M7 tab/form
-# fixes, the M7-1 spec-table row helpers and the two M7-2 anchors) BEFORE the
+# The [[train]] harness. The fake host maps the real anchor pages
+# (filter/whitelist/FORM, cfile_open, the save-id clamp, the tab/form fixes,
+# the spec-table row helpers and the two [[train]] anchors) BEFORE the
 # proxy DLL loads, so the loader's REAL boot runs: it scans the scenario's
 # mods, compiles the `[[train]]`, installs the composed keep-set (with the
 # reserved ids), the overlay plan and the injection hook. The host then calls
@@ -110,7 +110,7 @@ for n in ("form_trainmod_sample_f.dds", "form_trainmod_sample_s.dds", "form_trai
     open(os.path.join(d, n), "wb").write(bytes(range(16)))
 EOF
 
-# M3/M5 both work through the merge overlay here; pin it so the derived rows are
+# The merge overlay serves the CSV rows here; pin it so the derived rows are
 # verified in a cache file the harness can extract.
 DEFAULT_CFG='pack_serving = "merge"\nasset_serving = "merge"\nprobe_rows = true\n'
 scen_fixtures() {

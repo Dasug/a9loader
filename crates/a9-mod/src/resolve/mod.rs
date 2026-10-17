@@ -1,4 +1,4 @@
-//! Dependency resolution — the pure planner (PLAN.md §4.8). Given the parsed
+//! Dependency resolution — the pure planner. Given the parsed
 //! manifests and the loader config's order/disabled/allow-conflicts knobs it
 //! produces the execution order, the skip list with reasons, warnings, and
 //! the effect-overlap report. The loader executes exactly this; `a9ml list`
@@ -223,7 +223,7 @@ fn apply_conflicts(
 /// (memory effects: anchors/raw targets; data effects: pack entries,
 /// csv tables). `train_list` hooks are the one
 /// composable effect: several mods may contribute forms and the loader
-/// composes them (M5 W3), so a group made ONLY of train_list hooks is
+/// composes them, so a group made ONLY of train_list hooks is
 /// not an overlap. A train_list vs a `nop` (or two `nop`s) still is.
 fn collect_overlaps(res: &mut Resolution, enabled: &[usize], mods: &[Manifest]) {
     let mut owners: BTreeMap<String, Vec<(usize, bool)>> = BTreeMap::new();
@@ -272,7 +272,7 @@ fn collect_overlaps(res: &mut Resolution, enabled: &[usize], mods: &[Manifest]) 
             // is a separate (load-time) hard refusal.
             own(format!("asset:{}", a.name), i, false);
         }
-        // `[[train]]` (M7-2): a compiler that expands into the row-merge, asset
+        // `[[train]]`: a compiler that expands into the row-merge, asset
         // and row-injection effects above — so it registers exactly those keys.
         // Its `hook:train_list_filter` entry is composable (like every
         // train_list contribution); the `csv:`/`asset:`/`train:` keys are not.

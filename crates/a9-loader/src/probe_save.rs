@@ -3,17 +3,17 @@
 //! Nothing in this module runs unless `probe_save = true` is set in
 //! `a9loader.toml`; a default boot never installs these hooks. It exists to
 //! answer two one-off reverse-engineering questions about the save path
-//! (notes/62-B §4.2). It serves nothing, changes no behaviour, and every hook
+//!. It serves nothing, changes no behaviour, and every hook
 //! is trampoline-only, forwarding verbatim to the original.
 //!
 //! The questions:
 //!  1. Is a formation's car block written as ONE bulk `0xf8` write (⇒ the
-//!     20-byte per-car tails round-trip verbatim, so the M7 "Tier 1" tail
+//!     20-byte per-car tails round-trip verbatim, so the per-car tail
 //!     provenance works) or as ten `0x18` writes / a per-car write (⇒ the
 //!     tails are regenerated and Tier 1 is out)?
 //!  2. Which caller RVA is the group-record writer? `save_mmf_write_block` has
 //!     only three static callers; a fourth at save time is the writer, and its
-//!     RVA is the site M7-2 will patch to substitute the placeholder index.
+//!     RVA is the site the boot will patch to substitute the placeholder index.
 //!
 //! WHAT IT HOOKS — the four save-side mmf helpers (the byte-level writers
 //! every save field flows through, plus the u32-vector block pair the group
@@ -249,7 +249,7 @@ fn shim(f: unsafe extern "C" fn()) -> *const c_void {
 }
 
 /// A human label for the caller RVAs the address book already knows, so the
-/// log maps straight onto the notes. Unknown sites print nothing (and are
+/// log reads like the open-path list in `a9ml report`. Unknown sites print nothing (and are
 /// exactly what question 2 is looking for).
 fn caller_label(rva: usize) -> &'static str {
     match rva {

@@ -1,5 +1,5 @@
-//! Savegame (`.a9d` / `.a9d5`) plaintext members — corpus
-//! `notes/12-savegame-format.md`: `[24-byte "ARTDINK ATRAIN9\0" + u16 header]`
+//! Savegame (`.a9d` / `.a9d5`) plaintext members: a
+//! `[24-byte "ARTDINK ATRAIN9\0" + u16 header]`
 //! followed by a sequence of plain zlib members. Carving = scan for the
 //! `78 9C` header, inflate exactly one member, advance by its true input
 //! length, repeat.

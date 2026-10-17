@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# M7-1 harness — direct spec-row injection (the mechanism behind "add trains
+# The spec-row-injection harness — direct spec-row injection (the mechanism behind "add trains
 # beyond the 417 catalog"). The fake host maps the spec-table pages at the real
 # RVAs (the resize/realloc/ctor anchors carry their real prologues; the accessor
 # runs as-is) and a fake manager whose rows vector is a 421-row table, then

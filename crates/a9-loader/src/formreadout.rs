@@ -1,11 +1,11 @@
-//! The **custom-train-form editor** candidate-list fix (corpus notes/23).
+//! The **custom-train-form editor** candidate-list fix.
 //!
-//! The second vanilla-whitelist scan: `FUN_14019e950` (VA 0x14019e950), whose
+//! The second vanilla-whitelist scan (VA 0x14019e950), whose
 //! sole caller is `train_form_readout_refresh` (0x1401f3ec0), rebuilds the
 //! 0x18-stride candidate vector at `manager+0x34e8` (manager =
-//! `DAT_140e14510`, so the vector lives at 0x140e179f8). That vector is the
+//! 0x140e14510, so the vector lives at 0x140e179f8). That vector is the
 //! list the **custom train-form editor** window renders (ui_mode_apply case
-//! 0xb, window singleton `DAT_140e24d50` — the 車両編成数 / "Train
+//! 0xb, window singleton 0x140e24d50 — the 車両編成数 / "Train
 //! Configuration" screen with the 全て/オリジナル/インポート sub-tabs).
 //!
 //! For the base-form sub-views (the `All` and `Original` tabs) the function
@@ -58,7 +58,7 @@ use crate::{forms, handlers, patch, sys};
 use a9_mod::builds::BuildEntry;
 use core::ffi::c_void;
 
-/// The vanilla-whitelist scan inside FUN_14019e950 (20 bytes).
+/// The vanilla-whitelist scan inside the second scan function (20 bytes).
 pub const ANCHOR_SCAN: &str = "train_form_scan";
 /// The same-image relay cave the rewritten scan calls.
 pub const ANCHOR_CAVE: &str = "train_form_cave";

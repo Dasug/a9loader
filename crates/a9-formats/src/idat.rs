@@ -1,6 +1,6 @@
-//! `i.dat` — the master asset index, port of corpus `tools/i_parse.py`
-//! (verified byte-identical round-trip on the demo build; loader
-//! `FUN_140314fa0`, entry parse `FUN_140314e60`).
+//! `i.dat` — the master asset index (verified as a byte-identical round-trip
+//! against real packs; the engine's loader at 0x140314fa0, entry parse at
+//! 0x140314e60).
 //!
 //! Decoded layout:
 //!
@@ -92,11 +92,11 @@ fn write_record(out: &mut Vec<u8>, name: &str, dir: &str, tail: &[u8; 9]) {
     out.extend_from_slice(tail);
 }
 
-/// A row to add or replace in a parsed `i.dat` (M5 W1 `[[asset]]`).
+/// A row to add or replace in a parsed `i.dat` (`[[asset]]`).
 ///
 /// The tail is *synthesized* from these fields — a new row has no verbatim
 /// bytes to preserve. Field meanings are the loader's own
-/// (notes/05 lines 148-161): `len` = bytes consumers get (node+0x48; for a
+///: `len` = bytes consumers get (node+0x48; for a
 /// `.x` this includes the 12-byte `ADX0` chunk header), `flag` = node+0x4c
 /// (0 in every shipped row), `off` = offset into the current pack's decoded
 /// buffer (node+0x50).
@@ -120,7 +120,7 @@ impl NewRow {
     }
 
     /// This row as one serialized entry record — byte-identical to what
-    /// [`Idat::serialize`] emits for an equivalent [`Entry`]. The M5 tailgate
+    /// [`Idat::serialize`] emits for an equivalent [`Entry`]. The tailgate
     /// stub appends these bytes to the decoded `i.dat` image and bumps the
     /// entry count, which is exactly the merged-table layout minus the
     /// untouched vanilla prefix.
@@ -464,9 +464,9 @@ mod tests {
         assert_eq!(&image[vanilla_len..], &appended[..]);
     }
 
-    /// The M5 tailgate's override mechanism: a duplicate row APPENDED to a
+    /// The tailgate's override mechanism: a duplicate row APPENDED to a
     /// decoded i.dat image (no in-place rewrite). The game's master map is a
-    /// std::map operator[]-style insert-or-find — `FUN_140315840` returns the
+    /// std::map operator[]-style insert-or-find (the game's map helper at 0x140315840 returns the
     /// EXISTING node on a name hit and the loader overwrites its value fields
     /// unconditionally — so a LATER duplicate WINS. This test renders the
     /// tailgate's exact bytes and replays that last-wins walk.

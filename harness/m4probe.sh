@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# M4 fetch-probe harness — the probe_fetch diagnostics under wine. The fake
+# Fetch-probe harness — the probe_fetch diagnostics under wine. The fake
 # host maps all four fetch anchors (CPackFileBuffer::fetch, the texture
 # fetch-miss path, CCommonShader::fetch, the global fetch-cache get) at the
 # real RVAs with the real expect bytes, and the "probe" host mode calls all
@@ -111,7 +111,7 @@ else
     FAILED=$((FAILED + 1))
 fi
 
-# ---- M7: the purchase-window type-cycle fix + its opt-in probe -------------
+# ---- The purchase-window type-cycle fix + its opt-in probe -------------
 # a train_list mod whose composed keep-set is exactly {4,16,42,329}: 4/16/42
 # are in the shipped 97-entry whitelist, 329 (FORM_KIHA261_TOK) is not — the
 # vanilla scan would drop it, the fix must keep it.
@@ -184,7 +184,7 @@ run_host window
 LOG="$scen_dir/mods/a9loader.log"
 OUT="$scen_dir/out.txt"
 check "probe enabled"       "probe: window hooks on (diagnostic)"      "$LOG"
-check "tab hook installed"  "probe: tab rebuild (FUN_14019e760 — the type-cycle engine) hook installed rva=0x19e760 expect=verified" "$LOG"
+check "tab hook installed"  "probe: tab rebuild (the type-cycle engine) hook installed rva=0x19e760 expect=verified" "$LOG"
 # train_list_big_list_window (0x2ca400) has the same `mov rax,rsp` prologue, so it is
 # refused for the same reason. The tab-rebuild hook (0x19e760) is not RSP-derived and
 # still installs, and that is the probe that produced the type-filter evidence.
@@ -205,7 +205,7 @@ else
     FAILED=$((FAILED + 1))
 fi
 
-# ---- M7-2: the save-path writer probe ------------------------------------
+# ---- The save-path writer probe ------------------------------------
 # The save-side fakes carry the four mmf helpers' real prologues + undo thunks
 # into plain C bodies, and four in-image caller stubs at RVA 0x300000/0x20/0x40/
 # 0x60 so the probe's logged caller RVAs are deterministic (stub+17).
@@ -257,12 +257,12 @@ else
     echo "   [ ok ] a9ml accepts probe_save silently (the key is known to a9-mod)"
 fi
 
-# ---- M7-0: the always-on save-id clamp guard ------------------------------
+# ---- The always-on save-id clamp guard ------------------------------
 # No config flag gates it: it installs on EVERY boot (the fake image maps its
 # four anchors unconditionally). The "clamp" host drives both choke points —
 # the head site through an r14 thunk, the car site through the fake paged
 # reader — and a valid id must pass through untouched.
-echo "== C1: the save-id clamp guard (M7-0) — out-of-range ids degrade"
+echo "== C1: the save-id clamp guard — out-of-range ids degrade"
 new_scen c1-clamp
 run_host clamp
 LOG="$scen_dir/mods/a9loader.log"

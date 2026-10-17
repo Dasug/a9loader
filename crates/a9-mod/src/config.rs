@@ -1,4 +1,4 @@
-//! `a9loader.toml` — the loader config next to the game exe (PLAN.md §4.7).
+//! `a9loader.toml` — the loader config next to the game exe.
 //!
 //! Parsed leniently-but-loudly: a missing file means defaults; a broken file
 //! means defaults plus warnings (the game must always boot); unknown keys are
@@ -30,11 +30,11 @@ impl LogLevel {
 
 /// How `[[pack]]` image effects serve their content (a9loader.toml
 /// `pack_serving`, default "merge"):
-/// - `merge`: the M3 runtime overlay — hooked `CFile::Open` redirects the
+/// - `merge`: the runtime overlay — hooked `CFile::Open` redirects the
 ///   pack open to a merged cache file (decode → edit → re-encode, budgeted).
-/// - `inject`: the M4 window-scoped injector — loader-owned memory spliced
+/// - `inject`: the window-scoped injector — loader-owned memory spliced
 ///   into the family-B loader's worker-row pool at its runner call site
-///   (notes/24 R5). csvp `[[csv]]` tables keep the merge overlay in both
+///. csvp `[[csv]]` tables keep the merge overlay in both
 ///   modes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum PackServing {
@@ -54,13 +54,13 @@ impl PackServing {
 
 /// How `[[asset]]` new assets (family-A host packs + the `i.dat` index) serve
 /// their content (a9loader.toml `asset_serving`, default "tailgate"):
-/// - `tailgate`: the M5 in-place append — the loader splices the game's one
+/// - `tailgate`: the in-place append — the loader splices the game's one
 ///   family-A LZSS decode funnel (vp/tp/i.dat call sites, one same-image relay
 ///   cave) and appends the payloads / index rows straight into the shared
 ///   workspace's decoded image right after the decode. No re-encode, no cache
 ///   file, nothing on disk. (`pack_serving = "inject"` is orthogonal: it only
 ///   routes `[[pack]]` family-B effects.)
-/// - `merge`: the M5 W1 cache overlay — decode → append → re-encode the host
+/// - `merge`: the cache overlay — decode → append → re-encode the host
 ///   pack to `<mods_dir>/cache/` and redirect its `CFile::Open`. The automatic
 ///   FALLBACK whenever the tailgate cannot be used (missing anchor/expect
 ///   bytes, a failed splice, an unreadable declared size, or a host whose
@@ -96,18 +96,18 @@ pub struct Config {
     pub priorities: BTreeMap<String, i64>,
     /// human-visible complaints (unknown keys, bad values)
     pub warnings: Vec<String>,
-    /// M4 diagnostic — **OFF BY DEFAULT, not part of normal operation**: see
+    /// A diagnostic hook — **OFF BY DEFAULT, not part of normal operation**: see
     /// `probe.rs`. When true the loader hooks the four runtime fetch anchors
     /// trampoline-only and logs one line per fetch call (obj / composed key).
     /// Diagnostics only — no serving behavior changes; fail-open per anchor.
     pub probe_fetch: bool,
-    /// M7 diagnostic — **OFF BY DEFAULT, not part of normal operation**: see
+    /// A diagnostic hook — **OFF BY DEFAULT, not part of normal operation**: see
     /// `probe_window.rs`. When true the loader hooks the big purchase/list
     /// window (`train_list_big_list_window`) trampoline-only and dumps the
     /// spec-table manager's three index vectors (+0x30 unfiltered / +0x48 the
     /// list the UI reads / +0x60 the type-group list) on the way in and on the
     /// way out of every call that CHANGES a size — the observable of the
-    /// notes/23 type-cycle quirk. Diagnostics only; no behaviour change.
+    /// type-cycle quirk. Diagnostics only; no behaviour change.
     pub probe_window: bool,
     /// Build the injected trains' car data by driving the game's own car-model
     /// loader (see the loader's `build_cars`). Off by default: it calls into game
@@ -129,7 +129,7 @@ pub struct Config {
     /// questions, so it is kept — but it is the most verbose diagnostic in the
     /// loader and no longer belongs in a normal boot.
     pub probe_rows: bool,
-    /// M7-2 diagnostic — **OFF BY DEFAULT, not part of normal operation**: see
+    /// A diagnostic hook — **OFF BY DEFAULT, not part of normal operation**: see
     /// `probe_save.rs`. When true the loader hooks the four save-side mmf
     /// helpers (`mmf_paged_write` / `mmf_paged_write_bulk` /
     /// `save_mmf_write_block` / `mmf_read_u32_vector`) trampoline-only and logs
@@ -140,14 +140,14 @@ pub struct Config {
     /// Diagnostics only; no behaviour change.
     pub probe_save: bool,
     /// how [[pack]] image effects serve (see [`PackServing`]); "inject" (the
-    /// default) = the M4 window-scoped famb injector (loader memory, no cache
-    /// file), "merge" = the M3 cache overlay
+    /// default) = the window-scoped famb injector (loader memory, no cache
+    /// file), "merge" = the cache overlay
     pub pack_serving: PackServing,
     /// how [[asset]] new assets serve (see [`AssetServing`]); "tailgate" (the
-    /// default) = the M5 in-place decode append, "merge" = the M5 W1 cache
+    /// default) = the in-place decode append, "merge" = the cache
     /// overlay
     pub asset_serving: AssetServing,
-    /// M5-T: the family-A decode workspace's OUT size in MiB. `0` (default) =
+    /// The family-A decode workspace swap's OUT size in MiB. `0` (default) =
     /// AUTO — replace the game's 200 MB buffer only when the planned family-A
     /// content (vanilla declared size + appended payloads) does not fit it;
     /// a value forces that size (the "as much as the machine can take" soft

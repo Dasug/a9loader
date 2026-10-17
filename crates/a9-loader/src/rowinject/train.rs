@@ -15,11 +15,11 @@ use core::ffi::c_void;
 use std::sync::{Mutex, OnceLock};
 
 // ===========================================================================
-// M7-2 — the `[[train]]` spec-row injection.
+// the `[[train]]` spec-row injection.
 //
 // The train compiler (a9-mod::train) allocates ids + names and derives the CSV
 // rows; this is the boot half: it writes the matching spec rows. It differs
-// from M7-1 in three ways:
+// from the plain seam in three ways:
 //
 //  * the HOOK SITE is `train_list_builder` 0x14019d9c0, not `spec_table_resize`.
 //    The pipeline calls the resize at 0x14019c89e and then IMMEDIATELY fills the
@@ -38,7 +38,7 @@ use std::sync::{Mutex, OnceLock};
 //    so it copy-on-writes and the donor's strings are never mutated.
 // ===========================================================================
 
-/// The purchase-list builder — the M7-2 injection site (see above).
+/// The purchase-list builder — the injection site (see above).
 pub const ANCHOR_TLB: &str = "train_list_builder";
 /// The preview annotator's loop bound (0x1403B0A7F, `CMP EBP,0x1a1`). Widening
 /// its immediate to the live row count is what lets an injected row get a
@@ -476,7 +476,7 @@ unsafe extern "system" fn my_train_list_builder(manager: *mut u8) {
     }
 }
 
-/// The M7-2 harness seam: dump the four train tables out of the MERGED csvp
+/// The harness seam: dump the four train tables out of the MERGED csvp
 /// cache (`<mods_dir>/cache/csvp.bin`), one line per row. The harness greps the
 /// derived rows to prove they reached the table through the real overlay merge
 /// (the positional `train_pattern` group append included).

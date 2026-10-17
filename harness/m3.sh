@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# M3 harness — the runtime overlay under wine. The fake-game host carries a
+# Merge-overlay harness — the runtime overlay under wine. The fake-game host carries a
 # fake CFile::Open at the real anchor RVA with the real expect bytes (plus a
 # tail-jump body), so the loader's trampoline mechanics are exercised for
 # real: expect verification, hook install, redirect to the loader-managed
@@ -8,7 +8,7 @@
 # Content is verified byte-exactly: the cache must equal an `a9ml mkpack`-
 # built pack with the same entries in the same order (the merge keeps the
 # original entry order and appends adds; the encoder is deterministic —
-# M1-proven byte-parity).
+# proved byte-parity).
 #
 # usage: harness/m3.sh
 set -euo pipefail
@@ -75,7 +75,7 @@ mk csv2 'C2\nC2\n'
 "$A9ML" mkpack --container csvs --out "$RUN/data/csvp.bin" \
     "t1.csv=$RUN/csv1"
 
-# M3 is the MERGE harness — pin merge explicitly (inject is the default now)
+# This is the MERGE harness — pin merge explicitly (inject is the default now)
 DEFAULT_CFG='pack_serving = "merge"\n'
 scen_fixtures() {
     cp "$RUN/data/mtfake.bin" "$RUN/data/csvp.bin" "$scen_dir/data/"
@@ -355,7 +355,7 @@ check "loser row refused"     "1 row patch(es) refused (overlap loser)" "$scen_d
 "$A9ML" mkpack --container csvs --out "$scen_dir/expected.bin" "t1.csv=$RUN/exp_o.csv"
 checkf "cache == first mod's row result" cmp -s "$scen_dir/mods/cache/csvp.bin" "$scen_dir/expected.bin"
 
-echo "== S10: [[csv]] row patch from a plain UTF-8 file (M5 W3 authoring)"
+echo "== S10: [[csv]] row patch from a plain UTF-8 file (cross-mod authoring)"
 new_scen s10-csv-utf8
 mk_csv "$RUN/base_u1.csv" "KEY|VAL" "R1|a" "R2|b"
 # a normal editor's UTF-8 patch file (no BOM); the loader re-encodes the row

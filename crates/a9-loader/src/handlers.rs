@@ -3,7 +3,7 @@
 //! no panics, no unwinding; every failure is a `Err(String)` the engine logs
 //! while the game continues untouched.
 //!
-//! M0's filter machinery lives on here as the `train_list` handler; the M2
+//! The original filter machinery lives on here as the `train_list` handler; the boot engine
 //! additions are the deny list mode, anchor/expect verification for every
 //! write, and readability guards for raw-RVA targets (a typo'd rva refuses
 //! loudly instead of crashing the game with an access violation).
@@ -16,7 +16,7 @@ use core::ffi::c_void;
 use std::path::Path;
 use std::sync::OnceLock;
 
-/// The C scans at most 16384 UTF-16 units of the FORM list (M0 parity).
+/// The C scans at most 16384 UTF-16 units of the FORM list (as before).
 const FORMS_SCAN_LIMIT: usize = 16384;
 const FORMS_MAX: usize = forms::FORMS_MAX;
 
@@ -28,9 +28,9 @@ static G_ALLOWED: OnceLock<Box<[u8; FORMS_MAX / 8]>> = OnceLock::new();
 /// shrinking inputs = rows being invalidated between rebuilds)
 static G_TRACE: OnceLock<log::Logger> = OnceLock::new();
 
-/// The composed keep-bitmap the `train_list` filter serves (M5 W3) — `None`
+/// The composed keep-bitmap the `train_list` filter serves — `None`
 /// when no mod declared a `train_list` contribution (the filter hook was never
-/// installed and the game's own 97-entry whitelist filter is in force). The M7
+/// installed and the game's own 97-entry whitelist filter is in force). The harness
 /// type-tab rebuild fix (`crate::tabrebuild`) re-derives tab membership from
 /// exactly this set, so the purchase list survives a filter cycle intact.
 pub fn composed_allowed() -> Option<&'static [u8; FORMS_MAX / 8]> {
@@ -38,13 +38,13 @@ pub fn composed_allowed() -> Option<&'static [u8; FORMS_MAX / 8]> {
 }
 
 /// Whether the installed composed keep-set admits `id` — `None` when no filter
-/// was installed. The M7-2 harness reads this to assert that a reserved train
+/// was installed. The harness reads this to assert that a reserved train
 /// id is admitted (the `[[train]]` ids are added to the bitmap programmatically).
 pub fn composed_kept(id: usize) -> Option<bool> {
     composed_allowed().map(|bm| forms::kept(bm, id))
 }
 
-/// The M7-2 harness seam: `a9loader_m7_kept(id)` -> 1 (kept), 2 (not kept) or
+/// The harness seam: `a9loader_m7_kept(id)` -> 1 (kept), 2 (not kept) or
 /// 0 (no composed filter installed).
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn a9loader_m7_kept(id: u64) -> u64 {
@@ -230,7 +230,7 @@ pub unsafe fn apply_patch(
 // ------------------------------------------------------------------ [[hook]]
 
 /// The shipped purchase whitelist's fixed length (the exe table bound is
-/// hard-coded to 97 entries; `train_list_whitelist` anchor + notes/18 §9).
+/// hard-coded to 97 entries; `train_list_whitelist` anchor + §9).
 const WHITELIST_ENTRIES: usize = 97;
 
 pub unsafe fn apply_hook(
@@ -242,7 +242,7 @@ pub unsafe fn apply_hook(
     let t = resolve_target(&h.target, entry)?;
     match h.handler.as_str() {
         // `train_list` contributions are composed across mods by the engine
-        // (M5 W3) and installed ONCE — this per-hook path only serves `nop`.
+        // and installed ONCE — this per-hook path only serves `nop`.
         "train_list" => {
             let _ = mod_dir;
             Err("train_list hooks are composed across mods by the engine \
@@ -268,7 +268,7 @@ pub unsafe fn apply_hook(
 /// One mod's `train_list` contribution: the listed forms as an id bitmap, the
 /// mode, and the resolved hook target. Parsed at boot with no globals touched —
 /// the engine composes every contribution into ONE bitmap and installs ONE
-/// hook (M5 W3: additive composition instead of a single owner).
+/// hook (additive composition instead of a single owner).
 pub struct Contribution {
     pub id: String,
     pub mode: ListMode,
@@ -322,10 +322,10 @@ pub unsafe fn train_list_contribution(
 }
 
 /// One mod's `train_list` contribution carrying explicit reserved **ids**
-/// (M7-2): the `[[train]]` compiler allocates spec-row ids and the loader must
+/// : the `[[train]]` compiler allocates spec-row ids and the loader must
 /// add those ids to the composed keep-bitmap PROGRAMMATICALLY — the name match
 /// in [`train_list_contribution`] can never admit an injected row, because its
-/// allocated name is deliberately not in the FORM list (notes/62-D).
+/// allocated name is deliberately not in the FORM list.
 ///
 /// The contribution is an `Add` (the shipped whitelist stays the base) and
 /// names the same `train_list_filter` seam, so it composes with every other
@@ -401,7 +401,7 @@ fn mode_name(m: ListMode) -> &'static str {
 }
 
 /// Compose every `train_list` contribution into ONE keep-bitmap and install the
-/// ONE filter hook (M5 W3). All contributions must resolve to the same target
+/// ONE filter hook. All contributions must resolve to the same target
 /// RVA. Returns the journal line; a per-contribution breakdown goes to the log.
 pub unsafe fn install_train_list(
     contribs: &[Contribution],

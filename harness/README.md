@@ -26,20 +26,20 @@ VERSIONINFO resources (right build id / wrong build id) linked into
 
 ## The harnesses and the host modes they drive
 
-| script | milestone | what it proves | host modes |
-|---|---|---|---|
-| `m2.sh` | M2 | the full loader engine under wine: config → build gate (right/wrong VERSIONINFO) → mods scan → resolve → expect-verified `[[patch]]`/`[[hook]]` execution, `train_list` filter modes (allow/deny/add), nop; asserts the log journal per effect | `kept`, `none`, `nop`, `table113` (the `run_host`-default dispatch) |
-| `m3.sh` | M3 | the runtime overlay: CFile::Open trampoline + expect bytes, redirect to the loader-managed pack cache, byte-exact content vs `a9ml mkpack`, passthrough for unmatched paths; family-A and CSV overlays | `overlaypack`, `overlaycsv` |
-| `m4inj.sh` | M4 | `pack_serving = "inject"`: the famb pool-runner call site spliced for real, the in-memory row append over the vanilla slice, the missing-payload refusal (fail loud + vanilla serve), register/byte discipline | `inject` |
-| `m4probe.sh` | M4 | the `probe_fetch`/`probe_save`/`probe_window` diagnostics: the four fetch anchors + the probe log lines with them on (and the absence with them off), plus the M7 purchase-window type-cycle fix (`tabfix`), the custom-form second-scan fix (`formfix`), the M7 window dump (`window`) and the clamp guard probe pages | `probe`, `tabfix`, `formfix`, `window`, `save`, `clamp` |
-| `m5.sh` | M5 | `[[asset]]` in-place serving into a family-A pack's decoded stream: single-file and folder (`host = "auto"`, dir-index prefix resolution `train\<name>`) + the refusals (no shipped row, ambiguity across packs); i.dat/vp row model byte-exact | `overlaydat`, `overlaytp` |
-| `m6.sh` | M6 | `[[loose_asset]]`: game files served by open-GLOB path match (absolute/relative/case-insensitive), non-matching paths untouched, unreadable payload fails open, two mods on one pattern | `loose` |
-| `m7rows.sh` | M7-1 | direct spec-row injection: resize hook grows 421 → 422 with the game's own accessor seeing the row, the name-ctor / template-name refusals, the wrong-order hazard (pre-resize growth undone) | `rows [-off -rows -refuse -refuse-tmpl -order]` |
-| `m7train.sh` | M7-2 | the `[[train]]` compiler end-to-end: real boot scan (train + csvs + model dir), the 4 derived csvp rows merged byte-exactly, the injected spec row, keep-set with reserved ids, and the refusals (bad model dir, id range exhausted, FORM name collision) | `train`, `train-nodump`, `train_retry`, `train_carbuild`, `train_badhelper` |
+| script | what it proves | host modes |
+|---|---|---|
+| `m2.sh` | the full loader engine under wine: config → build gate (right/wrong VERSIONINFO) → mods scan → resolve → expect-verified `[[patch]]`/`[[hook]]` execution, `train_list` filter modes (allow/deny/add), nop; asserts the log journal per effect | `kept`, `none`, `nop`, `table113` (the `run_host`-default dispatch) |
+| `m3.sh` | the runtime overlay: CFile::Open trampoline + expect bytes, redirect to the loader-managed pack cache, byte-exact content vs `a9ml mkpack`, passthrough for unmatched paths; family-A and CSV overlays | `overlaypack`, `overlaycsv` |
+| `m4inj.sh` | `pack_serving = "inject"`: the famb pool-runner call site spliced for real, the in-memory row append over the vanilla slice, the missing-payload refusal (fail loud + vanilla serve), register/byte discipline | `inject` |
+| `m4probe.sh` | the `probe_fetch`/`probe_save`/`probe_window` diagnostics: the four fetch anchors + the probe log lines with them on (and the absence with them off), plus the purchase-window type-cycle fix (`tabfix`), the custom-form second-scan fix (`formfix`), the window dump (`window`) and the clamp guard probe pages | `probe`, `tabfix`, `formfix`, `window`, `save`, `clamp` |
+| `m5.sh` | `[[asset]]` in-place serving into a family-A pack's decoded stream: single-file and folder (`host = "auto"`, dir-index prefix resolution `train\<name>`) + the refusals (no shipped row, ambiguity across packs); i.dat/vp row model byte-exact | `overlaydat`, `overlaytp` |
+| `m6.sh` | `[[loose_asset]]`: game files served by open-GLOB path match (absolute/relative/case-insensitive), non-matching paths untouched, unreadable payload fails open, two mods on one pattern | `loose` |
+| `m7rows.sh` | direct spec-row injection: resize hook grows 421 → 422 with the game's own accessor seeing the row, the name-ctor / template-name refusals, the wrong-order hazard (pre-resize growth undone) | `rows [-off -rows -refuse -refuse-tmpl -order]` |
+| `m7train.sh` | the `[[train]]` compiler end-to-end: real boot scan (train + csvs + model dir), the 4 derived csvp rows merged byte-exactly, the injected spec row, keep-set with reserved ids, and the refusals (bad model dir, id range exhausted, FORM name collision) | `train`, `train-nodump`, `train_retry`, `train_carbuild`, `train_badhelper` |
 
 ## Conventions
 
-- **A new milestone gets one script**: name it `m<N>[suffix].sh` with a header
+- **One workstream, one script**: name it `m<N>[suffix].sh` with a header
   block in the same shape (prove-what + usage + scenarios), one host mode per
   scenario family, and one table row above.
 - The **host mode list is authoritative in `main`'s dispatch tail** of

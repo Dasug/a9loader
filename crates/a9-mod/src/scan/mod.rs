@@ -3,7 +3,7 @@
 //! failures produce a per-mod error entry (the mod is skipped loudly; other
 //! mods still load).
 //!
-//! Manifests carrying `[native]` (mods that ship code — post-M4) are refused
+//! Manifests carrying `[native]` (mods that ship code — future work) are refused
 //! with a milestone pointer — refusing beats half-executing a design the
 //! current loader cannot honor.
 //!
@@ -45,7 +45,7 @@ pub fn scan(mods_dir: &Path) -> Vec<ScannedMod> {
                 m.validate()?;
                 // expand `folder`-form [[asset]] sections into ordinary
                 // single-file-form ops so resolution/overlap/merge see only
-                // per-name ops (M5 W1b); then re-validate to catch duplicate
+                // per-name ops; then re-validate to catch duplicate
                 // basenames across the whole resolved set (bare i.dat names
                 // are globally unique per build)
                 expand_asset_folders(&mut m, &dir)?;

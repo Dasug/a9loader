@@ -1,11 +1,11 @@
-//! Pack-file framing — the two families (corpus handover §2.3):
+//! Pack-file framing — the two families:
 //!
 //! - **Family A** (size-prefixed): decrypted body = `[u32 declared out size]
 //!   [LZSS stream]` — `tp`, `mcp`, `vp`, `ep`, `cp`, `i.dat`.
 //! - **Family B** (entry-table): decrypted body = `[LZSS stream]` decoding
 //!   straight into the entry table — `me0..3`, `mt*`, `csvp`, `sdp`, `csdp`.
 //!
-//! Family-A size checking uses the tolerance validated by corpus `a9dec.c`'s
+//! Family-A size checking uses the tolerance validated by the reference decoder's
 //! auto mode (`max(declared/1000, 4096)` slack). Encode is `repack.py`
 //! semantics: family A re-prefixes `[u32 len][LZSS]`, family B is bare LZSS;
 //! both wrap with the MD5-header cipher.
@@ -34,7 +34,7 @@ pub enum Container {
 }
 
 /// Classify a pack by filename (basename, case-insensitive) using the game's
-/// own load table (corpus notes / a9dec.c comments). `None` = not a pack we
+/// own load-table behavior). `None` = not a pack we
 /// decode (kit markers, stubs, unknown names).
 pub fn classify(name: &str) -> Option<(Family, Container)> {
     let n = name.to_ascii_lowercase();
@@ -63,7 +63,7 @@ pub fn classify_key(name: &str) -> String {
 }
 
 /// Decrypt + integrity-check + LZSS-decode a pack file.
-/// Family A also validates the declared output size (tolerance per `a9dec.c`).
+/// Family A also validates the declared output size (reference-decoder tolerance).
 pub fn decode_pack(file: &[u8], family: Family) -> Result<Vec<u8>, crate::Error> {
     let plain = crypt::decrypt_body(file)?;
     if !crypt::header_matches(file, &plain) {
@@ -93,7 +93,7 @@ pub fn decode_pack(file: &[u8], family: Family) -> Result<Vec<u8>, crate::Error>
 /// plaintext bytes need only `ADD[0..4]` and `hdr[0..4]` — this decrypts
 /// exactly those four bytes, never the LZSS stream and never the whole body.
 /// No MD5 check either (that would require the full plaintext); the caller
-/// cross-checks the value where it matters — the M5 tailgate appends at
+/// cross-checks the value where it matters — the tailgate appends at
 /// `dest + declared` and asserts the runtime decoded length equals it.
 ///
 /// For the vanilla packs the declared size equals the decoded length (a9ml

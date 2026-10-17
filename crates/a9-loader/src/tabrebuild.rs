@@ -1,8 +1,8 @@
-//! The purchase-window **type-tab cycle** fix (corpus notes/23).
+//! The purchase-window **type-tab cycle** fix.
 //!
 //! The big purchase/list window `train_list_big_list_window` (0x1402ca400)
 //! rebuilds its list on every type tab (re)build by calling
-//! `FUN_14019e760(&DAT_140e14510, &DAT_14068e950 + tab*0x2c)`. That function
+//! `rebuild(0x140e14510, 0x14068e950 + tab*0x2c)`. That function
 //! re-derives row membership by linear-scanning the **vanilla** 97-entry
 //! purchase whitelist (`g_dwWhitelist97` 0x1406fc1c0, bound 0x1406fc344):
 //!
@@ -33,7 +33,7 @@
 //! epilogue restores it), so it parks `R8` (the rows base, live across the
 //! call) without touching the stack: the entry keeps the x64 ABI's `RSP ≡ 8`
 //! discipline at the callee. The relay cave is the same `FF 25` + imm64
-//! thunk the M4/M5 splices use, so the target can live anywhere.
+//! thunk the splices use, so the target can live anywhere.
 //!
 //! Everything else — the vector append, its capacity growth, the tab-type
 //! walk, the row-validity test — stays the game's own code. Fail-open: any
@@ -44,7 +44,7 @@ use crate::{forms, handlers, patch, sys};
 use a9_mod::builds::BuildEntry;
 use core::ffi::c_void;
 
-/// The vanilla-whitelist scan inside FUN_14019e760 (25 bytes).
+/// The vanilla-whitelist scan inside the rebuild function (25 bytes).
 pub const ANCHOR_SCAN: &str = "train_list_tab_scan";
 /// The same-image relay cave the rewritten scan calls.
 pub const ANCHOR_CAVE: &str = "train_list_tab_cave";

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# M6 harness — [[loose_asset]]: game files the game opens BY PATH (not content
+# The loose-asset harness — [[loose_asset]]: game files the game opens BY PATH (not content
 # inside a pack) served from a loader-managed cache copy, matched by a
 # case-insensitive glob over the game's own open path.
 #

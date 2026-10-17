@@ -159,7 +159,7 @@ fn print_config(o: &Offline) {
 fn print_pack_serving(o: &Offline) {
     match o.cfg.pack_serving {
         amod::config::PackServing::Merge => {
-            println!("  packs: merge ([[pack]] effects serve via the M3 cache overlay)")
+            println!("  packs: merge ([[pack]] effects serve via the cache overlay)")
         }
         amod::config::PackServing::Inject => {
             // the injectable set = family-B image packs ([[pack]] sections);
@@ -272,7 +272,7 @@ fn print_mod(
         );
     }
     print_csv_rollup(m);
-    // [[asset]] and [[loose_asset]] roll-ups (M5 W1 / W1b, M6); the
+    // [[asset]] and [[loose_asset]] roll-ups (names + dir merges); the
     // resolved `host = "auto"` map is also used by the verbose block below
     let auto_hosts = print_asset_rollup(o, i, m, vanilla_assets);
     print_loose_rollup(o, i, m);
@@ -281,7 +281,7 @@ fn print_mod(
     }
 }
 
-/// csvp data-effect count — row patches distinctly (M5 W2).
+/// csvp data-effect count — row patches distinctly.
 fn print_csv_rollup(m: &amod::manifest::Manifest) {
     if !m.csv.is_empty() {
         let n = m.csv.len();
@@ -314,7 +314,7 @@ fn print_csv_rollup(m: &amod::manifest::Manifest) {
     }
 }
 
-/// The `[[asset]]` roll-up (M5 W1 / W1b): new rows vs overrides of shipped
+/// The `[[asset]]` roll-up: new rows vs overrides of shipped
 /// ones, the `host = "auto"` resolution, and the offline payload checks.
 /// Returns the resolved auto-host map for the verbose detail.
 fn print_asset_rollup(
@@ -434,7 +434,7 @@ fn print_asset_payload_check(o: &Offline, i: usize, m: &amod::manifest::Manifest
     }
 }
 
-/// The `[[loose_asset]]` roll-up (M6) — game files opened by path, served from
+/// The `[[loose_asset]]` roll-up — game files opened by path, served from
 /// a loader cache copy, matched by a case-insensitive glob. The redirect
 /// happens at the game's OWN open, so there is no boot-window residency
 /// concern (unlike `[[pack]]`/`[[asset]]`).

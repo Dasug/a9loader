@@ -1,6 +1,6 @@
-//! Pack-file cipher — port of corpus `tools/a9crypt.py` (scheme recovered from
-//! `FUN_140315710`; the header doubles as the integrity check per
-//! `FUN_140315790`):
+//! Pack-file cipher (scheme recovered from the game's helper at 0x140315710;
+//! the header doubles as the integrity check — the engine's own containment
+//! check at 0x140315790 recomputes it):
 //!
 //! ```text
 //! file  = [16-byte header = MD5(plain body)][encrypted body]
@@ -24,7 +24,7 @@ pub fn md5(plain: &[u8]) -> [u8; 16] {
 }
 
 /// Decrypt the body (everything after the 16-byte header). Does NOT verify
-/// MD5 — pair with [`header_matches`]. Byte-identical to `a9crypt.dec_body`.
+/// MD5 — pair with [`header_matches`].
 pub fn decrypt_body(file: &[u8]) -> Result<Vec<u8>, crate::Error> {
     if file.len() < HEADER_LEN {
         return Err(crate::Error::TooShort(file.len()));
@@ -43,7 +43,7 @@ pub fn header_matches(file: &[u8], plain: &[u8]) -> bool {
 }
 
 /// Encrypt into a full pack file: `header = MD5(plain)` + encrypted body.
-/// Byte-identical to `a9crypt.enc_body(plain, md5(plain))`.
+/// Byte-identical inverse on real pack bodies.
 pub fn encrypt_file(plain: &[u8]) -> Vec<u8> {
     let hdr = md5(plain);
     let mut out = Vec::with_capacity(HEADER_LEN + plain.len());

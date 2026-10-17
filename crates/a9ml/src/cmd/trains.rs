@@ -1,4 +1,4 @@
-//! `a9ml trains` — the offline `[[train]]` dry run (M7-2): show what each
+//! `a9ml trains` — the offline `[[train]]` dry run: show what each
 //! declared train will allocate and expand to, and validate it without booting
 //! the game. Nothing is applied; this is the authoring view of exactly what the
 //! loader does at boot.

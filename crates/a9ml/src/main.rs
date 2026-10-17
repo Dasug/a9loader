@@ -1,6 +1,6 @@
 //! a9ml — A-Train 9 mod loader authoring & diagnostics CLI.
 //!
-//! M1 scope: `verify` (format-library proofs against real packs) and
+//! Scope: `verify` (format-library proofs against real packs) and
 //! `inspect` (decode + describe one pack). Installing a mod stays a folder
 //! drop — there is deliberately no install command.
 //!

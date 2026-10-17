@@ -14,15 +14,15 @@
 # file = rva - 0xC00; per-section mapping via the PE section table).
 
 [build."5.00.5634".anchors.train_list_filter]
-rva = 0x1A13B0              # FUN_1401a13b0 (file 0x1a07b0)
+rva = 0x1A13B0              # the train-list whitelist filter (file 0x1a07b0)
 expect = "48,89,5c,24,08,48,89,74,24,18,48,89,7c,24,20,48"
 
 [build."5.00.5634".anchors.consist_row_copy]
-rva = 0x1AB530              # FUN_1401ab530(obj, src, n) — memcpy of `src` into obj+0x4e0, then obj+0xbc = the spec row's +0x121, then TAIL-CALLS train_row_car_wiring (file 0x1aa930)
+rva = 0x1AB530              # the consist filler (obj, src, n) — memcpy of `src` into obj+0x4e0, then obj+0xbc = the spec row's +0x121, then TAIL-CALLS train_row_car_wiring (file 0x1aa930)
 expect = "48,89,5c,24,08,48,89,74,24,10,57,48,83,ec,20,41,8b,f0,48,8b,fa"
 
 [build."5.00.5634".anchors.consist_object_create]
-rva = 0x1BE070              # FUN_1401be070(manager, index, ?, src, n) — allocates the 0x6b8 consist object, parks it at [rdi]+index*8, calls FUN_1401ab530 (file 0x1bd470)
+rva = 0x1BE070              # the consist creator (manager, index, ?, src, n) — allocates the 0x6b8 consist object, parks it at [rdi]+index*8, calls the fillerab530 (file 0x1bd470)
 expect = "40,56,57,41,56,48,83,ec,30,48,c7,44,24,20,fe,ff,ff,ff"
 
 [build."5.00.5634".anchors.train_list_whitelist]
@@ -37,40 +37,36 @@ expect = "40,53,55,56,57,41,56,41,57,48,81,ec,88,02,00,00"
 rva = 0x6FC430              # UTF-16 comma-separated FORM names (file 0x6fb830)
 expect = "46,00,4f,00,52,00,4d,00,5f,00,32,00,30,00,31,00"        # head fingerprint
 
-# ---- M4 runtime fetch probe (notes/24 round 3: the material fetch classes
-# pass ctx opaquely through vtable dispatch, so which pack object serves
-# which composed key is only answerable at runtime; these four anchors are
-# hooked trampoline-only when a9loader.toml sets probe_fetch = true).
+# ---- The runtime fetch probe (diagnostics).
 # Expect bytes verbatim from the international Steam build (read from the
 # exe bytes, per-instruction boundaries machine-verified with objdump):
 # each record ends at the first instruction boundary >= 16 (the hook write
 # is 16 bytes and the trampoline re-enters at entry + record length).
 [build."5.00.5634".anchors.pack_fetch]
-rva = 0x306E20              # FUN_140306e20 CPackFileBuffer::fetch (file 0x306220)
+rva = 0x306E20              # CPackFileBuffer::fetch (file 0x306220)
 expect = "40,55,53,56,57,41,56,48,8d,ac,24,00,f8,ff,ff,48,81,ec,00,09,00,00"
 # boundary = 22: 5 pushes (7 B) + lea rbp,[rsp-0x800] (8 B) + sub rsp,0x900 (7 B);
 # the quoted 16 bytes would re-enter at the second byte of `sub` (mid-instruction).
 
 [build."5.00.5634".anchors.texture_fetch]
-rva = 0x3010D0              # FUN_1403010d0 texture_fetch_miss_path (file 0x3004d0)
+rva = 0x3010D0              # texture_fetch_miss_path (file 0x3004d0)
 expect = "40,55,53,56,57,41,54,41,56,41,57,48,8d,ac,24,20,e0,ff,ff"
 # boundary = 19: 7 pushes (11 B) + lea rbp,[rsp-0x1fe0] (8 B); the chkstk alloca
 # (mov eax,0x20e0; call __chkstk; sub rsp,rax) follows, not part of the record.
 
 [build."5.00.5634".anchors.ccommon_fetch]
-rva = 0x2EC0E0              # FUN_1402ec0e0 CCommonShader::fetch (file 0x2eb4e0)
+rva = 0x2EC0E0              # CCommonShader::fetch (file 0x2eb4e0)
 expect = "40,55,53,56,41,54,41,55,41,56,41,57,48,8d,ac,24,50,e8,ff,ff"
 # boundary = 20: 7 pushes (12 B) + lea rbp,[rsp-0x17b0] (8 B); chkstk 0x18b0 next.
 
 [build."5.00.5634".anchors.fetch_cache_get]
-rva = 0x3089B0              # FUN_1403089b0 global fetch-cache get (file 0x307db0)
+rva = 0x3089B0              # global fetch-cache get (file 0x307db0)
 expect = "48,8b,c4,57,41,54,41,55,41,56,41,57,48,83,ec,40"
 # boundary = 16: mov rax,rsp (3 B) + 5 pushes (9 B) + sub rsp,0x40 (4 B).
 
-# ---- M4 inject-mode splice (notes/24 R5 + seams.md; machine-verified bytes
-# from the international Steam exe): the family-B loader's pool-runner call,
+# ---- The inject-mode splice: the family-B loader's pool-runner call,
 # the one seam where decoded entry content can be extended per pack window.
-# VA 0x1403f0259/file 0x3ef659: `E8 62 02 C6 FF` = call FUN_1400504c0 (the
+# VA 0x1403f0259/file 0x3ef659: `E8 62 02 C6 FF` = call the pool runner (the
 # worker-row-pool runner), reached after the loader's row-fill (lea rcx,[
 # 0x140f02470] at 0x1403f0252 = RCX = &pool). The two bytes that follow —
 # `85 db` = test ebx,ebx at 0x1403f025E, with the je that closes the loader's
@@ -82,13 +78,14 @@ rva = 0x3F0259              # pool-runner call in pack_loader_image_generic (fil
 expect = "e8,62,02,c6,ff,85,db"
 
 # The relay CAVE for the famb splice: a compiler alignment pad (a real inter-
-# function CC run, preceded by `41 5e 41 5d 41 5c 5f c3` = pops/ret — notes/
+# function CC run, preceded by `41 5e 41 5d 41 5c 5f c3` = pops/ret
+
 # 24 round 6). 14-byte FF 25 + imm64 relay lands inside these 21 CC bytes.
 [build."5.00.5634".anchors.famb_runner_cave]
 rva = 0x59A071              # see note above; longest CC run in .text (21 bytes)
 expect = "cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc"
 
-# ---- M5 family-A tailgate (in-place decode append). The game LZSS-decodes
+# ---- The family-A tailgate (in-place decode append). The game LZSS-decodes
 # every family-A pack through ONE funnel, `pack_lzss_decode` 0x140314bf0
 # (entry from the international Steam exe). Every family-A loader the loader
 # can host an [[asset]] in reaches it through a single 5-byte E8:
@@ -99,7 +96,7 @@ expect = "cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc"
 #   cp    pack_loader_cp 0x1403ef100         site 0x1403ef326
 #   i.dat pack_idat_loader 0x140314fa0       site 0x14031516f
 # The splice rewrites each site's E8 rel32 to the relay cave below (exactly
-# like M4's famb splice); the cave's `FF 25` + imm64 jumps into version.dll.
+# like the famb splice); the cave's `FF 25` + imm64 jumps into version.dll.
 # All these sites call the same decode function, so the stub dispatches on the
 # caller's continuation (site+5): 0x1403f1439 / 0x1403f0f52 / 0x1403ee93f /
 # 0x1403efc1b / 0x1403ef32b / 0x140315174.
@@ -134,22 +131,22 @@ expect = "e8,c5,58,f2,ff"
 # The tailgate relay cave: a real inter-function CC pad preceded by the
 # `41 5f 41 5e 41 5d 41 5c 5f c3` (pop r15/r14/r13/r12/rdi; ret) epilogue,
 # 19 CC bytes long — the 14-byte FF 25 + imm64 relay lands well inside. Chosen
-# fresh in .text (the M4 famb cave 0x59a071 is already consumed by the
+# fresh in .text (the famb cave 0x59a071 is already consumed by the
 # injector and lives in a different CC run).
 [build."5.00.5634".anchors.pack_lzss_cave]
 rva = 0x5A1D13              # 19-byte CC run in .text (file 0x5a1113)
 expect = "cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc"
 
 # ---------------------------------------------------------------------------
-# M5-T — the family-A decode WORKSPACE (the 200 MB out buffer).
+# The family-A decode workspace (the 200 MB out buffer).
 #
 # `boot_pack_system_driver` 0x140319480 allocates the shared workspace ONCE at
 # boot (stage 1), before any pack decode:
-#   0x1403197cd  CALL pack_workspace_accessor      ; RAX = &DAT_144f86088
+#   0x1403197cd  CALL pack_workspace_accessor      ; RAX = &0x1444f86088
 #   0x1403197dc  MOV  [RAX+0x10], 0xC800000        ; out cap (200 MB)
 #   0x1403197e3  MOV  [RAX+0x14], 0x9600000        ; in cap (150 MB, never read)
-#   0x1403197ed  CALL _aligned_malloc(0xC800000,0x10)  ; -> DAT_144f86088 (out)
-#   0x140319808  CALL _aligned_malloc(0x9600000,0x10)  ; -> DAT_144f86090 (in)
+#   0x1403197ed  CALL _aligned_malloc(0xC800000,0x10)  ; -> 0x1444f86088 (out)
+#   0x140319808  CALL _aligned_malloc(0x9600000,0x10)  ; -> 0x1444f86090 (in)
 #   0x14031981a  CALL pack_master_map_access       ; <- the swap hook: both
 #                                                   buffers exist and are non-NULL
 # Consumers re-read the global at every use (no caching), and the teardown
@@ -157,7 +154,7 @@ expect = "cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc"
 # transparent — provided the new buffers come from the game's own
 # `_aligned_malloc` and the out CAP is raised too (it is the decoder's bound).
 # The in cap is never read (zero refs) and the tailgate never touches the
-# encoded file, so M5-T only swaps the OUT buffer.
+# encoded file, so the swap only replaces the OUT buffer.
 [build."5.00.5634".anchors.workspace_alloc]
 rva = 0x3197CD              # CALL pack_workspace_accessor (file 0x318bcd)
 expect = "e8,8e,d4,fe,ff"
@@ -183,18 +180,18 @@ expect = "40,53,48,83,ec,20,48,8d,42,ff,48,85,c2,74,14,e8"
 rva = 0x597B8C              # _aligned_free(ptr) (file 0x596f8c)
 expect = "48,83,ec,28,48,85,c9,74,0d,48,83,e1,f8,48,8b,49"
 
-# The M5-T relay cave: a 19-byte CC run in .text (preceded by `33 c0 eb c4`),
-# fresh — the M4 famb cave 0x59a071 and the M5 tailgate cave 0x5a1d13 are both
+# The workspace-swap relay cave: a 19-byte CC run in .text (preceded by `33 c0 eb c4`),
+# fresh — the famb cave 0x59a071 and the tailgate cave 0x5a1d13 are both
 # consumed already.
 [build."5.00.5634".anchors.workspace_cave]
 rva = 0x592363              # 19-byte CC run in .text (file 0x591763)
 expect = "cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc"
 
 # ---------------------------------------------------------------------------
-# M7 — the purchase-window TYPE-TAB cycle (corpus notes/23).
+# ---- The purchase-window type-tab cycle.
 #
 # train_list_big_list_window (0x1402ca400) rebuilds manager+0x48 on EVERY type
-# tab (re)build by calling FUN_14019e760 with the tab's type list (the 0x2c-
+# tab rebuild is this function with the tab's type list (the 0x2c-
 # stride descriptor table 0x14068e950). That function re-derives membership by
 # linear-scanning the VANILLA 97-entry whitelist — it never consults the filter
 # the loader replaces (train_list_filter 0x1a13b0, used only by the boot-time
@@ -211,24 +208,24 @@ expect = "cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc"
 # imm64 thunk into version.dll; the original still does its own vector append
 # and growth, so no grow helper is involved.
 [build."5.00.5634".anchors.train_list_tab_scan]
-rva = 0x19E7EE              # the vanilla-whitelist scan inside FUN_14019e760 (file 0x19dbee)
+rva = 0x19E7EE              # the vanilla-whitelist scan inside the rebuild (file 0x19dbee)
 expect = "48,8d,05,cb,d9,55,00,39,38,74,0e,48,83,c0,04,49,3b,c5,7c,f3,e9,9c,00,00,00"
 
-# The M7 relay cave: a 16-byte CC run in .text preceded by the
-# `41 5e 41 5c 5f c3` (pop r14/r12/rdi; ret) epilogue, fresh — the M4 famb
-# cave 0x59a071, the M5 tailgate cave 0x5a1d13 and the M5-T workspace cave
+# The tab relay cave: a 16-byte CC run in .text preceded by the
+# `41 5e 41 5c 5f c3` (pop r14/r12/rdi; ret) epilogue, fresh — the famb
+# cave 0x59a071, the tailgate cave 0x5a1d13 and the workspace cave
 # 0x592363 are consumed already.
 [build."5.00.5634".anchors.train_list_tab_cave]
 rva = 0x5B1E96              # 16-byte CC run in .text (file 0x5b1296)
 expect = "cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc"
 
 # ---------------------------------------------------------------------------
-# M7b — the custom-train-form editor's SECOND vanilla-whitelist scan.
+# ---- The custom-train-form editor's SECOND vanilla-whitelist scan.
 #
-# FUN_14019e950 (0x14019e950), called from train_form_readout_refresh
+# The second whitelist scan (0x14019e950), called from train_form_readout_refresh
 # (0x1401f3ec0), rebuilds the 0x18-stride candidate vector at manager+0x34e8
-# (manager = DAT_140e14510 -> the vector at 0x140e179f8) that the custom
-# train-form editor window (ui_mode_apply case 0xb, DAT_140e24d50) renders for
+# (manager = 0x1440e14510 -> the vector at 0x140e179f8) that the custom
+# train-form editor window (ui_mode_apply case 0xb, 0x1440e24d50) renders for
 # its 全て/オリジナル/インポート sub-tabs. For the base-form sub-views it walks
 # the 0x140-byte spec rows and admits a valid row only if it is in the VANILLA
 # 97-entry purchase whitelist (or, on the fallback path, has 特殊車両フラグ
@@ -244,13 +241,13 @@ expect = "cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc"
 # exactly at the original 0x14019e9f3 fallback path.) RSP is 16-aligned at the
 # site, so the call presents the ABI's RSP == 8 at the callee.
 [build."5.00.5634".anchors.train_form_scan]
-rva = 0x19E9DF              # the vanilla-whitelist scan inside FUN_14019e950 (file 0x19dddf)
+rva = 0x19E9DF              # the vanilla-whitelist scan inside the second scan fn (file 0x19dddf)
 expect = "48,8d,05,da,d7,55,00,39,18,74,68,48,83,c0,04,48,3b,c1,7c,f3"
 
-# The M7b relay cave: a 17-byte CC run in .text preceded by the
-# `48 f7 d9 1b c0 83 e0 01 c3` (neg/sbb/and/ret) tail, fresh — the M4 famb
-# cave 0x59a071, the M5 tailgate cave 0x5a1d13, the M5-T workspace cave
-# 0x592363 and the M7 tab cave 0x5b1e96 are consumed already.
+# The form-readout relay cave: a 17-byte CC run in .text preceded by the
+# `48 f7 d9 1b c0 83 e0 01 c3` (neg/sbb/and/ret) tail, fresh — the famb
+# cave 0x59a071, the tailgate cave 0x5a1d13, the workspace cave
+# 0x592363 and the tab cave 0x5b1e96 are consumed already.
 [build."5.00.5634".anchors.train_form_cave]
 rva = 0x5B2015              # 17-byte CC run in .text (file 0x5b1415)
 expect = "cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc"
@@ -262,12 +259,12 @@ expect = "cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc"
 #  - the big list window entry (19-byte position-independent prologue:
 #    mov rax,rsp; mov [rax+8],rcx; push rbp/rbx/rsi/rdi/r12/r13/r14/r15) — the
 #    per-frame shell that calls it, hooked to bracket the frame;
-#  - the spec-table manager singleton (DAT_140e14510): +0x18 rows begin /
+#  - the spec-table manager singleton (0x1440e14510): +0x18 rows begin /
 #    +0x20 rows end (0x140-byte rows), +0x30/+0x48/+0x60 the three u32 index
 #    vectors (unfiltered / the list the UI reads / the type-group list).
 #    Runtime pointers — no expect bytes (like workspace_globals).
 [build."5.00.5634".anchors.train_list_tab_rebuild]
-rva = 0x19E760              # FUN_14019e760 type-tab rebuild (file 0x19db60)
+rva = 0x19E760              # the type-tab rebuild (file 0x19db60)
 expect = "40,53,57,41,54,41,56,41,57,48,83,ec,20,48,8b,41,48"
 
 [build."5.00.5634".anchors.train_list_window_entry]
@@ -277,7 +274,7 @@ expect = "48,8b,c4,48,89,48,08,55,53,56,57,41,54,41,55,41,56,41,57"
 [build."5.00.5634".anchors.train_spec_manager]
 rva = 0xE14510
 
-# The save-path probe's anchors (probe_save = true diagnostics; notes/62-B §4.2):
+# The save-path probe's anchors (probe_save = true diagnostics; §4.2):
 # the four save-side mmf helpers every save field flows through. Hooking the
 # callee of the two u32-vector vtable thunks (0x140115f70 write /
 # 0x140115f80 read) rather than the thunks themselves: each thunk is a 9-byte
@@ -311,13 +308,13 @@ rva = 0x41820               # the u32-vector block READER (file 0x40c20);
 expect = "48,89,5c,24,10,48,89,74,24,18,48,89,4c,24,08,57"
 
 # ---------------------------------------------------------------------------
-# M7-0 — the SAVE-ID CLAMP GUARD (always on; a safety fix, not a diagnostic).
+# ---- The save-id clamp guard (always on; a safety fix, not a diagnostic).
 #
 # A saved formation's form id is used as a spec-row index with NO bounds check
-# (corpus notes/62 §5), so an id past the vector's length (DAT_140e14528,
+#, so an id past the vector's length (0x1440e14528,
 # stride 0x140) reads past the heap block — a garbage train, or a crash for
 # larger ids. This is reachable today whenever a save is loaded without the mod
-# that made it, and becomes routine once M7 admits mod trains past row 421.
+# that made it, and becomes routine once mod-added trains exist past row 421.
 #
 # Two choke points cover every saved id that reaches the spec table:
 #
@@ -340,18 +337,18 @@ expect = "48,89,5c,24,10,48,89,74,24,18,48,89,4c,24,08,57"
 #     An out-of-range head id becomes 417 — the engine's own auto-named invalid
 #     row (`form_id_417`, built by train_list_builder's tail 0x14019d2dd):
 #     bValid==0, bSpecialFlag==0 and a valid pFormName, so the BLANK path runs
-#     and clones that name (a zero-filled row would crash there, notes/62 §1.4).
+#     and clones that name (a zero-filled row would crash there, §1.4).
 #     417 is never a CSV row and never a mod slot, so it can never be repurposed.
 #
-#  2. the PER-CAR ids — the fixed 0xf8 car block `FUN_140061ee0` bulk-reads into
+#  2. the PER-CAR ids — the fixed 0xf8 car block (the reader anchor below) bulk-reads into
 #     the consist object at 0x140061f8b (`call mmf_paged_read 0x140308f20`, the
 #     destination `lea rdx,[rbp+0x2c]` = consist+0x50c). Every per-car u16 id
 #     (10 rows, stride 0x18) comes from that block, so clamping the block right
 #     after the read covers `train_row_car_wiring` 0x1401ab990 (reads
-#     `PTR_140e14528[id].aModelIdx[aux-1]`), `custom_dat_parser` 0x140061260
+#     `0x1440e14528[id].aModelIdx[aux-1]`), `custom_dat_parser` 0x140061260
 #     (its `0x1a0 < id` gate short-circuits bValid but the block still reads
 #     `(base+id)->bSpecialFlag` → OOB) and `train_form_readout_update`
-#     0x140061650 — both of the latter are called from INSIDE FUN_140061ee0
+#     0x140061650 — both of the latter are called from INSIDE the reader
 #     after the read, and `roster_row_builder`/`train_row_car_wiring` later read
 #     the same (now-clamped) block. The site's `E8` is spliced to the cave; the
 #     stub calls the original reader, clamps, and returns its own result.
@@ -364,28 +361,28 @@ expect = "48,89,5c,24,10,48,89,74,24,18,48,89,4c,24,08,57"
 #     (FORM_DUMMY_02 = 62).
 #
 # Both clamps read the LIVE vector length ([0x140e14530]-[0x140e14528])/0x140,
-# so they stay correct after M7 grows the vector. Inert for every in-range id.
+# so they stay correct after the injection grows the vector. Inert for every in-range id.
 [build."5.00.5634".anchors.save_group_head]
 rva = 0x1B6F0C              # the head id's row-offset math in save_train_group_restore
                             # (file 0x1b630c): movsxd rax,r14d; lea rcx,[rax+rax*4]
 expect = "49,63,c6,48,8d,0c,80"
 
-# The M7-0 head relay cave: a 16-byte CC run in .text preceded by the
+# The clamp head relay cave: a 16-byte CC run in .text preceded by the
 # `8b c1 48 83 c4 30 5d c3` (mov eax,ecx; add rsp,0x30; pop rbp; ret) epilogue,
-# fresh — the M4 famb cave 0x59a071, the M5 tailgate cave 0x5a1d13, the M5-T
-# workspace cave 0x592363, the M7 tab cave 0x5b1e96 and the M7b form cave
+# fresh — the famb cave 0x59a071, the tailgate cave 0x5a1d13, the
+# workspace cave 0x592363, the tab cave 0x5b1e96 and the form-readout cave
 # 0x5b2015 are consumed already (and their 64K host blocks are taken).
 [build."5.00.5634".anchors.save_group_head_cave]
 rva = 0x5D28F0              # 16-byte CC run in .text (file 0x5d1cf0)
 expect = "cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc"
 
 [build."5.00.5634".anchors.save_car_read]
-rva = 0x61F8B               # FUN_140061ee0's 0xf8 car-block read — the per-car
+rva = 0x61F8B               # the car-block reader's 0xf8 read — the per-car
                             # choke point (file 0x6138b): call mmf_paged_read
                             # 0x140308f20 with rdx = consist+0x50c
 expect = "e8,90,6f,2a,00"
 
-# The M7-0 car relay cave: a 16-byte CC run in .text preceded by the
+# The clamp car relay cave: a 16-byte CC run in .text preceded by the
 # `00 07 80 e8 f0 78 fb ff` (a call's tail) bytes, fresh. It shares the car
 # site's 64K host block (0x60000), so the harness maps that block once.
 [build."5.00.5634".anchors.save_car_read_cave]
@@ -393,11 +390,11 @@ rva = 0x66790               # 16-byte CC run in .text (file 0x65b90)
 expect = "cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc"
 
 # ---------------------------------------------------------------------------
-# M7-1 — DIRECT SPEC-ROW INJECTION (the mechanism; NOT wired into the boot
-# engine — M7-2 does that). Harness-driven through the `a9loader_m7_rows`
+# ---- Direct spec-row injection (the mechanism; not wired into the boot
+# engine — the `[[train]]` pass does that). Harness-driven through the `a9loader_m7_rows`
 # export; the fake manager/spec-table pages live in harness/host.c.
 #
-# The route (PLAN §M7): leave the FORM name literal and the boot-time matcher
+# The route: leave the FORM name literal and the boot-time matcher
 # alone; grow the spec vector AFTER `spec_table_resize` has re-pinned it, and
 # write extra rows cloned from a shipped template row. Four anchors:
 #
@@ -414,7 +411,7 @@ expect = "cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc"
 #    existing rows into it, destroys + frees the old block (0x14040a884), and
 #    sets cap = new_total, end = old_count, begin = new block. This is exactly
 #    the "grow the vector with the game's allocator so its teardown frees it
-#    cleanly" primitive (the M5-T lesson) — the vector destructor then frees the
+#    cleanly" primitive (the workspace-swap lesson) — the vector destructor then frees the
 #    block with the same allocator family. Prologue 20 B: push r14 + sub rsp,0x40
 #    + a 9-B home store + mov [rsp+0x50],rbx.
 #
@@ -433,7 +430,7 @@ expect = "cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc,cc"
 #    Prologue 19 B: 3 home stores + sub rsp,0x28.
 #
 # Row stride is 0x140; ids are u16 in the save, so the reserved range must stay
-# ≤ 65535, and (M7-1 choice) under forms.rs `FORMS_MAX` = 1024 so the composed
+# ≤ 65535, and — by design — under forms.rs `FORMS_MAX` = 1024 so the composed
 # keep-set can still admit the loader's own trains.
 [build."5.00.5634".anchors.spec_table_resize]
 rva = 0x19F150              # std::vector<A9_SpecRow_140>::resize(421) (file 0x19e550)
@@ -452,13 +449,13 @@ rva = 0x372F0               # the builder's auto-name ctor (file 0x366f0)
 expect = "48,89,54,24,10,4c,89,44,24,18,4c,89,4c,24,20,48,83,ec,28"
 
 # ---------------------------------------------------------------------------
-# M7-2 — the `[[train]]` section. The train compiler expands into the existing
+# ---- The `[[train]]` pass. The train compiler expands into the existing
 # primitives (row merges, asset entries) plus a direct spec-row injection. The
-# injection site is NOT M7-1's `spec_table_resize`:
+# injection site is NOT the resize hook's:
 #
 #   `train_csv_pipeline_builder` 0x14019c340 calls `spec_table_resize` at
 #   0x14019c89e and then IMMEDIATELY runs its fill loop (0x14019c8c0..0x14019d2cf)
-#   — so right after the resize the rows are still uninitialised, and M7-1's
+#   — so right after the resize the rows are still uninitialised, and the hook's
 #   clone-a-shipped-row step would copy garbage. The purchase-list builder,
 #   however, is called from INSIDE the same pipeline at 0x14019d606 (after the
 #   fill loop and the `form_id_%d` auto-name tail), so hooking it and injecting
@@ -478,7 +475,7 @@ expect = "48,89,54,24,10,4c,89,44,24,18,4c,89,4c,24,20,48,83,ec,28"
 #
 #  * `wstr_clone_ref` 0x14001d7d0 — `(rcx = dest name field, rdx = src name
 #    field)`: clones an A9_RcStr field (a refcount bump / COW) so an injected
-#    row's name pointers are OWNED by the row. The M7-1 clone shares the
+#    row's name pointers are OWNED by the row. The plain clone shares the
 #    template's other name pointers without a refcount increment, so the live
 #    teardown would double-free them; the train injection clones every one of
 #    the 18 lanes (awName[0..8] @+0xa8, awNameAlt[0..8] @+0xf0) through this.
@@ -513,9 +510,9 @@ expect = "81,fd,a1,01,00,00"
 #  * `train_model_fetch` 0x19b9f0 — the GENERIC car-model loader, i.e. the branch
 #    the game's own pattern loop takes for an ordinary car. The loop
 #    (train_csv_pipeline_builder, 0x14019cb20..0x14019cbe9) is a ladder:
-#    `FUN_14019bc80` = is-steam -> cmodeltrain_alloc_init 0x19bac0; `FUN_14019bdc0`
-#    = is-tender -> inline (new 0x2b0 + FUN_1403e2700 + vtable+8); `FUN_140066e70`
-#    = variant -> 0x19bb80; ELSE -> this function with R9B = `FUN_140066e60(kind)`
+#    the is-steam branch -> cmodeltrain_alloc_init 0x19bac0; then
+#    the is-tender branch -> inline (new 0x2b0 + the mesh-alloc 0x1403e2700 + vtable+8); then
+#    the variant branch -> 0x19bb80; otherwise -> this function with R9B = the kind detector 0x140066e60(kind)
 #    (`(kind - 0x15f) <= 0x2e`, a flag selecting CModelCUTTrain 0x318 over
 #    CModelTrain 0x2b0). Args: RCX = the wrapper record, RDX = the address of the
 #    mesh-path cell, R8 = the 17-cell pattern row, R9B = the flag. Returns 1/0 in
@@ -523,11 +520,10 @@ expect = "81,fd,a1,01,00,00"
 #    the flag's range, so the flag is always 0 for us.
 #    The wrapper record the pipeline hands it is `{+0x00 obj, +0x08 capacity u32,
 #    +0x0c running cost u32, +0x10 price u64}`, the three numbers read from the
-#    pattern row's CSV columns 3/4/5 (see the pipeline's calls to FUN_14019f6a0 /
-#    FUN_14019f6c0). After a successful call the pipeline registers the record
+#    pattern row's CSV columns 3/4/5 (see the pipeline's CSV-column reads). After a successful call the pipeline registers the record
 #    (`model_register`) and stores the returned index-1 into the row's car slot.
 [build."5.00.5634".anchors.train_model_fetch]
-rva = 0x19B9F0              # FUN_14019b9f0 (wrapper, &path_cell, row, flag) -> u8
+rva = 0x19B9F0              # the train-record loader call (wrapper, &path_cell, row, flag) -> u8
 expect = "48,89,5c,24,08,48,89,74,24,10,48,89,7c,24,18,41,56,48,83,ec,20"
 
 #  * the car build's helpers (see `rowinject::build_cars`). All are CALLED, never
@@ -540,15 +536,15 @@ expect = "48,89,5c,24,08,48,89,74,24,10,48,89,7c,24,18,41,56,48,83,ec,20"
 #    A9_RcStr, so the destination must be live before either runs — calling the
 #    2-arg assign on a zeroed buffer dereferences NULL).
 [build."5.00.5634".anchors.model_register]
-rva = 0x97A90               # FUN_140097a90 (manager, wrapper)
+rva = 0x97A90               # the model-register call (manager, wrapper)
 expect = "48,89,5c,24,08,57,48,83,ec,20,48,8b,d9,48,8b,49"
 
 [build."5.00.5634".anchors.model_index_alloc]
-rva = 0x19F120              # FUN_14019f120 (manager) -> the model index
+rva = 0x19F120              # the model-index allocator (manager) -> the model index
 expect = "48,8b,51,08,48,b8,ab,aa,aa,aa,aa,aa,aa,2a,48,2b"
 
 [build."5.00.5634".anchors.rcstr_ctor]
-rva = 0x1D940               # FUN_14001d940 — constructs an empty A9_RcStr at dest
+rva = 0x1D940               # the empty-A9_RcStr constructor (dest)
 expect = "40,53,48,83,ec,20,48,8b,d9,e8,36,e1,3e,00,48,8b"
 
 #  * the consist wiring (DIAGNOSTIC hook only): `train_row_car_wiring`
@@ -569,18 +565,18 @@ expect = "48,8b,c4,55,56,57,41,54,41,55,41,56,41,57,48,8d,68,a1,48,81,ec,b0,00,0
 rva = 0x3AECC0              # preview_train_build (param_1, spec_row, ...)
 expect = "40,56,57,41,56,48,83,ec,30,48,c7,44,24,20,fe,ff,ff,ff"
 
-#  * the consist builder (DIAGNOSTIC hook only): FUN_1401ab530(object) fills the
+#  * the consist builder (diagnostic hook only): the filler(object) fills the
 #    train object's per-car records from the spec row and calls
 #    `train_row_car_wiring`. No RSP-as-value read in the prologue, so it is safe to
 #    trampoline (unlike the wiring itself).
 [build."5.00.5634".anchors.train_consist_build]
-rva = 0x1AB530              # FUN_1401ab530 (train object)
+rva = 0x1AB530              # the consist filler (train object)
 expect = "48,89,5c,24,08,48,89,74,24,10,57,48,83,ec,20,41,8b"
 
-#  * another consist-wiring caller (DIAGNOSTIC hook only): FUN_1401bdf90. RSP-safe
+#  * another consist-wiring caller (diagnostic hook only): the 0x1BDF90 anchor. RSP-safe
 #    prologue.
 [build."5.00.5634".anchors.train_consist_build2]
-rva = 0x1BDF90              # FUN_1401bdf90
+rva = 0x1BDF90              # a consist-wiring caller (diagnostic hook only)
 expect = "40,57,41,56,41,57,48,83,ec,30,48,c7,44,24,20,fe"
 
 #  * the remaining consist-wiring caller (DIAGNOSTIC hook only): `preview_lists_free`

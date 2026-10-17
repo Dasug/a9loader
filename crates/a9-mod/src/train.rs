@@ -1,6 +1,6 @@
-//! `[[train]]` — the M7-2 train compiler (pure; no Win32, no game memory).
+//! `[[train]]` — the train compiler (pure; no Win32, no game memory).
 //!
-//! PLAN §M7: a mod can add brand-new train types beyond the 417-name FORM
+//! a mod can add brand-new train types beyond the 417-name FORM
 //! catalog without hand-picking a slot. This module is the *compiler*: it turns
 //! a [`TrainSection`] declaration into a [`CompiledTrain`] — an allocated spec
 //! row id + FORM name, the four derived `csvp` rows, the three preview-icon
@@ -124,7 +124,7 @@ pub struct CompiledTrain {
     pub name_en: String,
     /// the runtime livery name (default = the model dir): the shipped
     /// `_d_<livery>.dds` the reused model renders with. Documentation only in
-    /// this version — a new livery needs the M5 `[[asset]]` route.
+    /// this version — a new livery needs the `[[asset]]` route.
     pub livery: String,
     pub cruise_speed: u16,
     pub reverse_speed: Option<u16>,

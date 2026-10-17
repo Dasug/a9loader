@@ -1,9 +1,9 @@
-//! The M5 boot-time tailgate planning and the M5-U `.dir` listing planner.
+//! The boot-time tailgate planning and the `.dir` listing auto-merge planner.
 //!
 //! [`plan_listings`] derives the auto-merged `.dir` group listings from the
 //! mods' own `[[asset]]` rows; [`decide_and_grow`] runs the tailgate decision
 //! (once against the workspace the game will allocate, then again against a
-//! grown workspace when the M5-T swap is armed) and records the outcome on the
+//! grown workspace when the workspace swap is armed) and records the outcome on the
 //! plan. Both are pure boot-time planning: they read files, log loudly, and
 //! never change the running game except through the tailgate install.
 
@@ -13,11 +13,11 @@ use a9_mod::{builds, config};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-/// The engine's decode-workspace ceiling (`DAT_144f86098` out-cap = 0xC800000,
+/// The engine's decode-workspace ceiling (0x144f86098 out-cap = 0xC800000,
 /// 200 MiB): appended bytes must fit under it with the vanilla image.
 const TAILGATE_OUT_CAP: usize = 0xC800000;
 
-// ---- M5-U: auto-merged `.dir` group listings ----------------------------------
+// ---- auto-merged `.dir` group listings ----------------------------------
 
 /// Comma-group a list of strings for a log line.
 fn join_list(items: &[String]) -> String {
@@ -38,7 +38,7 @@ fn thousands(n: usize) -> String {
     out
 }
 
-/// Build the M5-U auto-merged `.dir` group listings for this boot.
+/// Build the auto-merged `.dir` group listings for this boot.
 ///
 /// A mod's `[[asset]]` with `dir = D` is a membership claim on the group whose
 /// listing row is `D.dir`. For each distinct group `D` that has a shipped
@@ -56,8 +56,8 @@ fn thousands(n: usize) -> String {
 ///
 /// The host of a group's listing is the host its assets resolved to (the
 /// dirindex answer): for every shipped listing those coincide (previewtexture →
-/// tp, base/tree/light/… → mcp), while the listing row's OWN `dir` is ambiguous
-/// by construction (memory #315), so the asset host is the reliable key.
+/// tp, base/tree/light/… → mcp), while the listing row's own `dir` can be
+/// ambiguous by construction, so the asset host is the reliable key.
 pub(super) fn plan_listings(
     plan: &Plan,
     exe_dir: &Path,
@@ -173,7 +173,7 @@ fn plan_one_listing(
     }
 }
 
-/// The membership + host checks for one group's listing (M5-U): the group's
+/// The membership + host checks for one group's listing: the group's
 /// contributors, its mods, and the one host its assets resolved to. `None` =
 /// the group is skipped for a documented reason (already logged): not on the
 /// auto-merge allow-list, an explicit `[[asset]]` override of the row is
@@ -236,7 +236,7 @@ fn read_shipped_idat(exe_dir: &Path) -> Result<a9_formats::idat::Idat, String> {
         .and_then(|d| a9_formats::idat::parse(&d).map_err(|e| format!("parsing data\\i.dat: {e}")))
 }
 
-// ---- M5 tailgate boot decision -------------------------------------------------
+// ---- tailgate boot decision -------------------------------------------------
 
 struct TailgateDecision {
     /// per-host vanilla declared size (the append base == the i.dat row offset)
@@ -304,7 +304,7 @@ fn tailgate_hosts(plan: &Plan) -> Vec<String> {
 
 /// The largest family-A host requirement this plan implies: the host's vanilla
 /// declared size plus every payload the loader appends to it (`[[asset]]`
-/// payloads and the M5-U derived `.dir` listings). `declared` is the map the
+/// payloads and the derived `.dir` listings). `declared` is the map the
 /// tailgate decision read at boot, so this is exact whenever that read worked.
 fn plan_family_a_need(plan: &Plan, declared: &BTreeMap<String, usize>) -> usize {
     let mut need: BTreeMap<String, usize> = declared.clone();
@@ -320,7 +320,7 @@ fn plan_family_a_need(plan: &Plan, declared: &BTreeMap<String, usize>) -> usize 
     need.values().copied().max().unwrap_or(0)
 }
 
-/// M5-T: arm the family-A workspace swap when the plan (or an explicit config
+/// Arm the family-A workspace swap when the plan (or an explicit config
 /// size) asks for more than the game's shipped buffer. Returns the size the
 /// workspace will have after the swap, or `0` when nothing was asked for or the
 /// swap was refused (fail-open — the game's own buffers stay).
@@ -347,7 +347,7 @@ pub(super) unsafe fn maybe_grow_workspace(
         }
         Err(e) => {
             logger.err(&format!(
-                "M5-T workspace: swap refused ({e}) — keeping the game's buffer; an oversized \
+                "workspace swap: refused ({e}) — keeping the game's buffer; an oversized \
                  family-A payload still refuses loudly per host"
             ));
             0
@@ -355,8 +355,8 @@ pub(super) unsafe fn maybe_grow_workspace(
     }
 }
 
-/// Decide and install the M5 tailgate for this boot's `[[asset]]` ops: first
-/// against the workspace the game will allocate, then — when the M5-T swap is
+/// Decide and install the tailgate for this boot's `[[asset]]` ops: first
+/// against the workspace the game will allocate, then — when the workspace swap is is
 /// armed — against the grown cap, and finally record the outcome on `plan`.
 ///
 /// The two-pass shape is load-bearing: the game allocates the decode workspace
@@ -398,7 +398,7 @@ pub(super) unsafe fn decide_and_grow(
     }
 }
 
-/// Decide and install the M5 tailgate for this boot's `[[asset]]` ops.
+/// Decide and install the tailgate for this boot's `[[asset]]` ops.
 ///
 /// Merge is the fallback at every step, and every abandonment names its
 /// reason in `note` (logged once by the caller):

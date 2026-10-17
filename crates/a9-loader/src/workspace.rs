@@ -1,6 +1,6 @@
-//! M5-T — the family-A decode workspace swap (removing the 200 MB ceiling).
+//! the family-A decode workspace swap (removing the 200 MB ceiling).
 //!
-//! The shared decode workspace is a boot-time singleton (`DAT_144f86088`):
+//! The shared decode workspace is a boot-time singleton (0x144f86088):
 //!
 //! ```text
 //! +0x00  qword  OUT buffer pointer   (allocated once, 200 MB)
@@ -123,14 +123,14 @@ unsafe extern "system" fn workspace_stub() {
         };
         let g = inner.globals;
         let Some(caps) = readable(g + OFF_OUT_CAP, 8) else {
-            inner.logger.err("M5-T workspace: the caps are not readable — not swapping");
+            inner.logger.err("workspace swap: the caps are not readable — not swapping");
             return;
         };
         let out_cap = u32::from_le_bytes([caps[0], caps[1], caps[2], caps[3]]);
         let in_cap = u32::from_le_bytes([caps[4], caps[5], caps[6], caps[7]]);
         if out_cap != SHIPPED_OUT_CAP || in_cap != SHIPPED_IN_CAP {
             inner.logger.err(&format!(
-                "M5-T workspace: caps at {g:#x} read {out_cap:#x}/{in_cap:#x}, not the shipped \
+                "workspace swap: caps at {g:#x} read {out_cap:#x}/{in_cap:#x}, not the shipped \
                  {SHIPPED_OUT_CAP:#x}/{SHIPPED_IN_CAP:#x} — the workspace was already sized by \
                  something else; NOT swapping"
             ));
@@ -141,7 +141,7 @@ unsafe extern "system" fn workspace_stub() {
         let new = malloc(inner.target_out, 0x10);
         if new.is_null() {
             inner.logger.err(&format!(
-                "M5-T workspace: _aligned_malloc({} MiB) failed — keeping the game's {} MiB buffer \
+                "workspace swap: _aligned_malloc({} MiB) failed — keeping the game's {} MiB buffer \
                  (large family-A mod sets may refuse their payloads)",
                 inner.target_out >> 20,
                 SHIPPED_OUT_CAP >> 20
@@ -149,7 +149,7 @@ unsafe extern "system" fn workspace_stub() {
             return;
         }
         let Some(slot) = readable(g + OFF_OUT_PTR, 8) else {
-            inner.logger.err("M5-T workspace: the OUT pointer is not readable — not swapping");
+            inner.logger.err("workspace swap: the OUT pointer is not readable — not swapping");
             free(new);
             return;
         };
@@ -163,7 +163,7 @@ unsafe extern "system" fn workspace_stub() {
             free(old as *mut u8);
         }
         inner.logger.line(&format!(
-            "M5-T workspace: OUT buffer {} MiB -> {} MiB at {new:p} (game's own _aligned_malloc, \
+            "workspace swap: OUT buffer {} MiB -> {} MiB at {new:p} (game's own _aligned_malloc, \
              cap raised; the game's teardown frees it)",
             SHIPPED_OUT_CAP >> 20,
             inner.target_out >> 20
@@ -225,7 +225,7 @@ pub unsafe fn install(
         target_out,
     });
     Ok(format!(
-        "M5-T workspace: swap armed at rva={:#x} (the alloc tail, expect=verified) — OUT {} MiB \
+        "workspace swap: swap armed at rva={:#x} (the alloc tail, expect=verified) — OUT {} MiB \
          via the game's _aligned_malloc {:#x}",
         site.rva,
         target_out >> 20,
@@ -255,7 +255,7 @@ pub fn target_size(cfg_mb: u32, needed: usize, logger: &log::Logger) -> usize {
         if want < total {
             if want > 0 {
                 logger.line(&format!(
-                    "M5-T workspace: the requested {} MiB does not cover the planned {} MiB of \
+                    "workspace swap: the requested {} MiB does not cover the planned {} MiB of \
                      family-A content — growing to {} MiB",
                     want >> 20,
                     needed >> 20,
@@ -271,7 +271,7 @@ pub fn target_size(cfg_mb: u32, needed: usize, logger: &log::Logger) -> usize {
     }
     if want > MAX {
         logger.line(&format!(
-            "M5-T workspace: requested {} MiB is beyond the u32 cap field — clamping to {} MiB",
+            "workspace swap: requested {} MiB is beyond the u32 cap field — clamping to {} MiB",
             want >> 20,
             MAX >> 20
         ));

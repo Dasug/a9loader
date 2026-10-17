@@ -1,15 +1,15 @@
 //! a9-formats — codecs for every A-Train 9 v5 data format, ported 1:1 from the
-//! verified reference tools in the research corpus (`tools/`, A-Train 9
+//! verified live against the game's own routines on real ArtDink packs.
 //! Decompilation folder) so that byte-parity is the acceptance criterion, not
 //! a hope:
 //!
-//! - [`add`] / [`crypt`] — the pack cipher (`tools/a9crypt.py`, recovered from
-//!   `FUN_140315710`): 16-byte MD5 header doubling as XOR key + ADD table.
-//! - [`lzss`] — the LZSS codec (`tools/a9dec.c` decode, byte-exact against the
-//!   game's `FUN_140314bf0`; `tools/a9enc.c` encode, the greedy hash-chain
+//! - [`add`] / [`crypt`] — the pack cipher (recovered from the game's helper at
+//!   0x140315710): 16-byte MD5 header doubling as XOR key + ADD table.
+//! - [`lzss`] — the LZSS codec (decode byte-exact against the game's loader at
+//!   0x140314bf0; encode, the greedy hash-chain
 //!   matcher that built the live repacked packs). Back-refs are copied
 //!   **read-as-you-write** — the decode bug class that cost the previous
-//!   project two weeks (corpus lesson 8.1) is impossible to reintroduce here
+//!   project weeks is impossible to reintroduce here
 //!   without the round-trip tests catching it.
 //! - [`pack`] — pack-file framing: family A (size-prefixed) vs family B
 //!   (entry-table stream), `tools/repack.py` semantics.
@@ -17,11 +17,11 @@
 //!   (`rebuild_livery_packs.py`) and the 0x204 CSV variant (`build_csvp_ascii.py`).
 //! - [`csv`] — the UTF-16 CSV tables inside `csvp`: verbatim-preserving parse
 //!   plus the row-level merge (row identity = the first column) that lets two
-//!   mods edit one table without whole-table conflicts (M5 W2).
+//!   mods edit one table without whole-table conflicts.
 //! - [`idat`] — the `i.dat` master index (`tools/i_parse.py`, verified
 //!   byte-identical round-trip).
 //! - [`savegame`] — plaintext zlib members of `.a9d`/`.a9d5` saves
-//!   (corpus `notes/12-savegame-format.md`).
+
 //!
 //! `a9ml verify` is the machine that proves all of this against real packs.
 

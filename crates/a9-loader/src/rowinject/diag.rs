@@ -63,9 +63,9 @@ pub fn install_panic_capture(_logger: &log::Logger) {
     std::panic::set_hook(Box::new(|info| capture_panic(info)));
 }
 // ---------------------------------------------------------------------------
-// DIAGNOSTIC: the consist row copier.
+// DIAGNOSTIC: the consist row copier (address in `builds.toml`).
 //
-// FUN_1401a9d30(object, src, n) memcpy's a row-shaped struct into a consist
+// The copier call (object, src, n) memcpy's a row-shaped struct into a consist
 // object's +0x4e0 window. The per-car entries `train_row_car_wiring` resolves
 // through land at obj+0x50c = 0x4e0 + 0x2c, so this hook shows the {form, aux}
 // pairs the renderer actually uses — for vanilla trains and ours alike, which is
@@ -197,11 +197,11 @@ pub(super) unsafe fn install_consist_probe(
 }
 
 // ---------------------------------------------------------------------------
-// DIAGNOSTIC: the consist object CREATOR (one level above FUN_1401ab530).
+// DIAGNOSTIC: the consist object CREATOR (one level above the filler).
 //
-// FUN_1401be070(manager, index, ?, src, n) allocates the 0x6b8-byte consist
-// object, parks it at [manager]+index*8 and calls FUN_1401ab530. Hooking it too
-// separates "the purchase path never ran" from "FUN_1401ab530 was bypassed".
+// The creator call (manager, index, ?, src, n) allocates the 0x6b8-byte consist
+// object, parks it at [manager]+index*8 and then runs the filler. Hooking it
+// too separates "the purchase path never ran" from "the filler was bypassed".
 // ---------------------------------------------------------------------------
 pub(super) static CREATE_TRAMP: core::sync::atomic::AtomicUsize =
     core::sync::atomic::AtomicUsize::new(0);

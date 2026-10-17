@@ -62,7 +62,7 @@ pub fn run(path: &Path, all: bool) -> Result<()> {
             }
             if all {
                 // per-row view: bare name, dir, and the (len, flag, off) tail —
-                // the row fields a [[asset]] merge writes (M5 W1)
+                // the row fields an [[asset]] merge writes
                 for e in idat.entries.iter() {
                     println!(
                         "    {:<28} {:<18} len={:<9} flag={} off={}",

@@ -35,7 +35,7 @@ fn core_anchors(id: &str) -> Result<Vec<CoreAnchor>> {
         CoreAnchor {
             rva: 0x1A13B0,
             name: "train_list_filter",
-            note: "FUN_1401a13b0 (file 0x1a07b0) — train-list whitelist filter",
+            note: "the filter function (file 0x1a07b0) — train-list whitelist filter",
             len: 16,
         },
         CoreAnchor {
@@ -59,7 +59,7 @@ fn core_anchors(id: &str) -> Result<Vec<CoreAnchor>> {
     ]);
     match id {
         // the rvas are build-specific; extending support to another build =
-        // RE work recorded in the notes, then a mapping entry here
+        // new RE work, then a mapping entry here
         "5.00.5634" => Ok(steam),
         _ => bail!("no core anchor set for build {id:?}"),
     }
@@ -107,7 +107,7 @@ pub fn run(exe: &Path, out: Option<&Path>, check: bool) -> Result<()> {
     let id = build.id.clone();
     let anchors = core_anchors(&id)?;
 
-    // provenance hash: the format library's own md5 (proven byte-parity in M1)
+    // provenance hash: the format library's own md5 (proven byte-parity)
     let md5 = a9_formats::crypt::md5(&d);
     let hash: String = md5[..4].iter().map(|x| format!("{x:02x}")).collect();
 

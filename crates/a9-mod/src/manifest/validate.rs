@@ -266,7 +266,7 @@ fn validate_loose_assets(m: &Manifest) -> Result<(), ModError> {
     Ok(())
 }
 
-/// `[[asset]]` — a family-A append + an i.dat row (M5 W1), single-file form
+/// `[[asset]]` — a family-A append + an i.dat row, single-file form
 /// (`name`+`file`) or folder form (`folder`, expanded at scan time). Exactly
 /// one form per section.
 fn validate_assets(m: &Manifest) -> Result<(), ModError> {

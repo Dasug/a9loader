@@ -1,4 +1,4 @@
-//! The family-A append (M5 W1) — new payloads concatenated onto a
+//! The family-A append — new payloads concatenated onto a
 //! size-prefixed stream (`vp`/`tp`/`mcp`/`ep`/`cp`), plus the pure layout
 //! helpers the `i.dat` row writer shares with the merge.
 
@@ -7,7 +7,7 @@ use super::MergeReport;
 use crate::pack::{self, Family};
 use crate::Error;
 
-/// One `[[asset]]` operation (M5 W1): a payload appended to a family-A host
+/// One `[[asset]]` operation: a payload appended to a family-A host
 /// pack's decoded stream (`vp`/`tp`/`mcp`/`ep`/`cp`), plus the `i.dat` row
 /// identity it will carry (`name` = the bare master-map key; `dir` = the
 /// consumer grouping). The payload bytes are the exact pack chunk, so the
@@ -55,7 +55,7 @@ pub fn family_a_total(vanilla_decoded_len: usize, ops: &[AssetOp]) -> usize {
 
 /// Whether a family-A append fits the engine's decode workspace: the appended
 /// bytes land at `|V|`, so the whole merged image (`family_a_total`) must stay
-/// within `cap`. The M5 tailgate uses this against the 200 MB out-cap to
+/// within `cap`. The tailgate uses this against the 200 MB out-cap to
 /// decide, per host, between tailgate and merge; [`overlay_pack_a`] asserts
 /// the same quantity against its own budget.
 pub fn family_a_fits(vanilla_decoded_len: usize, ops: &[AssetOp], cap: usize) -> bool {

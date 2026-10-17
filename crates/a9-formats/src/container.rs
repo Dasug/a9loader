@@ -1,4 +1,5 @@
-//! Family-B container shapes — ports of corpus `tools/rebuild_livery_packs.py`
+//! Family-B container shapes — the stored-name fields, output sizes and
+//! per-entry payloads of the family-B containers (me/mt*/mtentr0/mtcutp0).
 //! (image packs) and `tools/build_csvp_ascii.py` (the 0x204 CSV variant used
 //! by `csvp`/`sdp`/`csdp`).
 //!
@@ -15,10 +16,10 @@
 //! lossless on original packs. [`NameField`] stores the raw bytes, decodes
 //! only for display, and serializes exactly what it parsed — parse→serialize
 //! is byte-identical on every real pack. Builder-style construction
-//! ([`NameField::from_str`]) zero-pads like the corpus Python builders.
+//! ([`NameField::from_str`]) zero-pads like the reference pack builders.
 //!
 //! Both walks must consume the decoded buffer **exactly** — the structural
-//! sanity check that catches decoder bugs (corpus lesson 8.1), run on every
+//! sanity check that catches decoder bugs, run on every
 //! real pack by `a9ml verify`.
 
 use crate::Error;
@@ -32,7 +33,7 @@ pub struct NameField([u8; NAME_FIELD]);
 
 impl NameField {
     /// Builder construction: UTF-16 + NUL + zero padding — the exact
-    /// field bytes the corpus Python builders (`rebuild_livery_packs.py`,
+    /// field bytes the reference pack builders
     /// `build_csvp_ascii.py`) produce.
     pub fn from_str(name: &str) -> Result<Self, Error> {
         if name.contains('\0') {

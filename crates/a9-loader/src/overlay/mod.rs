@@ -1,4 +1,4 @@
-//! The M3 runtime overlay — the `CFile::Open` redirect (the serving variant
+//! The runtime overlay — the `CFile::Open` redirect (the serving variant
 //! the user picked 2026-10-16: one hook + a loader-managed, content-hashed
 //! cache under `<mods_dir>/cache/`; the game's own open/read/close semantics
 //! stay genuine Win32 downstream of the redirect).
@@ -15,7 +15,7 @@
 //! loud log line. Never panics, never unwinds: this runs in the game's own
 //! call path.
 //!
-//! M5 W1 adds two keys to the same hook: a family-A host pack (its decoded
+//! The `[[asset]]` route adds two keys to the same hook: a family-A host pack (its decoded
 //! stream gets the mods' `[[asset]]` payloads appended) and `data\i.dat`
 //! (the master index gets the matching rows). The index build runs AFTER
 //! every referenced host pack's cache (atomicity: a host failure refuses the
@@ -23,7 +23,7 @@
 //! offsets from the same [`a9_formats::overlay::plan_family_a`] the host
 //! merges used. `i.dat` is served from `<mods_dir>\cache\i.dat`.
 //!
-//! M6 adds `[[loose_asset]]`: game files the game opens BY PATH (not content
+//! The `[[loose_asset]]` table adds: game files the game opens BY PATH (not content
 //! inside a pack). Each payload is materialized into `<mods_dir>/cache/loose/`
 //! at install time (a REAL file — `CFile::Read`/`GetLength` are plain Win32 on
 //! the handle, so there is no memory-source branch to exploit) and every
@@ -87,7 +87,7 @@ struct PendingAssetOp {
     override_vanilla: bool,
 }
 
-/// One auto-merged `.dir` listing op (M5-U) — payload already rebuilt by the
+/// One auto-merged `.dir` listing op — payload already rebuilt by the
 /// engine (`listing_extend`), appended to its host after the host's asset
 /// payloads.
 struct PendingListingOp {
@@ -103,11 +103,11 @@ struct Packs {
     images: BTreeMap<String, Vec<PendingImageOp>>,
     /// the 0x204 csv container (csvp): table ops (priority order)
     csvs: Vec<PendingCsvOp>,
-    /// [[asset]] ops (M5 W1), in resolved order (priority, then manifest order)
+    /// [[asset]] ops, in resolved order (priority, then manifest order)
     assets: Vec<PendingAssetOp>,
-    /// auto-merged `.dir` listings (M5-U), in first-appearance group order
+    /// auto-merged `.dir` listings, in first-appearance group order
     listings: Vec<PendingListingOp>,
-    /// packs (and "i.dat") the M5 tailgate serves: their payloads/rows are
+    /// packs (and "i.dat") the tailgate serves: their payloads/rows are
     /// appended into the workspace by the spliced decode funnel, so the
     /// overlay must NEITHER redirect their `CFile::Open` NOR build a cache
     tailgated: std::collections::BTreeSet<String>,
@@ -115,7 +115,7 @@ struct Packs {
     /// stub uses, and the `i.dat` row offset) — read once at boot for every
     /// host referenced by an `[[asset]]`
     declared: BTreeMap<String, usize>,
-    /// the materialized `[[loose_asset]]` table (M6): compiled patterns + their
+    /// the materialized `[[loose_asset]]` table: compiled patterns + their
     /// cache copies, in resolved order. Empty = the hook skips the scan.
     loose: Vec<loose::LooseEntry>,
 }
@@ -169,7 +169,7 @@ pub struct AssetOpPlan {
     pub override_vanilla: bool,
 }
 
-/// One auto-merged `.dir` group listing (M5-U) the engine derived from the
+/// One auto-merged `.dir` group listing the engine derived from the
 /// mods' own `[[asset]]` rows.
 ///
 /// `payload` is the ALREADY-REBUILT listing (`a9_formats::overlay::
@@ -184,7 +184,7 @@ pub struct ListingOpPlan {
     pub payload: Vec<u8>,
 }
 
-/// One `[[loose_asset]]` op the engine hands to the overlay (M6): a game path
+/// One `[[loose_asset]]` op the engine hands to the overlay: a game path
 /// pattern + the mod-relative payload that must be served in its place.
 ///
 /// The overlay materializes the payload into `<mods_dir>/cache/loose/` at
@@ -208,14 +208,14 @@ pub struct Plan {
     pub csvs: Vec<CsvOpPlan>,
     /// `[[asset]]` ops in resolved order (priority, then manifest order); the
     /// payloads ride their host pack's decoded stream and their i.dat rows are
-    /// written at the `data\i.dat` open (M5 W1)
+    /// written at the `data\i.dat` open
     pub assets: Vec<AssetOpPlan>,
-    /// auto-merged `.dir` group listings (M5-U), derived from the `[[asset]]`
+    /// auto-merged `.dir` group listings, derived from the `[[asset]]`
     /// rows above: each one appends to its host AFTER the host's asset payloads
     /// and rewrites its shipped i.dat listing row (merge: in place; tailgate:
-    /// an appended duplicate — later-wins, memory #316)
+    /// an appended duplicate — later-wins
     pub listings: Vec<ListingOpPlan>,
-    /// packs (and "i.dat") the M5 tailgate serves — the overlay must not
+    /// packs (and "i.dat") the tailgate serves — the overlay must not
     /// redirect or cache them (`asset_serving = "tailgate"`; empty in merge
     /// mode and for any host the tailgate could not take)
     pub tailgated: std::collections::BTreeSet<String>,
@@ -223,7 +223,7 @@ pub struct Plan {
     /// at boot — the tailgate append base == the i.dat row offset; a merged
     /// host ignores it and uses its decoded length (equal for vanilla packs)
     pub declared: BTreeMap<String, usize>,
-    /// `[[loose_asset]]` ops in resolved order (M6): game files opened BY
+    /// `[[loose_asset]]` ops in resolved order: game files opened BY
     /// PATH, matched by a case-insensitive glob, served from a loader-managed
     /// cache copy. Empty in the common case — the hook then skips the scan.
     pub loose: Vec<LooseOpPlan>,
@@ -251,7 +251,7 @@ pub unsafe fn install(
             sys::PAGE_EXECUTE_READWRITE,
         )?;
         let mods_dir_abs = exe_dir.join(&mods_dir);
-        // M6: materialize the [[loose_asset]] cache copies now (fail-open per
+        // materialize the [[loose_asset]] cache copies now (fail-open per
         // asset) and compile their patterns — the hook scans this table.
         let loose = loose::materialize_loose(&plan.loose, &mods_dir_abs, &mods_dir, &logger);
         let packs = Packs::from_plan(plan, loose);
@@ -362,18 +362,18 @@ unsafe extern "system" fn my_cfile_open(
         if inner.trace_opens {
             inner.logger.debug(&format!("open trace: {norm}"));
         }
-        // M6 [[loose_asset]]: a game file opened DIRECTLY by path (not pack
+        // [[loose_asset]]: a game file opened DIRECTLY by path (not pack
         // content) — serve the loader's cache copy in its place. The scan only
         // runs when the table is non-empty; `norm` is already normalized
         // (lowercase + backslashes), which is exactly what the pattern wants.
         if let Some(served) = loose::try_serve(inner, &norm, original, this, flags, perr) {
             return served;
         }
-        // M4 inject capture: `data\<pack>.bin` opens feed the injector's
+        // inject capture: `data\<pack>.bin` opens feed the injector's
         // pack-identity slot (a no-op unless the injector is live and the
         // pack carries inject ops; merge mode never installs it). Loaders
         // are sequential single-threaded, so the capture is coherent at the
-        // loader's runner call right before it fires (notes/24 R5).
+        // loader's runner call right before it fires.
         if let Some(pack) = pack_key(&norm) {
             crate::injector::note_pack_open(&pack);
         }
@@ -457,7 +457,7 @@ pub(super) fn pack_file_name(key: &str) -> String {
 /// untouched 141 MB packs, and ran the family-B parser over family-A
 /// packs (fail-open saved those, loudly).
 fn overlay_key(inner: &Inner, pack: &str) -> Option<String> {
-    // a pack the M5 tailgate serves is appended to in place at the decode —
+    // a pack the tailgate serves is appended to in place at the decode —
     // it must NEVER be redirected to a cache (that is the whole point)
     if inner.packs.tailgated.contains(pack) {
         return None;

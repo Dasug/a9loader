@@ -1,16 +1,16 @@
-//! The LZSS codec — exact ports of corpus `tools/a9dec.c` (decode, verified
-//! byte-exact against the game's `FUN_140314bf0`) and `tools/a9enc.c`
+//! The LZSS codec — the decode verified byte-exact against the game's loader
+//! at 0x140314bf0, and the encoder
 //! (encode: the greedy hash-chain matcher that built the live repacked packs,
-//! documented as semantically identical to `tools/lz_pack.py compress()`).
+//! of the same greedy hash-chain design).
 //!
 //! Format: 4096-byte ring zeroed on start with the write cursor at `0xfee`,
 //! LSB-first flag bytes, bit=1 → literal, bit=0 → back-ref
 //! (`pos = b3 | ((b4 & 0xf0) << 4)`, `len = (b4 & 0xf) + 3`).
 //! Back-refs are copied **read-as-you-write** — an overlapping ref
 //! self-extends, and a snapshot-copy decoder silently corrupts everything
-//! after the first overlap (corpus lesson 8.1).
+//! after the first overlap.
 //!
-//! Byte-parity of the encoder with `a9enc` is asserted by `a9ml verify
+//! Byte-parity of the encoder against the reference encoder is asserted by `a9ml verify
 //! --oracle` on real packs; decode round-trips are unit-tested here.
 
 pub const WIN: usize = 4096;
@@ -24,7 +24,7 @@ const HASH_MASK: usize = HASH_SIZE - 1;
 const MAX_CHAIN_STEPS: usize = 4096;
 
 /// Decode `data[skip..]` until the input is exhausted — mirrors
-/// `lz_pack.decompress` / `a9dec` (which never stop at a declared size).
+/// the reference decoder (which never stops at a declared size).
 pub fn decode(data: &[u8], skip: usize) -> Vec<u8> {
     let mut ring = [0u8; WIN];
     let mut r = RING_START;
@@ -71,13 +71,13 @@ pub fn decode(data: &[u8], skip: usize) -> Vec<u8> {
     out
 }
 
-/// Encode `raw` — an exact port of `tools/a9enc.c` (greedy longest-match with
+/// Encode `raw` — greedy longest-match with
 /// a 22-bit hash-3 chain, chain cap 4096 steps, window distance ≤ 4096,
 /// match insert-position rules included). The output must stay byte-identical
-/// to `a9enc` — that parity is `a9ml verify --oracle`'s job.
+/// to the reference encoder — that parity is `a9ml verify --oracle`'s job.
 pub fn encode(raw: &[u8]) -> Vec<u8> {
     let n = raw.len();
-    // a9enc stores positions as int32; guard the same limit explicitly
+    // the reference encoder stores positions as int32; guard the same limit explicitly
     debug_assert!(n <= i32::MAX as usize, "input larger than the C reference handles");
     let mut out: Vec<u8> = Vec::with_capacity(n + n / 8 + 64);
     let mut ring = [0u8; WIN];

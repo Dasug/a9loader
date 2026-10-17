@@ -40,7 +40,7 @@ pub fn doctor(game: &Path) -> Result<()> {
             println!("{l}");
         }
     } else {
-        println!("loader log: none at {} (no boot with the M2+ loader yet?)", log.display());
+        println!("loader log: none at {} (no boot with this loader yet?)", log.display());
     }
     Ok(())
 }

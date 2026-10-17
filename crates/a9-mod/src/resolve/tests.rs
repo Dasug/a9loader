@@ -140,7 +140,7 @@
 
     #[test]
     fn train_list_hooks_compose_without_overlap() {
-        // two train_list contributions are composable (M5 W3): no overlap, so
+        // two train_list contributions are composable: no overlap, so
         // the engine folds both into one filter install
         let a = tl_on("a", "allow", "a.txt");
         let b = tl_on("b", "add", "b.txt");

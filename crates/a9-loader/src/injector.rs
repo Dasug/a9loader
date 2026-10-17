@@ -1,13 +1,13 @@
-//! The M4 inject mode — window-scoped injection into the family-B loader's
-//! worker-row pool (notes/24 round 5, seams design). `pack_serving = "inject"`
+//! The inject mode — window-scoped injection into the family-B loader's
+//! worker-row pool. `pack_serving = "inject"`
 //! in a9loader.toml routes `[[pack]]` image effects through this module
-//! instead of the M3 cache overlay: no re-encode, no cache file — the mod's
+//! instead of the cache overlay: no re-encode, no cache file — the mod's
 //! decoded payload blocks are appended straight into the pool the game's
 //! loader threads consume.
 //!
-//! # Machine facts this stub is built on (notes/24 R5 + seams.md, 2026-10-19)
+//! # Machine facts this stub is built on
 //!
-//! The family-B loader `pack_loader_image_generic` (FUN_1403efec0) serves
+//! The family-B loader `pack_loader_image_generic` (0x1403efec0) serves
 //! me0–3/mtentr0/mtcutp0. At the spliced call site (builds.toml
 //! `famb_runner_call`, VA 0x1403f0259) the vanilla sequence has already:
 //! 1. decoded the pack into the shared workspace (out base = the value of
@@ -18,15 +18,15 @@
 //!    `ptr[i] = out_base + running`, `running` starts at **4** and advances
 //!    by `stored + 0x20c`,
 //! 3. split the entry indices across the worker-row pool
-//!    (`chunk_split FUN_1403072b0(&pool, count)` at 0x1403f01b7 — capped at
-//!    the worker-row capacity global `DAT_140d65df0`, `count/eff` entries
+//!    (`chunk_split(&pool, count)` — the pool's chunk splitter, entered at 0x1403f01b7 — capped at
+//!    the worker-row capacity global 0x140d65df0, `count/eff` entries
 //!    per row + the remainder spread over the first rows, returns the row
 //!    count EBX),
 //! 4. refilled every row `< EBX` (two loops, 0x1403f01d5..0x1403f021d and
 //!    ..0x1403f0259):
 //!    - `row+0x13c` (u32) = this row's FIRST entry index (running start),
 //!    - `row+0x140` (u32) = this row's entry count (chunk size),
-//!    - `row+0x30`        = the row delegate `FUN_1403f0330` (identical for
+//!    - `row+0x30`        = the row delegate 0x1403f0330 (identical for
 //!      every row),
 //!    - `row+0x38`        = the SAME stack pointer-array base for every row
 //!      (the row's own +0x13c/+0x140 slice into it),
@@ -34,11 +34,11 @@
 //!    then stored the row count at `pool+8` (`mov [0x140f02478], ebx` at
 //!    0x1403f021d) — the runner reads the count from there, NOT from EBX.
 //!
-//! The runner `FUN_1400504c0(&pool)`: SetEvent rows `< count`, then
+//! The runner `pool_runner(&pool)`: SetEvent rows `< count`, then
 //! WaitForSingleObject rows `< count` (the 1-row fast path calls the row's
 //! delegate inline). Rows beyond `count` are untouched worker slots — the
-//! pool is allocated ONCE at boot (FUN_140307040; capacity = the worker
-//! count `DAT_140d65df0`; every row gets events/thread then). After the
+//! pool is allocated ONCE at boot (the boot-time pool constructor; capacity = the worker
+//! count 0x140d65df0; every row gets events/thread then). After the
 //! runner the loader scans rows `< EBX` for the failure flag +0x40
 //! (delegate-zeroed each run) — EBX (and RBP/RSI/R12B/R13D) are live across
 //! our splice, preserved by ABI; the caller's `test ebx,ebx` sits right at
@@ -47,10 +47,10 @@
 //!
 //! # What the stub does
 //!
-//! Pack identity comes from the M3 `cfile_open` hook: each planned
+//! Pack identity comes from the `cfile_open` hook: each planned
 //! `data\<pack>.bin` open is recorded (loaders are sequential single-threaded
 //! — the capture is coherent when the loader's runner call fires, since the
-//! open precedes it inside the loader, seams.md Q1). The stub then extends
+//! open precedes it inside the loader). The stub then extends
 //! the LAST vanilla worker row's slice with the mod's entries:
 //! - an owned RW `VirtualAlloc` region per pack (built once per window;
 //!   pinned for the process lifetime — worker threads read it inside the
@@ -59,11 +59,11 @@
 //!   the vanilla pointers are a verbatim copy of the loader's own array
 //!   (every row shares it; row 0's +0x38 points at it) and our blocks are
 //!   `{0x200 UTF-16 name NUL + zero pad][u32 w][u32 h][u32 stored][payload]`
-//!   (payloads are already the raw decoded bytes — a9-formats parity, M1);
+//!   (payloads are already the raw decoded bytes — a9-formats parity);
 //! - the last row keeps its start (+0x13c), delegate (+0x30) and mode
 //!   (+0x41); its count (+0x140) grows by ours and its slice (+0x38) is
 //!   re-pointed at our array. The delegate indexes the array ABSOLUTELY
-//!   (`array[start + i]`, FUN_1403f0330), so our blocks at indices
+//!   (`array[start + i]`, the row delegate), so our blocks at indices
 //!   `[vanilla_count, vanilla_count+ours)` land exactly in the extended
 //!   range. No pool-count bump and no new row: the row pool is saturated
 //!   (one row per worker; capacity == worker count — 24/24 live), so a spare
@@ -85,15 +85,15 @@ use core::ffi::c_void;
 // ---- per-build constants (international Steam 5.00.5634; values the
 // address book carries as behavior, not code bytes) ----
 
-/// FUN_1400504c0 — the worker-row-pool runner, called directly by the stub;
+/// The worker-row-pool runner, called directly by the stub;
 /// the splice's original target is verified against base + this.
 const RUNNER_RVA: usize = 0x504C0;
-/// `DAT_140d65df0` — worker-row capacity (fixed at boot; read live)
+/// 0x140d65df0 — worker-row capacity (fixed at boot; read live)
 const POOL_CAP_RVA: usize = 0xD65DF0;
-/// `DAT_144f86088` — the shared decode workspace's OUT pointer (200 MB)
+/// 0x144f86088 — the shared decode workspace's OUT pointer (200 MB)
 const WORKSPACE_OUT_RVA: usize = 0x4F86088;
 
-// ---- pinned shape constants (notes/24 + seams.md; memory rule #231) ----
+// ---- pinned shape constants ----
 
 /// worker-row stride
 const ROW_STRIDE: usize = 0x148;
@@ -197,8 +197,7 @@ struct Inner {
     packs: std::collections::BTreeMap<String, Vec<InjectOp>>,
     logger: log::Logger,
     /// "last captured pack": coherence relies on the load sequence being
-    /// sequential single-threaded (notes/24 R5: strictly sequential boot
-    /// windows) — no compare_exchange, a Mutex only documents the access
+    /// sequential single-threaded — no compare_exchange, a Mutex only documents the access
     last_pack: std::sync::Mutex<Option<String>>,
     runtime: std::sync::Mutex<std::collections::BTreeMap<String, PackRuntime>>,
     /// base + RUNNER_RVA, resolved once at install (the raw call target)
@@ -545,7 +544,7 @@ unsafe fn write_region(
 /// Step 5: extend the LAST vanilla row — keep its start (+0x13c) and
 /// delegate (+0x30)/mode (+0x41); grow its count (+0x140) and point its slice
 /// (+0x38) at our array. The delegate indexes the array ABSOLUTELY
-/// (`array[start + i]`, FUN_1403f0330), so our blocks at indices
+/// (`array[start + i]`, the row delegate), so our blocks at indices
 /// [vanilla_count, vanilla_count+ours) land exactly in this row's extended
 /// range. No pool-count bump — the row already exists. Then publish the region
 /// record (builds are one-shot per pack per boot; a second window re-reads and
@@ -584,7 +583,7 @@ unsafe fn attach_row(
 /// width | u32 height | u32 stored | payload}`. Our blocks encode the name
 /// field strictly (NUL + zero pad — the original packs keep garbage in the
 /// pad, consumers read to the NUL, both work; NameField semantics per the
-/// M1 findings in memory rule #231).
+/// a9-formats parity).
 fn write_entry_block(block: *mut u8, op: &InjectOp, payload: &[u8]) {
     let head: String = op.name.chars().take(NAME_FIELD / 2 - 1).collect();
     let name_units = head.encode_utf16().collect::<Vec<u16>>();

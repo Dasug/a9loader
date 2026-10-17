@@ -1,31 +1,31 @@
-//! M7-0 — the **save-id clamp guard** (always on; a behaviour fix, NOT a
+//! the **save-id clamp guard** (always on; a behaviour fix, NOT a
 //! diagnostic, and deliberately not behind a config flag).
 //!
 //! A saved formation's form id is used as a spec-row index with **no bounds
-//! check** (corpus notes/62 §5), so an id past the vector's length
+//! check**, so an id past the vector's length
 //! (`[0x140e14528]`, stride `0x140`) reads past the heap block — a garbage
 //! train, or a crash for larger ids. That is reachable today whenever a save is
-//! loaded without the mod that made it, and becomes routine once M7 admits mod
-//! trains past row 421. This guard makes any out-of-range id degrade to the
+//! loaded without the mod that made it, and becomes routine once mod-added
+//! trains exist past row 421. This guard makes any out-of-range id degrade to the
 //! engine's own invalid-row state instead.
 //!
 //! # The two choke points
 //!
 //! Every saved id that reaches the spec table flows through one of these, so a
-//! single clamp each covers all the consumers notes/62 §5 lists:
+//! single clamp each covers all the consumers §5 lists:
 //!
 //! 1. **the group head** — the u32 id in `save_train_group_restore`
 //!    (0x1401b6d10), clamped right after the legacy remap and immediately
 //!    before the row test (`0x1401b6f0c`). Covers the function's own blank/
 //!    normal branch and `roster_row_builder` (0x140060f50), which is only ever
 //!    called with this (now in-range) id.
-//! 2. **the per-car ids** — the fixed `0xf8` car block `FUN_140061ee0` bulk-
+//! 2. **the per-car ids** — the fixed `0xf8` car block reader bulk-
 //!    reads into the consist object (`call mmf_paged_read` at 0x140061f8b,
 //!    destination `consist+0x50c`). Every per-car u16 id (10 rows, stride
 //!    `0x18`) comes from that block, so clamping it right after the read covers
 //!    `train_row_car_wiring` (0x1401ab990), `custom_dat_parser` (0x140061260)
 //!    and `train_form_readout_update` (0x140061650) at once — the latter two are
-//!    called from *inside* `FUN_140061ee0` after the read, and the first reads
+//!    called from *inside* that reader after the read, and the first reads
 //!    the same (now-clamped) block later.
 //!
 //! # Semantics (fail open into the engine's own degraded state)
@@ -39,7 +39,7 @@
 //!   0x1401b6f36 runs and clones that name. The row is never a CSV row and
 //!   never a mod slot, so it can never be repurposed — the blank degrade is
 //!   permanent. (A zero-filled row would crash there: the branch dereferences
-//!   `pFormName`, notes/62 §1.4.)
+//!   `pFormName`, §1.4.)
 //! * per-car → **160** = `FORM_DUMMY_03` (有効=OFF ⇒ `bValid == 0`; a fully
 //!   initialised row whose model is the shipped `dummy/_t_dummy_a_.x`
 //!   placeholder). A car row MUST be fully initialised: rows 417–420 have raw
@@ -50,14 +50,14 @@
 //!
 //! Both targets are read from the LIVE vector length
 //! (`([0x140e14530] - [0x140e14528]) / 0x140`), so the guard stays correct after
-//! M7 grows the vector. It is **provably inert for every in-range id** (the
+//! the injection grows the vector. It is **provably inert for every in-range id** (the
 //! comparison is strict `<`), and every failure path leaves the id untouched
 //! and logs loudly at most once.
 //!
 //! # Mechanics
 //!
 //! Same-image relay caves (`FF 25` + imm64) and the `patch.rs` helpers, exactly
-//! like the M4/M5 splices:
+//! like the inject splices:
 //!
 //! * the head site's 7 bytes are rewritten to `E8 rel32; 90 90` (a `call` to
 //!   the cave); a naked shim in version.dll clamps `r14d`, reproduces the two
@@ -104,7 +104,7 @@ pub const ANCHOR_CAR_CAVE: &str = "save_car_read_cave";
 /// The rewritten head region: `movsxd rax,r14d; lea rcx,[rax+rax*4]` (7 bytes),
 /// replaced by `E8 rel32; 90 90`.
 const HEAD_LEN: usize = 7;
-/// The spec-table manager singleton (`DAT_140e14510`).
+/// The spec-table manager singleton (0x140e14510).
 const MANAGER_RVA: usize = 0xE14510;
 /// The manager's rows begin/end fields (a `std::vector<row>` at manager+0x18).
 const MGR_ROWS: usize = 0x18;

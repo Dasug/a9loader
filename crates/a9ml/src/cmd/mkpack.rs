@@ -92,7 +92,7 @@ fn build_csvs(entries: &[String]) -> Result<(Vec<u8>, Family)> {
 }
 
 /// `a`: a family-A opaque stream — the named files' bytes, concatenated (the
-/// M5 W1 fixture path — a host pack `V`).
+/// Fixture path — a host pack `V`).
 fn build_opaque(entries: &[String]) -> Result<(Vec<u8>, Family)> {
     let mut decoded = Vec::new();
     for path in entries {

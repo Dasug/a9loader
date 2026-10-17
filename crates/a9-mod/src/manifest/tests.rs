@@ -51,7 +51,7 @@ fn defaults_fill_in() {
 
 #[test]
 fn train_list_modes_allow_add_deny() {
-    // `add` (M5 W3): offer the listed forms on top of the shipped whitelist
+    // `add`: offer the listed forms on top of the shipped whitelist
     let m = parse(
         "\nid=\"x\"\nname=\"X\"\nversion=\"1.0.0\"\nauthor=\"a\"\n\
          [[hook]]\ntarget=\"train_list_filter\"\nhandler=\"train_list\"\nmode=\"add\"\nlist=\"add.txt\"\n",
@@ -79,12 +79,12 @@ fn unknown_fields_refuse_the_mod() {
     let bad = GOOD.to_owned() + "\n[[effect]]\nkind = \"x\"\n";
     let err = parse(&bad).unwrap_err().to_string();
     assert!(err.contains("unknown field"), "{err}");
-    // [native] (mods that ship code) lands post-M4 — unknown field here
+    // [native] (mods that ship code) is future work — unknown field here
     // (Manifest::parse adds the milestone pointer)
     let bad = GOOD.to_owned() + "\n[native]\nabi = 1\n";
     let err = parse(&bad).unwrap_err().to_string();
     assert!(err.contains("unknown field `native`"), "{err}");
-    // the M3 sections are supported now and must parse
+    // the data sections are supported now and must parse
     let m3 = GOOD.to_owned()
         + "\n[[pack]]\npack = \"mtentr0\"\n\n[[pack.entry]]\nname = \"_d_x.dds\"\nwidth = 1\nheight = 2\nfile = \"e/x.dds\"\n"
         + "\n[[csv]]\nname = \"train_form.csv\"\nfile = \"csv/train_form.csv\"\n";
@@ -113,7 +113,7 @@ fn retired_file_section_refuses_with_a_pointer() {
     let native = Manifest::parse(&(GOOD.to_owned() + "\n[native]\nabi = 1\n"))
         .unwrap_err()
         .to_string();
-    assert!(native.contains("lands with M4+"), "{native}");
+    assert!(native.contains("future loader version"), "{native}");
 }
 
 #[test]

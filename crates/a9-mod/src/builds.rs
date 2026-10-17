@@ -85,7 +85,7 @@ mod tests {
         let fl = b.anchor("form_list").unwrap();
         assert_eq!(fl.rva, 0x6FC430);
         assert_eq!(&fl.expect_bytes().unwrap()[..6], &[0x46, 0x00, 0x4f, 0x00, 0x52, 0x00]);
-        // the M4 fetch-probe anchors (machine-verified boundaries; see the
+        // the fetch-probe anchors (machine-verified boundaries; see the
         // comment blocks in builds.toml for why these lengths differ)
         let pf = b.anchor("pack_fetch").unwrap();
         assert_eq!(pf.rva, 0x306E20);
@@ -122,7 +122,7 @@ mod tests {
             fc.expect_bytes().unwrap(),
             vec![0xcc; 16]
         );
-        // the M5 tailgate anchors (the family-A decode funnel + its cave)
+        // the tailgate anchors (the family-A decode funnel + its cave)
         let dec = b.anchor("pack_lzss_decode").unwrap();
         assert_eq!(dec.rva, 0x314BF0);
         assert_eq!(
@@ -150,7 +150,7 @@ mod tests {
         let cav = b.anchor("pack_lzss_cave").unwrap();
         assert_eq!(cav.rva, 0x5A1D13);
         assert_eq!(cav.expect_bytes().unwrap(), vec![0xcc; 16]);
-        // the M7-2 save-path probe anchors (notes/62-B §4.2)
+        // the save-path probe anchors
         let pw = b.anchor("mmf_paged_write").unwrap();
         assert_eq!(pw.rva, 0x308FE0);
         assert_eq!(
@@ -175,7 +175,7 @@ mod tests {
         let rv = b.anchor("mmf_read_u32_vector").unwrap();
         assert_eq!(rv.rva, 0x41820);
         assert_eq!(rv.expect_bytes().unwrap().len(), 16);
-        // the M7-0 save-id clamp guard anchors
+        // the save-id clamp guard anchors
         let sh = b.anchor("save_group_head").unwrap();
         assert_eq!(sh.rva, 0x1B6F0C);
         assert_eq!(
@@ -194,7 +194,7 @@ mod tests {
         let scrc = b.anchor("save_car_read_cave").unwrap();
         assert_eq!(scrc.rva, 0x66790);
         assert_eq!(scrc.expect_bytes().unwrap(), vec![0xcc; 16]);
-        // the M7-1 direct spec-row injection anchors
+        // the direct spec-row injection anchors
         let sr = b.anchor("spec_table_resize").unwrap();
         assert_eq!(sr.rva, 0x19F150);
         assert_eq!(
@@ -228,7 +228,7 @@ mod tests {
                 0x24, 0x20, 0x48, 0x83, 0xec, 0x28
             ]
         );
-        // the M7-2 train injection anchors
+        // the train injection anchors
         let tlb = b.anchor("train_list_builder").unwrap();
         assert_eq!(tlb.rva, 0x19D9C0);
         assert_eq!(

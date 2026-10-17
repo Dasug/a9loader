@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# M2 harness — exercises the full loader engine under wine against a
+# Engine harness — exercises the full loader engine under wine against a
 # fake-game host whose exe carries the international Steam build's
 # VERSIONINFO (5,0,0,5634) and whose image has the real RVAs mapped
 # (filter fn, whitelist table, FORM list) with the real original bytes.

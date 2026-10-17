@@ -1,8 +1,9 @@
 //! The ADD translation table of the pack cipher — 256 bytes at file offset
 //! `0x697310` of the international Steam `ATrain9v5.exe` (build 5.00.5634),
-//! per the corpus handover (FUN_140315710). Generated and cross-checked
-//! against three sources on 2026-10-15: the exe, `/tmp/opencode/addtable.bin`
-//! and the embedded copy in corpus `tools/a9dec.c` — all identical.
+//! per the scheme recovered from the game's pack-cipher helper (0x140315710).
+//! Generated and cross-checked against three sources on 2026-10-15: the exe,
+//! a live-probed dump of the table and the same values recovered from shipped
+//! packs — all identical.
 
 #[rustfmt::skip]
 pub const ADD: [u8; 256] = [

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# M4 inject harness — pack_serving = "inject" under wine. The fake host
+# Inject harness — pack_serving = "inject" under wine. The fake host
 # carries the famb pool-runner call site at the real anchor RVA (builds.toml
 # `famb_runner_call` bytes: E8 + the read-only test ebx,ebx pair), a fake
 # runner at the call target (its own image + 0x504c0), and the pool /
@@ -7,7 +7,7 @@
 # spliced site the way the game's loader does: after a hooked cfile_open of
 # the pack (the capture seam), with the vanilla row refill already in place.
 #
-# Scenarios: S1 merge mode is the M3 behavior with the inject pages present;
+# Scenarios: S1 merge mode is the cache-overlay behavior with the inject pages present;
 # S2 inject mode appends one worker row over the vanilla slice (fake runner
 # sees count+1, forwarded rax, EBX sentinel preserved, site continuation
 # bytes untouched); S3 a missing payload fails loud + vanilla serve; S4
@@ -78,7 +78,7 @@ paymissing() { # a missing payload: manifest only, no file copied
     true
 }
 
-echo "== S1: merge mode (default) — M3 overlay behavior, no splice"
+echo "== S1: merge mode (default) — cache-overlay behavior, no splice"
 new_scen s1-merge
 # S1 exercises the MERGE path — pin it (inject is the default now)
 printf 'pack_serving = "merge"\n' > "$scen_dir/a9loader.toml"
@@ -98,7 +98,7 @@ mod addone \
     'file = "entries/n1.bin"'
 pay addone "entries/n1.bin" n4.bin
 run_host inject
-check "merge redirect (M3 behavior)"     "path=mods\\cache\\mtfake.bin" "$scen_dir/out.txt"
+check "merge redirect (cache overlay)"     "path=mods\\cache\\mtfake.bin" "$scen_dir/out.txt"
 check "vanilla pool run (no extension)"  "inject runner: count=3"     "$scen_dir/out.txt"
 check "cache built by the merge"         "1 entry merged (1 added"    "$scen_dir/mods/a9loader.log"
 if grep -q "inject:" "$scen_dir/mods/a9loader.log"; then

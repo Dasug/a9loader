@@ -3,10 +3,10 @@
 //! Nothing in this module runs unless `probe_fetch = true` is set in
 //! `a9loader.toml`; a default boot never installs these hooks. It exists to
 //! answer one-off reverse-engineering questions about the runtime fetch path
-//! (see notes/24): it serves nothing, changes no behaviour, and every hook is
+//!: it serves nothing, changes no behaviour, and every hook is
 //! trampoline-only, forwarding verbatim to the original.
 //!
-//! The question (notes/24 round 3): material fetch classes pass their ctx
+//! The question: material fetch classes pass their ctx
 //! opaquely through vtable dispatch, so which pack object serves which
 //! composed key (e.g. a `train\113\...` livery key) is not statically
 //! answerable — it is only visible at runtime. This probe hooks the four
@@ -15,18 +15,18 @@
 //! carries.
 //!
 //! ABI (each machine-verified against the build's own code, not assumed):
-//! - `pack_fetch` FUN_140306e20: rcx = pack object, rdx = destination
+//! - `pack_fetch` — rcx = pack object, rdx = destination
 //!   buffer, r8 = wstring-OBJECT pointer (the composed key; the wide data
 //!   lives behind the object's first field — the tree lookup reads `[r8]`).
-//! - `texture_fetch` FUN_1403010d0: rcx = ctx (0 = loose-file mode), rdx =
+//! - `texture_fetch` — rcx = ctx (0 = loose-file mode), rdx =
 //!   source-path wstr (the mesh's own path), r8 = referenced basename wstr,
 //!   r9 low byte = mode. Returns rsi; forwarded verbatim.
-//! - `ccommon_fetch` FUN_1402ec0e0: rcx = this, rdx unused (forwarded), r8 =
+//! - `ccommon_fetch` — rcx = this, rdx unused (forwarded), r8 =
 //!   name (double encoded: a wide pointer or a small id), r9 unused, and
 //!   the 5th/6th args are STACK slots = out pointers [buf, size*] (the
 //!   cache-hit path stores through them in r12/r13) — they MUST be
 //!   forwarded, or a hit writes through garbage.
-//! - `fetch_cache_get` FUN_1403089b0: rcx = cache vector object, rdx = raw
+//! - `fetch_cache_get` — rcx = cache vector object, rdx = raw
 //!   key wstr (compared char-by-char as-is). Returns the entry pointer.
 //!
 //! Every hook returns the original's full result register (all four anchors
@@ -207,7 +207,7 @@ unsafe extern "system" fn my_texture_fetch(
         let Some(state) = G.get() else {
             return core::ptr::null_mut();
         };
-        // src: the notes/14 chain splits the src's dir with _wsplitpath_s —
+        // src: the chain splits the src's dir with _wsplitpath_s —
         // the arg is a good wide pointer but NOT always a bare string start
         // (live run showed "<unreadable>" for the plain read); try the
         // indirect heuristic too, and log the raw pointer when both fail so

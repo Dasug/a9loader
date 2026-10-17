@@ -243,6 +243,6 @@
         assert!(bad.manifest.is_err());
         let future = scanned.iter().find(|s| s.dir.ends_with("future")).unwrap();
         let err = future.manifest.as_ref().unwrap_err().to_string();
-        assert!(err.contains("lands with M4+"), "{err}");
+        assert!(err.contains("future loader version"), "{err}");
         let _ = std::fs::remove_dir_all(&dir);
     }

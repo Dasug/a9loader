@@ -5,7 +5,7 @@
 //! master index (`i.dat`) is the only place a shipped asset's bytes are named:
 //! each row carries a bare `name`, a consumer `dir`, and an `(off, len)` that
 //! selects bytes in **whichever pack is resident when the name is queried** —
-//! there is no per-row pack tag (`notes/03`, `notes/06`). The command recovers
+//! there is no per-row pack tag (` `). The command recovers
 //! the owning pack and writes the payload verbatim, so an author can take a
 //! shipped asset apart (a `previewtexture.dir`, a preview DDS, a mesh) and
 //! build a mod payload from it.
@@ -307,7 +307,7 @@ pub fn run(game: &Path, name: &str, out: Option<&Path>, pack: Option<&str>) -> R
 
 // ------------------------------------------------------- merge-assets
 
-/// The loader's family-A decode workspace budget (`notes/03`, `notes/24`): the
+/// The loader's family-A decode workspace budget (` `): the
 /// merged decoded image must stay within 200 MB (the loader refuses ~190 MB).
 const BUDGET: usize = 190 * 1024 * 1024;
 

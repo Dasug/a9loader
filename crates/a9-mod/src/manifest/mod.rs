@@ -1,4 +1,4 @@
-//! `mod.toml` — the mod manifest schema (PLAN.md §4 v3). Sections are by
+//! `mod.toml` — the mod manifest schema. Sections are by
 //! mechanism; every section is executed by the loader at boot. The schema is
 //! strict: unknown fields refuse the whole mod (typos must be loud, not
 //! silently ignored — the FORM_DUMMY lesson), and `validate()` enforces
@@ -8,7 +8,7 @@
 //! yet — a manifest carrying them is refused with a pointer to the milestone
 //! that implements them (see [`Manifest::parse`]).
 //!
-//! The M3/M5/M6 section structs live in [`sections`]; the per-section checks
+//! The section structs live in [`sections`]; the per-section checks
 //! behind [`Manifest::validate`] live in [`validate`].
 
 use crate::ModError;
@@ -57,23 +57,23 @@ pub struct Manifest {
     pub hook: Vec<Hook>,
     /// family-B pack entry overlays (me*/mt* packs) — merged in memory at the
     /// game's open of `data/<pack>.bin` and served via the loader-managed
-    /// cache (M3)
+    /// the runtime overlay's cache
     #[serde(default)]
     pub pack: Vec<PackSection>,
     /// csvp table overlays — whole-table replace (default) or per-row patches
-    /// (`mode = "rows"`): served at the player's csvp load (M3/M5)
+    /// (`mode = "rows"`): served at the player's csvp load
     #[serde(default)]
     pub csv: Vec<CsvSection>,
     /// genuinely-new i.dat rows whose payloads are appended to a family-A host
-    /// pack's decoded stream, merged in-memory at the game's load (M5 W1)
+    /// pack's decoded stream, merged in-memory at the game's load
     #[serde(default)]
     pub asset: Vec<AssetSection>,
     /// game files the game opens BY PATH (not content inside a pack) — the
     /// loader serves the mod's bytes in place of the file on disk, matched by
-    /// a case-insensitive glob over the game's own open path (M6)
+    /// a case-insensitive glob over the game's own open path
     #[serde(default)]
     pub loose_asset: Vec<LooseAssetSection>,
-    /// brand-new train types beyond the 417-name FORM catalog (M7-2) — a
+    /// brand-new train types beyond the 417-name FORM catalog — a
     /// compiler over the row-merge/asset/row-injection primitives: the author
     /// declares the train, the loader allocates its id + FORM name, derives the
     /// four csvp rows, the icons and the visibility entry
@@ -236,7 +236,7 @@ fn retired_section_error(text: &str) -> Option<String> {
     }
     if declares("[native]") {
         return Some(
-            "section [native] is designed but lands with M4+ (mods that ship code); \
+            "section [native] is designed but lands with a future loader version (mods that ship code); \
              this loader build does not support it yet"
                 .into(),
         );

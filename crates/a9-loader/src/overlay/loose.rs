@@ -1,4 +1,4 @@
-//! The M6 `[[loose_asset]]` table — game files the game opens BY PATH (not
+//! The `[[loose_asset]]` table — game files the game opens BY PATH (not
 //! content inside a pack). Each payload is materialized into
 //! `<mods_dir>/cache/loose/` at install time (a REAL file — `CFile::Read`/
 //! `GetLength` are plain Win32 on the handle, so there is no memory-source
@@ -51,7 +51,7 @@ pub(super) unsafe fn try_serve(
     Some(unsafe { original(this, wide.as_ptr(), flags, perr) })
 }
 
-/// Materialize the `[[loose_asset]]` cache copies (M6).
+/// Materialize the `[[loose_asset]]` cache copies.
 ///
 /// For each op: read the payload from the mod dir, write it to
 /// `<mods_dir>/cache/loose/<name>` (overwritten every boot — it is a cache),
