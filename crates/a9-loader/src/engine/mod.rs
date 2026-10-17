@@ -856,6 +856,10 @@ fn report_overlay_failure(
 /// The M4 fetch probe (opt-in diagnostics): collect the probe specs from the
 /// address book and install the trampolines; a failure logs loudly and leaves
 /// the rest of the boot untouched.
+///
+/// Compiled only with the `probe` feature; without it the flag still logs (see
+/// the stub below) — fail-open, never silent.
+#[cfg(all(target_os = "windows", feature = "probe"))]
 fn install_probe(
     entry: &builds::BuildEntry,
     base: *const u8,
@@ -898,6 +902,10 @@ fn install_probe(
 /// rebuild entry and the big list window entry trampoline-only and dump the
 /// spec-table manager's index vectors on entry/exit whenever a size changes
 /// (notes/23). A failure logs loudly and leaves the boot vanilla.
+///
+/// Compiled only with the `probe` feature; without it the flag still logs (see
+/// the stub below) — fail-open, never silent.
+#[cfg(all(target_os = "windows", feature = "probe"))]
 fn install_window_probe(
     entry: &builds::BuildEntry,
     base: *const u8,
@@ -927,6 +935,10 @@ fn install_window_probe(
 /// helpers trampoline-only and log the caller RVA + size + first bytes of every
 /// save-path write (notes/62-B §4.2). A failure logs loudly and leaves the boot
 /// vanilla.
+///
+/// Compiled only with the `probe` feature; without it the flag still logs (see
+/// the stub below) — fail-open, never silent.
+#[cfg(all(target_os = "windows", feature = "probe"))]
 fn install_save_probe(
     entry: &builds::BuildEntry,
     base: *const u8,
@@ -950,6 +962,50 @@ fn install_save_probe(
             "probe refused: save: {e} — remaining boot unaffected"
         )),
     }
+}
+
+/// Empty builds for a DLL compiled without the `probe` feature: the config
+/// flag is honoured with ONE loud log line instead of hooks; everything else
+/// about the boot is unchanged (fail-open, no silent capability change).
+#[cfg(all(target_os = "windows", not(feature = "probe")))]
+fn install_probe(
+    _entry: &builds::BuildEntry,
+    _base: *const u8,
+    _mods_dir: &Path,
+    logger: &log::Logger,
+) {
+    logger.err(
+        "probe refused: probe_fetch = true but this build was compiled without \
+         the \"probe\" feature — no fetch hooks (rebuild with the default features)",
+    );
+}
+
+/// See [`install_probe`]: the no-`probe`-feature stub.
+#[cfg(all(target_os = "windows", not(feature = "probe")))]
+fn install_window_probe(
+    _entry: &builds::BuildEntry,
+    _base: *const u8,
+    _mods_dir: &Path,
+    logger: &log::Logger,
+) {
+    logger.err(
+        "probe refused: probe_window = true but this build was compiled without \
+         the \"probe\" feature — no window hooks (rebuild with the default features)",
+    );
+}
+
+/// See [`install_probe`]: the no-`probe`-feature stub.
+#[cfg(all(target_os = "windows", not(feature = "probe")))]
+fn install_save_probe(
+    _entry: &builds::BuildEntry,
+    _base: *const u8,
+    _mods_dir: &Path,
+    logger: &log::Logger,
+) {
+    logger.err(
+        "probe refused: probe_save = true but this build was compiled without \
+         the \"probe\" feature — no save hooks (rebuild with the default features)",
+    );
 }
 
 /// The game exe's mapped image base (GetModuleHandle(NULL) — ASLR-safe with

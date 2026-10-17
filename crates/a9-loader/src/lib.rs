@@ -41,11 +41,11 @@ mod log; // <mods_dir>/a9loader.log
 mod overlay; // M3: the CFile::Open redirect + merge cache
 #[cfg(target_os = "windows")]
 mod patch; // VirtualProtect write helpers + patch recipes
-#[cfg(target_os = "windows")]
+#[cfg(all(target_os = "windows", feature = "probe"))]
 mod probe; // M4: the runtime fetch probe (probe_fetch = true diagnostics)
-#[cfg(target_os = "windows")]
+#[cfg(all(target_os = "windows", feature = "probe"))]
 mod probe_save; // M7-2: the save-path writer probe (probe_save = true diagnostics)
-#[cfg(target_os = "windows")]
+#[cfg(all(target_os = "windows", feature = "probe"))]
 mod probe_window; // M7: the purchase-window list dump (probe_window = true diagnostics)
 #[cfg(target_os = "windows")]
 mod rowinject; // M7-1: direct spec-row injection (mechanism + harness export; NOT boot-wired)

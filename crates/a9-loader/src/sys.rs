@@ -120,3 +120,39 @@ pub unsafe fn is_readable(ptr: *const c_void, len: usize) -> bool {
         true
     }
 }
+
+/// Never read more than this many wide chars for one logged/inspected name
+/// (a runaway string is refused rather than guessed at).
+const MAX_NAME_CHARS: usize = 512;
+
+/// Read a wide string at `p` (bounded), requiring its pages readable.
+pub(crate) fn wide_str(p: *const u16) -> Option<String> {
+    if p.is_null() {
+        return None;
+    }
+    let mut units: Vec<u16> = Vec::with_capacity(64);
+    let mut q = p;
+    unsafe {
+        if !is_readable(p.cast(), 32) {
+            return None;
+        }
+        loop {
+            let u = *q;
+            if u == 0 {
+                break;
+            }
+            units.push(u);
+            if units.len() >= MAX_NAME_CHARS {
+                return None; // runaway string — refuse rather than guess
+            }
+            q = q.add(1);
+            if units.len() & 0x1f == 0 && !is_readable(q.cast(), 32) {
+                return None;
+            }
+        }
+    }
+    if units.is_empty() {
+        return None;
+    }
+    Some(String::from_utf16_lossy(&units))
+}

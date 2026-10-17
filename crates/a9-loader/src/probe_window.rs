@@ -26,7 +26,7 @@
 //! logs one loud line and leaves the boot vanilla. Neither hook panics or
 //! changes behaviour.
 
-use crate::{forms, handlers, log, patch, probe, sys};
+use crate::{forms, handlers, log, patch, sys};
 use a9_mod::builds::BuildEntry;
 use core::ffi::c_void;
 use std::sync::Mutex;
@@ -243,7 +243,7 @@ unsafe fn row_desc(manager: usize, id: u32) -> String {
         // so it answers "<unreadable>" for the JP lane on every row.
         let data = std::ptr::read(name_slot);
         let name = if sys::is_readable(data.cast(), 2) {
-            probe::wide_str(data)
+            sys::wide_str(data)
         } else {
             None
         };

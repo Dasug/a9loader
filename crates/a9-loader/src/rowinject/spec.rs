@@ -348,7 +348,7 @@ unsafe fn inject_locked(g: &Inner) -> Result<(usize, usize, String), String> {
             }
         }
         let name =
-            crate::probe::wide_str(*(scratch.as_ptr().add(ROW_PFORMNAME) as *const *const u16))
+            crate::sys::wide_str(*(scratch.as_ptr().add(ROW_PFORMNAME) as *const *const u16))
                 .unwrap_or_else(|| "<unreadable>".into());
 
         // grow through the ENGINE's own reallocate (its allocator, its copy,

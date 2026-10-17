@@ -61,8 +61,6 @@ struct State {
 
 static G: std::sync::OnceLock<State> = std::sync::OnceLock::new();
 
-/// Never read more than this many wide chars for one logged name.
-const MAX_NAME_CHARS: usize = 512;
 
 /// Install the probe: expect-verify + trampoline every anchor in order.
 /// Returns Err only when there is nothing to install at all; individual
@@ -130,39 +128,6 @@ pub unsafe fn install(logger: log::Logger, base: *const u8, specs: &[Spec]) -> R
     }
 }
 
-/// Read a wide string at `p` (bounded), requiring its pages readable.
-pub(crate) fn wide_str(p: *const u16) -> Option<String> {
-    if p.is_null() {
-        return None;
-    }
-    let mut units: Vec<u16> = Vec::with_capacity(64);
-    let mut q = p;
-    unsafe {
-        if !sys::is_readable(p.cast(), 32) {
-            return None;
-        }
-        loop {
-            let u = *q;
-            if u == 0 {
-                break;
-            }
-            units.push(u);
-            if units.len() >= MAX_NAME_CHARS {
-                return None; // runaway string — refuse rather than guess
-            }
-            q = q.add(1);
-            if units.len() & 0x1f == 0 && !sys::is_readable(q.cast(), 32) {
-                return None;
-            }
-        }
-    }
-    if units.is_empty() {
-        return None;
-    }
-    Some(String::from_utf16_lossy(&units))
-}
-
-/// Wide NAME behind a possibly-double-encoded pointer: either the raw wstr
 /// itself (readable, sane) or a wstring-object whose first field is the
 /// data pointer. Decides by head sanity: a raw path's first wide unit is
 /// printable ASCII; for an object pointer the first unit is the data
@@ -173,7 +138,7 @@ pub(crate) fn wide_str_indirect(p: *const c_void) -> Option<String> {
     if p.is_null() {
         return None;
     }
-    if let Some(s) = wide_str(p.cast())
+    if let Some(s) = sys::wide_str(p.cast())
         && sane_head(&s)
     {
         return Some(s);
@@ -181,7 +146,7 @@ pub(crate) fn wide_str_indirect(p: *const c_void) -> Option<String> {
     unsafe {
         let obj = p as *const *const u16;
         if sys::is_readable(obj.cast(), 16)
-            && let Some(s) = wide_str(*obj)
+            && let Some(s) = sys::wide_str(*obj)
             && sane_head(&s)
         {
             return Some(s);
@@ -312,7 +277,7 @@ unsafe extern "system" fn my_cache_get(
         let Some(state) = G.get() else {
             return core::ptr::null_mut();
         };
-        let refname = wide_str(name).unwrap_or_else(|| "<unreadable>".into());
+        let refname = sys::wide_str(name).unwrap_or_else(|| "<unreadable>".into());
         state
             .logger
             .line(&format!("probe: cache_get cache={cache:p} name={refname:?}"));
