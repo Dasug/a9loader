@@ -1,19 +1,43 @@
 /*
- * host.c — M0 A/B harness.
+ * host.c — the fake game host for every a9loader wine harness (m2..m7train).
  *
- * Emulates the game-side memory layout so the proxy's patch modes can be
- * exercised without the game: two fake regions are mapped at the REAL RVAs
- * of the host exe's image (a page containing the filter function at
- * 0x1A13B0, and a 64K region containing the whitelist table 0x6FC1C0 and the
- * FORM list 0x6FC430). The real FORM list bytes (extracted from the game exe)
- * are copied in, a proxy version.dll (C reference or Rust port) is loaded
- * with an atrain9_proxy.ini for the mode under test, and the patched filter
- * is called through its address, exactly like the game does.
+ * Emulates the game-side memory layout so the loader (the built version.dll)
+ * can be exercised without the game: fake pages are mapped at the REAL RVAs
+ * of the host exe's image, each carrying the REAL original bytes (prologues,
+ * data) the loader's address book (crates/a9-mod/builds.toml) expects, so
+ * expect-verified patch/hook installation passes for real. The DllMain boot
+ * runs the loader's actual engine (config → build gate → scan → resolve →
+ * effects) against per-scenario mod dirs assembled by the m*.sh scripts;
+ * a mode string then drives the fake call sites the way the game would
+ * call them. See harness/README.md for which harness uses which mode.
  *
- * Build: x86_64-w64-mingw32-gcc -O2 -o host.exe host.c
- * Run (from a dir with host.exe, version.dll, atrain9_proxy.ini,
- *      atrain9_filter*.txt, form_list.bin):
- *   wine host.exe <form_list.bin> <mode>
+ * Build: x86_64-w64-mingw32-gcc -O2 -o host.exe host.c [<windres>.o for the
+ *        VERSIONINFO host.rc (right/wrong build ids); see the m*.sh scripts]
+ * Run:   wine host.exe <form_list.bin> <mode>
+ *
+ * Contents — keep this table in step when a milestone adds a section:
+ *   [anchors]        the RVA_* defines: the address book's anchor RVAs in
+ *                    the host image's own address space
+ *   [expect bytes]   the original prologue/data bytes each fake page carries
+ *   [faked bodies]   the bodies the faked CRT prologues call into (malloc,
+ *                    the row/refcount constructors, ...)
+ *   [fake pages]     setup_*: map pages at the real RVAs — filter/whitelist/
+ *                    FORM, cfile_open, M4 fetch-probe fakes, M4 inject fakes,
+ *                    M5 tailgate fakes, M5-T workspace env, M7 tab/form/
+ *                    window fakes, M7-0 clamp fakes, M7-1 spec-table fakes,
+ *                    M7-2 train/car-build fakes
+ *   [mode handlers]  mode_* — one per scenario family; main() dispatches on
+ *                    the mode string (argv[2])
+ * Modes (the dispatch tail in main is authoritative):
+ *   none · filter · model · modeltex · nop · table113 ·
+ *   overlaypack · overlaycsv · overlaydat · overlaytp · loose ·
+ *   probe · tabfix · formfix · window · save · clamp ·
+ *   rows [rows · rows-refuse · rows-refuse-tmpl · rows-order · rows-off] ·
+ *   train [train · train-nodump · train_retry · train_carbuild ·
+ *          train_badhelper] ·
+ *   inject · tailgate [tailgate · tailgate-mismatch · tailgate-ws ·
+ *                      tailgate-tp] ·
+ *   workspace [workspace · workspace-fail]
  */
 #include <windows.h>
 #include <stdint.h>
