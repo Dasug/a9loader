@@ -19,7 +19,7 @@ use a9_mod::manifest::Manifest;
 use a9_mod::train::{self, CompiledTrain, BASE_ID};
 
 use super::report::find_game_exe;
-use crate::gen_builds::rva_to_file;
+use super::gen_builds::rva_to_file;
 
 pub fn run(game: Option<&Path>, mod_dir: Option<&Path>) -> Result<()> {
     let (trains, refusals, forms) = match (game, mod_dir) {

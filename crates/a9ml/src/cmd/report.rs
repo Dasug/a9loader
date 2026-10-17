@@ -16,7 +16,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::classify;
+use super::classify;
 
 /// Everything the offline report needs, gathered once.
 pub(crate) struct Offline {

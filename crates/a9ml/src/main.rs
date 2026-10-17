@@ -5,10 +5,9 @@
 //! drop — there is deliberately no install command.
 //!
 //! This file holds only the CLI surface: the clap argument model ([`Cli`] /
-//! [`Cmd`]) and the dispatch to one entry point per subcommand. The
-//! subcommand implementations live in [`cmd`], and the two data-model modules
-//! ([`asset`], [`classify`]) plus the two generators ([`gen_builds`],
-//! [`gen_dirindex`]) keep their own entry points.
+//! [`Cmd`]) and the dispatch to one entry point per subcommand. Every
+//! subcommand implementation lives in [`cmd`] — the whole rule, no exceptions
+//! at the crate root (shared helpers only in [`util`]).
 //!
 //! The argument definitions stay here, together, on purpose: the subcommand
 //! names, flags, defaults and help text are the user-visible contract, so
@@ -17,11 +16,7 @@
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
-mod asset;
-mod classify;
 mod cmd;
-mod gen_builds;
-mod gen_dirindex;
 mod util;
 
 #[derive(Parser)]
@@ -288,7 +283,7 @@ fn main() {
         Cmd::List { game } => cmd::list::list(game),
         Cmd::Doctor { game } => cmd::list::doctor(game),
         Cmd::Classify { path, entry, pack } => {
-            classify::run(path.as_deref(), entry.as_deref(), pack.as_deref())
+            cmd::classify::run(path.as_deref(), entry.as_deref(), pack.as_deref())
         }
         Cmd::DiffPack {
             pack,
@@ -310,13 +305,13 @@ fn main() {
             game_builds,
             rows,
         } => cmd::diff::diff_csv(base, modded, out, id, name, author, game_builds, *rows),
-        Cmd::GenBuilds { exe, out, check } => gen_builds::run(exe, out.as_deref(), *check),
+        Cmd::GenBuilds { exe, out, check } => cmd::gen_builds::run(exe, out.as_deref(), *check),
         Cmd::GenDirindex {
             data_dir,
             out,
             check,
             exe,
-        } => gen_dirindex::run(data_dir, exe.as_deref(), out.as_deref(), *check),
+        } => cmd::gen_dirindex::run(data_dir, exe.as_deref(), out.as_deref(), *check),
         Cmd::Mkpack {
             container,
             entries,
@@ -341,8 +336,8 @@ fn main() {
             name,
             out,
             pack,
-        } => asset::run(game, name, out.as_deref(), pack.as_deref()),
-        Cmd::MergeAssets { game, mod_dir, out } => asset::run_merge(game, mod_dir, out),
+        } => cmd::asset::run(game, name, out.as_deref(), pack.as_deref()),
+        Cmd::MergeAssets { game, mod_dir, out } => cmd::asset::run_merge(game, mod_dir, out),
         Cmd::Trains { game, mod_dir } => {
             cmd::trains::run(game.as_deref(), mod_dir.as_deref())
         }
