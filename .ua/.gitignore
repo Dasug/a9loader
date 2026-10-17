@@ -1,0 +1,14 @@
+# Transient state of the understand-anything skill — deliberately not committed.
+#
+# tmp/          scratch space for the bundled pipeline scripts (batch inputs,
+#               fingerprint input, the merge report, the inline validator).
+# intermediate/ the pipeline's working files and the Phase 1 inventory. Local
+#               scratch by upstream's guidance; regenerated on the next run.
+# .trash-*/     what the skill's own cleanup step moves out of intermediate/,
+#               kept for 7 days before it deletes them.
+#
+# Committed here: knowledge-graph.json, fingerprints.json, meta.json and
+# .understandignore — see "Knowledge graph" in the repository README.
+tmp/
+intermediate/
+.trash-*/
