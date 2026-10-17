@@ -1,7 +1,7 @@
-//! M7-1 — the direct spec-row injection: the resolved engine state, the
+//! the direct spec-row injection: the resolved engine state, the
 //! reserve primitive and the `spec_table_resize` hook. This is the harness
 //! seam (`a9loader_m7_rows`); see the parent module's doc for the mechanism,
-//! `train.rs` for the M7-2 `[[train]]` path that builds on it.
+//! `train.rs` for the `[[train]]` path that builds on it.
 
 use crate::{log, patch, sys};
 use a9_mod::builds::BuildEntry;
@@ -23,23 +23,23 @@ pub(super) const ANCHOR_CONSIST_COPY: &str = "consist_row_copy";
 /// DIAGNOSTIC anchor: the consist object creator (see `my_consist_create`).
 pub(super) const ANCHOR_CONSIST_CREATE: &str = "consist_object_create";
 
-/// The spec-table manager singleton (`DAT_140e14510`).
+/// The spec-table manager singleton (0x140e14510).
 pub(super) const MANAGER_RVA: usize = 0xE14510;
 /// The manager's rows vector object `{begin,end,cap}` (`manager+0x18`).
 pub(super) const MGR_ROWS: usize = 0x18;
 /// The spec-row stride.
 pub(super) const ROW_STRIDE: usize = 0x140;
-/// `A9_SpecRow_140` fields (notes/52 §5).
+/// `A9_SpecRow_140` fields.
 pub(super) const ROW_BVALID: usize = 0x00;
 pub(super) const ROW_NAME_JP: usize = 0xa8;
 pub(super) const ROW_NAME_EN: usize = 0xb0;
 pub(super) const ROW_PFORMNAME: usize = 0x138;
-/// The per-car save id is a u16 (notes/62 §3.1) — the hard upper bound.
+/// The per-car save id is a u16 — the hard upper bound.
 const RESERVED_MAX: usize = 65535;
 
-/// The shipped, valid template row this mechanism clones (M7-1 harness: row 0).
+/// The shipped, valid template row this mechanism clones (harness: row 0).
 const TEMPLATE_ID: usize = 0;
-/// How many reserved rows the mechanism injects (M7-1: one).
+/// How many reserved rows the mechanism injects (one).
 const RESERVED_ROWS: usize = 1;
 
 /// `L"form_id_%d"` — the engine's own auto-name shape (its literal lives at
@@ -48,7 +48,7 @@ const RESERVED_ROWS: usize = 1;
 static FORM_FMT: [u16; 11] = [
     0x66, 0x6f, 0x72, 0x6d, 0x5f, 0x69, 0x64, 0x5f, 0x25, 0x64, 0,
 ];
-/// `L"modrow_%d"` — the injected row's JP/EN display lanes (M7-1 stand-in text).
+/// `L"modrow_%d"` — the injected row's JP/EN display lanes (stand-in text).
 static JP_FMT: [u16; 10] = [0x6d, 0x6f, 0x64, 0x72, 0x6f, 0x77, 0x5f, 0x25, 0x64, 0];
 
 type ResizeFn = unsafe extern "system" fn(*mut u8);
@@ -187,7 +187,7 @@ unsafe fn ensure(install_hook: bool, logger: &log::Logger) -> Result<(), String>
         Ok(())
     }
 }
-/// `A9_SpecRow_140` fields the injection writes (notes/52 §5).
+/// `A9_SpecRow_140` fields the injection writes.
 pub(super) const ROW_CRUISE: usize = 0x0c;
 pub(super) const ROW_REVERSE: usize = 0x0e;
 pub(super) const ROW_ACCEL: usize = 0x10;
@@ -293,7 +293,7 @@ unsafe fn inject_locked(g: &Inner) -> Result<(usize, usize, String), String> {
             return Err(format!(
                 "reserved id {last_reserved} >= the composed keep-set width \
                  (forms.rs FORMS_MAX = {forms_max}) — the loader could never admit \
-                 its own train; M7-2 must widen the bitmap or fit under it"
+                 its own train; mod trains must widen the bitmap or fit under it"
             ));
         }
         let accessor: AccessorFn = core::mem::transmute(g.accessor);
@@ -348,7 +348,7 @@ unsafe fn inject_locked(g: &Inner) -> Result<(usize, usize, String), String> {
             }
         }
         let name =
-            crate::probe::wide_str(*(scratch.as_ptr().add(ROW_PFORMNAME) as *const *const u16))
+            crate::sys::wide_str(*(scratch.as_ptr().add(ROW_PFORMNAME) as *const *const u16))
                 .unwrap_or_else(|| "<unreadable>".into());
 
         // grow through the ENGINE's own reallocate (its allocator, its copy,
@@ -410,7 +410,7 @@ unsafe extern "system" fn my_resize(vec: *mut u8) {
 
 // ---------------------------------------------------------------------------
 // The harness seam. NOT wired into `engine::boot` and not read from any config
-// or manifest — M7-2 owns the integration. `harness/host.c` calls this through
+// or manifest — the boot integration lives in `train.rs`. `harness/host.c` calls this through
 // GetProcAddress after it has mapped the fake manager / spec-table pages at the
 // real RVAs.
 //

@@ -1,4 +1,4 @@
-//! The M2 boot engine — the general loader. Everything here runs inside
+//! The boot engine — the general loader. Everything here runs inside
 //! `DllMain(DLL_PROCESS_ATTACH)`: **file IO + memory only, never
 //! `LoadLibrary`** (loader lock; the real VERSION.dll stays lazily loaded by
 //! the forwarders on the game's first version-API call, after init).
@@ -42,7 +42,7 @@ pub unsafe fn boot(hinst: sys::HMODULE) {
     let cfg = config::read(&exe_dir.join("a9loader.toml"));
     let mods_dir = exe_dir.join(&cfg.mods_dir);
     let logger = log::Logger::new(&mods_dir.join("a9loader.log"));
-    logger.line(&format!("---- a9loader {LOADER_VERSION} (M2 engine) run ----"));
+    logger.line(&format!("---- a9loader {LOADER_VERSION} (boot engine) run ----"));
     for w in &cfg.warnings {
         logger.warn(w);
     }
@@ -63,7 +63,7 @@ pub unsafe fn boot(hinst: sys::HMODULE) {
     };
     let base = unsafe { base_ptr() };
 
-    // ---- M7-0: the save-id clamp guard. ALWAYS ON (a safety fix, not a
+    // ---- the save-id clamp guard. ALWAYS ON (a safety fix, not a
     // diagnostic): a saved formation's form id is used as a spec-row index
     // with no bounds check, so an out-of-range id reads past the heap block.
     // Installed before the mod scan so it runs even with no mods at all —
@@ -90,7 +90,7 @@ pub unsafe fn boot(hinst: sys::HMODULE) {
         return;
     };
 
-    // ---- M7-2: compile the [[train]] sections (pure, offline) and refuse any
+    // ---- compile the [[train]] sections (pure, offline) and refuse any
     // whose allocated FORM name collides with a shipped catalog name. The
     // compiler is per-train fail-open; the collision check needs the live FORM
     // list, so it lives here.
@@ -113,10 +113,10 @@ pub unsafe fn boot(hinst: sys::HMODULE) {
         apply_memory_effects(&manifests, &dirs, &res, &build_id, &entry, base, &logger, &trains)
     };
 
-    // ---- data effects (M3/M4): [[pack]]/[[csv]] serving
+    // ---- data effects: [[pack]]/[[csv]] serving
     // pack_serving == "inject" routes family-B [[pack]] effects through the
-    // M4 window-scoped injector instead of the merge overlay; [[csv]] keeps
-    // the M3 merge mechanism in both modes.
+    // the window-scoped injector instead of the merge overlay; [[csv]] keeps
+    // the merge mechanism in both modes.
     let inject_mode = cfg.pack_serving == a9_mod::config::PackServing::Inject;
     let mut builder = PlanBuilder::new(&res, &build_id, inject_mode, &logger, &trains);
     for &i in &res.order {
@@ -127,20 +127,20 @@ pub unsafe fn boot(hinst: sys::HMODULE) {
 
     note_asset_serving(&cfg, &plan, &logger);
 
-    // ---- M5-U: derive the auto-merged `.dir` group listings from the mods'
+    // ---- derive the auto-merged `.dir` group listings from the mods'
     // OWN [[asset]] rows (an author never writes a `.dir` file). Runs before
     // the serving decision: the rebuilt listing payload rides its host pack
     // exactly like an asset payload and its row joins the i.dat rows on
     // whichever path serves that host.
     plan.listings = tailgate_plan::plan_listings(&plan, &exe_dir, &logger);
 
-    // ---- M5 tailgate: [[asset]] new assets appended in place at the family-A
+    // ---- the tailgate: [[asset]] new assets appended in place at the family-A
     // decode (no cache, no re-encode). Decided per host at boot; merge is the
     // fallback for anything that does not line up. Runs BEFORE the overlay
     // install — the overlay must know which packs to leave alone.
     unsafe { tailgate_plan::decide_and_grow(&mut plan, &exe_dir, &cfg, &entry, base, &logger) };
 
-    // ---- the M4 inject splice (before the overlay hook — a failed splice
+    // ---- the inject splice (before the overlay hook — a failed splice
     // must fall back to merge BEFORE the overlay plan is finalized). The
     // splice is the ONLY thing inject mode installs: it rewrites the
     // expect-verified family-B runner call over to the injector stub; the
@@ -155,7 +155,7 @@ pub unsafe fn boot(hinst: sys::HMODULE) {
     // pack-identity capture seam
     install_overlay(plan, &cfg, &exe_dir, &mods_dir, &entry, &logger, injector_live);
 
-    // ---- M7-2: the train spec-row injection. Installed AFTER the overlay so a
+    // ---- the train spec-row injection. Installed AFTER the overlay so a
     // failed injection cannot affect serving; the hook (train_list_builder,
     // trampoline-only) fires later, inside the CSV pipeline, once the shipped
     // rows are populated. Fail-open: a refusal logs and the game boots with the
@@ -173,7 +173,7 @@ pub unsafe fn boot(hinst: sys::HMODULE) {
     );
     }
 
-    // ---- M4 fetch probe (opt-in diagnostics; trampoline-only, fail-open)
+    // ---- the fetch probe (opt-in diagnostics; trampoline-only, fail-open)
     // Installs after the build gate + overlay block; each anchor
     // expect-verifies like every other write. Pure diagnostics: nothing
     // downstream changes behavior, all failure paths log loudly and the
@@ -182,15 +182,15 @@ pub unsafe fn boot(hinst: sys::HMODULE) {
         install_probe(&entry, base, &mods_dir, &logger);
     }
 
-    // ---- M7 purchase-window probe (opt-in diagnostics; trampoline-only,
+    // ---- the purchase-window probe (opt-in diagnostics; trampoline-only,
     // fail-open): dumps the spec-table manager's three index vectors on the
     // window's entry/exit whenever a size changes — the observable of the
-    // notes/23 type-cycle quirk. No behaviour change.
+    // type-cycle quirk. No behaviour change.
     if cfg.probe_window {
         install_window_probe(&entry, base, &mods_dir, &logger);
     }
 
-    // ---- M7-2 save-path probe (opt-in diagnostics; trampoline-only,
+    // ---- the save-path probe (opt-in diagnostics; trampoline-only,
     // fail-open): hooks the four save-side mmf helpers and logs the caller RVA
     // + size of every save-path write, so one in-game save answers whether a
     // formation's car block is one bulk 0xf8 write (the 20-byte tails then
@@ -261,7 +261,7 @@ fn build_gate(exe: &Path, logger: &log::Logger) -> Option<(String, builds::Build
 /// Scan `mods/`, drop disabled ids with one line each, and resolve the
 /// survivors (deps/conflicts/overlaps). `None` = no mods (or none left) —
 /// the boot continues as a pure proxy, after honoring an explicit
-/// `workspace_out_mb` (M5-T is config-driven).
+/// `workspace_out_mb` (the workspace swap is config-driven).
 fn scan_and_resolve(
     mods_dir: &Path,
     cfg: &config::Config,
@@ -305,7 +305,7 @@ fn scan_and_resolve(
     }
     if manifests.is_empty() {
         logger.line("mods: none — pure proxy");
-        // M5-T is config-driven: an explicit `workspace_out_mb` is honored even
+        // the workspace swap is config-driven: an explicit `workspace_out_mb` is honored even
         // with no mods (AUTO has nothing to size against, so it does nothing).
         unsafe {
             let _ = tailgate_plan::maybe_grow_workspace(cfg, 0, entry, logger);
@@ -336,7 +336,7 @@ fn scan_and_resolve(
 }
 
 /// Apply every mod's `[[patch]]`/`[[hook]]` in resolved order and compose the
-/// `train_list` contributions into ONE filter install (M5 W3 — several mods
+/// `train_list` contributions into ONE filter install (several mods
 /// may each declare forms to offer/hide; a priority tie must not decide
 /// membership). Returns `(applied, refused)`.
 #[allow(clippy::too_many_arguments)]
@@ -353,7 +353,7 @@ unsafe fn apply_memory_effects(
     let mut applied = 0usize;
     let mut refused = 0usize;
     // `train_list` contributions are collected here and composed into ONE
-    // filter install after the loop (M5 W3 — several mods may each declare
+    // filter install after the loop (several mods may each declare
     // forms to offer/hide; a priority tie must not decide membership).
     let mut train_list: Vec<handlers::Contribution> = Vec::new();
     for &i in &res.order {
@@ -375,10 +375,10 @@ unsafe fn apply_memory_effects(
             train_list.push(c);
         }
     }
-    // M7-2: a `[[train]]`'s allocated id is not in the FORM list, so the name
+    // a `[[train]]`'s allocated id is not in the FORM list, so the name
     // match in `train_list_contribution` can never admit it — the reserved ids
     // are added to the composed keep-set PROGRAMMATICALLY, one `Add`
-    // contribution per mod that declares trains (notes/62-D).
+    // contribution per mod that declares trains.
     for &i in &res.order {
         let ids: Vec<usize> = trains
             .iter()
@@ -486,11 +486,11 @@ unsafe fn apply_mod_effects(
 /// Install the ONE composed `train_list` filter: read the FORM list length for
 /// the log, install, and report the outcome. Returns `(applied, refused)`.
 ///
-/// On a successful install this also arms the M7 type-tab rebuild fix
+/// On a successful install this also arms the type-tab rebuild fix
 /// (`crate::tabrebuild`): the purchase window rebuilds its list on every type
 /// tab (re)build through a function that hard-codes the vanilla whitelist, so
 /// without the fix every composed row that is not in the vanilla 97 vanishes on
-/// the first cycle (notes/23). A failed fix install is fail-open — the filter
+/// the first cycle. A failed fix install is fail-open — the filter
 /// still works, only the cycle quirk remains — and is logged loudly.
 unsafe fn install_composed_train_list(
     train_list: &[handlers::Contribution],
@@ -508,7 +508,7 @@ unsafe fn install_composed_train_list(
     match unsafe { handlers::install_train_list(train_list, entry, base, forms_len, logger) } {
         Ok(journal) => {
             logger.line(&journal);
-            // M7: the type-tab cycle fix (only meaningful with a composed
+            // the type-tab cycle fix (only meaningful with a composed
             // filter installed — that is exactly this branch)
             match unsafe { crate::tabrebuild::install(entry, base) } {
                 Ok(line) => logger.line(&line),
@@ -517,8 +517,8 @@ unsafe fn install_composed_train_list(
                      its vanilla behaviour (fail-open)"
                 )),
             }
-            // M7: the custom-train-form editor's candidate list rebuilds
-            // through a second hard-coded vanilla-whitelist scan (notes/23);
+            // the custom-train-form editor's candidate list rebuilds
+            // through a second hard-coded vanilla-whitelist scan;
             // the same composed keep-set gates it. Fail-open like the tab fix.
             match unsafe { crate::formreadout::install(entry, base) } {
                 Ok(line) => logger.line(&line),
@@ -562,7 +562,7 @@ fn note_asset_serving(cfg: &config::Config, plan: &crate::overlay::Plan, logger:
     }
 }
 
-/// The M4 inject splice: verify the famb site + relay cave anchors and install
+/// The inject splice: verify the famb site + relay cave anchors and install
 /// the stub; on any refusal move the inject ops back into the merge plan
 /// (fail-open — the packs serve exactly as they would in merge mode). Returns
 /// whether the injector is live.
@@ -853,9 +853,13 @@ fn report_overlay_failure(
     }
 }
 
-/// The M4 fetch probe (opt-in diagnostics): collect the probe specs from the
+/// The fetch probe (opt-in diagnostics): collect the probe specs from the
 /// address book and install the trampolines; a failure logs loudly and leaves
 /// the rest of the boot untouched.
+///
+/// Compiled only with the `probe` feature; without it the flag still logs (see
+/// the stub below) — fail-open, never silent.
+#[cfg(all(target_os = "windows", feature = "probe"))]
 fn install_probe(
     entry: &builds::BuildEntry,
     base: *const u8,
@@ -894,10 +898,14 @@ fn install_probe(
     }
 }
 
-/// The M7 purchase-window probe (opt-in diagnostics): hook the type-tab
+/// The purchase-window probe (opt-in diagnostics): hook the type-tab
 /// rebuild entry and the big list window entry trampoline-only and dump the
 /// spec-table manager's index vectors on entry/exit whenever a size changes
-/// (notes/23). A failure logs loudly and leaves the boot vanilla.
+///. A failure logs loudly and leaves the boot vanilla.
+///
+/// Compiled only with the `probe` feature; without it the flag still logs (see
+/// the stub below) — fail-open, never silent.
+#[cfg(all(target_os = "windows", feature = "probe"))]
 fn install_window_probe(
     entry: &builds::BuildEntry,
     base: *const u8,
@@ -923,10 +931,14 @@ fn install_window_probe(
     }
 }
 
-/// The M7-2 save-path probe (opt-in diagnostics): hook the four save-side mmf
+/// The save-path probe (opt-in diagnostics): hook the four save-side mmf
 /// helpers trampoline-only and log the caller RVA + size + first bytes of every
-/// save-path write (notes/62-B §4.2). A failure logs loudly and leaves the boot
+/// save-path write. A failure logs loudly and leaves the boot
 /// vanilla.
+///
+/// Compiled only with the `probe` feature; without it the flag still logs (see
+/// the stub below) — fail-open, never silent.
+#[cfg(all(target_os = "windows", feature = "probe"))]
 fn install_save_probe(
     entry: &builds::BuildEntry,
     base: *const u8,
@@ -952,13 +964,57 @@ fn install_save_probe(
     }
 }
 
+/// Empty builds for a DLL compiled without the `probe` feature: the config
+/// flag is honoured with ONE loud log line instead of hooks; everything else
+/// about the boot is unchanged (fail-open, no silent capability change).
+#[cfg(all(target_os = "windows", not(feature = "probe")))]
+fn install_probe(
+    _entry: &builds::BuildEntry,
+    _base: *const u8,
+    _mods_dir: &Path,
+    logger: &log::Logger,
+) {
+    logger.err(
+        "probe refused: probe_fetch = true but this build was compiled without \
+         the \"probe\" feature — no fetch hooks (rebuild with the default features)",
+    );
+}
+
+/// See [`install_probe`]: the no-`probe`-feature stub.
+#[cfg(all(target_os = "windows", not(feature = "probe")))]
+fn install_window_probe(
+    _entry: &builds::BuildEntry,
+    _base: *const u8,
+    _mods_dir: &Path,
+    logger: &log::Logger,
+) {
+    logger.err(
+        "probe refused: probe_window = true but this build was compiled without \
+         the \"probe\" feature — no window hooks (rebuild with the default features)",
+    );
+}
+
+/// See [`install_probe`]: the no-`probe`-feature stub.
+#[cfg(all(target_os = "windows", not(feature = "probe")))]
+fn install_save_probe(
+    _entry: &builds::BuildEntry,
+    _base: *const u8,
+    _mods_dir: &Path,
+    logger: &log::Logger,
+) {
+    logger.err(
+        "probe refused: probe_save = true but this build was compiled without \
+         the \"probe\" feature — no save hooks (rebuild with the default features)",
+    );
+}
+
 /// The game exe's mapped image base (GetModuleHandle(NULL) — ASLR-safe with
 /// book RVAs).
 unsafe fn base_ptr() -> *const u8 {
     unsafe { sys::GetModuleHandleW(std::ptr::null()) as *const u8 }
 }
 
-/// M7-2: drop any `[[train]]` whose allocated FORM name is a SHIPPED catalog
+/// Drop any `[[train]]` whose allocated FORM name is a SHIPPED catalog
 /// name. The compiler's naming scheme (`FORM_<MOD>_<KEY>`) makes this reachable
 /// (e.g. mod `dummy` + key `02` -> `FORM_DUMMY_02`), and an alias would make the
 /// injected row shadow a real train in the annotator's name-keyed lookup.
@@ -992,7 +1048,7 @@ fn refuse_colliding_trains(
     });
 }
 
-/// M7-2: install the train spec-row injection (`crate::rowinject`). Fail-open.
+/// Install the train spec-row injection (`crate::rowinject`). Fail-open.
 fn install_train_injection(
     entry: &builds::BuildEntry,
     base: *const u8,

@@ -15,3 +15,12 @@ toml = "0.9"
 # the game must load. rlib is included so `cargo test` links cleanly.
 name = "version"
 crate-type = ["cdylib", "rlib"]
+
+[features]
+# The opt-in diagnostics (probe.rs / probe_save.rs / probe_window.rs, driven by
+# the probe_fetch / probe_window / probe_save config flags) ship in every
+# normal build; `--no-default-features` builds the loader without them. With
+# the feature off, a config that asks for a probe logs one loud line and the
+# boot proceeds without the hooks (fail-open, no silence).
+default = ["probe"]
+probe = []

@@ -1,13 +1,13 @@
 //! DIAGNOSTIC ONLY — OFF BY DEFAULT, not part of normal loader operation.
 //!
 //! Nothing here runs unless `probe_window = true` is set in `a9loader.toml`.
-//! It observes the corpus notes/23 purchase-window type-cycle quirk live.
+//! It observes the purchase-window type-cycle quirk live.
 //!
 //! Two trampoline-only hooks, both dumping the spec-table manager's three index
 //! vectors (`+0x30` unfiltered, `+0x48` the list the UI reads, `+0x60` the
 //! type-group list):
 //!
-//! - the **type-tab rebuild** `FUN_14019e760` — the precise cycle engine the
+//! - the **type-tab rebuild** — the precise cycle engine the
 //!   big list window calls with the selected tab's type list; its entry/exit
 //!   bracket the rebuild, so the sizes before/after and the rows that vanished
 //!   are exactly the quirk's observable. Its exit line also names what the
@@ -26,7 +26,7 @@
 //! logs one loud line and leaves the boot vanilla. Neither hook panics or
 //! changes behaviour.
 
-use crate::{forms, handlers, log, patch, probe, sys};
+use crate::{forms, handlers, log, patch, sys};
 use a9_mod::builds::BuildEntry;
 use core::ffi::c_void;
 use std::sync::Mutex;
@@ -39,7 +39,7 @@ pub const ANCHOR_WINDOW: &str = "train_list_window_entry";
 /// The spec-table manager singleton (data anchor, no expect bytes).
 pub const ANCHOR_MANAGER: &str = "train_spec_manager";
 
-/// The manager's fields (see notes/18 §2).
+/// The manager's fields.
 const MGR_ROWS: usize = 0x18;
 const MGR_ROWS_END: usize = 0x20;
 const VEC_UNFILTERED: usize = 0x30;
@@ -50,12 +50,12 @@ const ROW_TYPE: usize = 0x04;
 /// The row's JP/EN display names are raw CString DATA POINTERS at +0xa8/+0xb0
 /// (`wstr_assign_thunk` stores `*(row+0xa8) = data_ptr`; the CString's
 /// refcount header lives at `data_ptr-0x18`). The game picks the lane with the
-/// manager's language offset (`manager+0x90`, 0 = JP / 8 = EN) — see
-/// FUN_1401fe780 (`PTR_140e14528[id].aName + _DAT_140e145a0`).
+/// manager's language offset (`manager+0x90`, 0 = JP / 8 = EN), per the lane
+/// picker at 0x1401fe780.
 const ROW_NAME_JP: usize = 0xa8;
 /// The manager's display-name language lane offset (0 or 8).
 const MGR_LANG_OFF: usize = 0x90;
-/// The 0x2c-stride tab descriptor table (notes/23).
+/// The 0x2c-stride tab descriptor table.
 const TAB_TABLE_RVA: usize = 0x68e950;
 const TAB_STRIDE: usize = 0x2c;
 /// Wide chars logged per name.
@@ -156,7 +156,7 @@ pub unsafe fn install(
         hook(
             ANCHOR_TAB,
             my_tab_rebuild as *const c_void,
-            "tab rebuild (FUN_14019e760 — the type-cycle engine)",
+            "tab rebuild (the type-cycle engine)",
             Slot::Tab,
         );
         hook(
@@ -243,7 +243,7 @@ unsafe fn row_desc(manager: usize, id: u32) -> String {
         // so it answers "<unreadable>" for the JP lane on every row.
         let data = std::ptr::read(name_slot);
         let name = if sys::is_readable(data.cast(), 2) {
-            probe::wide_str(data)
+            sys::wide_str(data)
         } else {
             None
         };
