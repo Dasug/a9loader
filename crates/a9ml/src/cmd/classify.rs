@@ -1,13 +1,13 @@
 //! Asset-consumption classifier — "will my texture replace actually win?"
 //!
 //! The answer depends on WHERE the game consumes an asset during boot. The
-//! model below is verified in `notes/24-m4-pack-model.md` **round 7** (plus the
+//! model below is verified in ` **round 7** (plus the
 //! round-7 early-consumer enumeration):
 //!
 //! * **Stage 1, pre-sequence** — `boot_pack_system_driver` 0x140319480:
-//!   `i.dat` → the master map `DAT_144f86100`; `csdp` → CCommonShader `.vs`/`.ps`
+//!   `i.dat` → the master map at 0x144f86100; `csdp` → CCommonShader .vs`/`.ps`
 //!   **COM shaders** (bytecode compiled at load, no buffer survives); `csvp` →
-//!   the CSV reservoir `DAT_140ef7528`. So shader bytecode and CSV tables are
+//!   the CSV reservoir at 0x140ef7528. So shader bytecode and CSV tables are
 //!   consumed **before** the asset sequence ever runs.
 //! * **Stage 2** — `pack_load_sequence_teardown` 0x14031c1c0:
 //!   `tp → sdp → me0-3 → mtentr0/mtcutp0 → mcp → ep → cp → vp`, then teardown.
@@ -26,13 +26,13 @@
 //! * `vp` — the train/road/auto/rail pipelines, reading the **pre-resident
 //!   csvp reservoir**; there is no per-entry vp target among the shipped
 //!   packs, so nothing *shipped* is labelled `early:vp` (table data is
-//!   `pre-shader/pre-csv`). A **merge-hosted `[[asset]]`** in `vp` (M5 W1) IS
+//!   `pre-shader/pre-csv`). A **merge-hosted `[[asset]]`** in `vp` (the1) IS
 //!   consumed in the vp window — its payload is appended to the merged vp
 //!   image and its i.dat row is read here — so it is labelled `early:vp`.
 //!
 //! **Late-override-viable**: ONLY the family-B image packs `me0-3`/`mtentr0`/
 //! `mtcutp0`. Their entries go through `texture_manager_insert_raw` into the
-//! CTexture cache (delegate `FUN_1403f0330` → `FUN_1403f03d0`, insert at
+//! CTexture cache (the row delegate pair at 0x1403f0330/0x1403f03d0, insert at
 //! 0x1403f04b0), so a late pass with mode 0 wins — "last wins". Those are the
 //! livery/kit textures: the suffix families `_d_`/`_m_`/`_l_`/`_n_`/`_a_`
 //! (and `_a_b` volume textures). `.dir` blobs inside those packs are index
@@ -81,7 +81,7 @@ impl Pat {
 }
 
 /// Family-B image-pack texture suffix families — the famb row delegate
-/// `FUN_1403f0330` dispatch (`_m_`/`_l_` half-size, `_n_`, `_a_b`/`ab`
+/// The row-delegate dispatch (`_m_`/`_l_` half-size, `_n_`, `_a_b`/`ab`
 /// volume, default d3dx) plus the base `_d_` (diffuse/default). These are the
 /// livery/kit textures; **only** entries in a family-B image pack matching
 /// these are late-viable.
@@ -594,7 +594,7 @@ pub fn run(path: Option<&Path>, entry: Option<&str>, pack: Option<&str>) -> Resu
 /// The command's banner: the model provenance and how to read the classes.
 fn print_header() {
     println!("== a9ml classify — where the game consumes each data effect");
-    println!("   model: notes/24 round 7 — stage 1 (i.dat/csdp/csvp) then");
+    println!("   model: round 7 — stage 1 (i.dat/csdp/csvp) then");
     println!("          tp → sdp → me0-3 → mtentr0/mtcutp0 → mcp → ep → cp → vp");
     println!("   early:* = consumed inside that boot window — serve with pack_serving=inject or merge");
     println!("             pre-shader/pre-csv = consumed in stage 1 · unknown = be conservative");

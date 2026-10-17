@@ -1,4 +1,4 @@
-//! `a9ml trains` — the offline `[[train]]` dry run (M7-2): show what each
+//! `a9ml trains` — the offline `[[train]]` dry run: show what each
 //! declared train will allocate and expand to, and validate it without booting
 //! the game. Nothing is applied; this is the authoring view of exactly what the
 //! loader does at boot.
@@ -19,7 +19,7 @@ use a9_mod::manifest::Manifest;
 use a9_mod::train::{self, CompiledTrain, BASE_ID};
 
 use super::report::find_game_exe;
-use crate::gen_builds::rva_to_file;
+use super::gen_builds::rva_to_file;
 
 pub fn run(game: Option<&Path>, mod_dir: Option<&Path>) -> Result<()> {
     let (trains, refusals, forms) = match (game, mod_dir) {

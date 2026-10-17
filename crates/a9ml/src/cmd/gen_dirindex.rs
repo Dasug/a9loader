@@ -1,5 +1,5 @@
 //! `a9ml gen-dirindex` — regenerate the per-build `dir -> pack` index from a
-//! live install (M5 W1b).
+//! live install.
 //!
 //! The host pack of a `host = "auto"` asset is not a free choice: every
 //! `pack_master_map_query` consumer addresses the payload as
@@ -8,7 +8,7 @@
 //! a row's `(off, len)` selects bytes in whichever pack was current — so the
 //! generator recovers the mapping empirically: for every shipped row, decode
 //! each pack's buffer and test whether it holds a plausible payload at
-//! `(off, len)` (the historical corpus `row_match.py` method), then aggregate
+//! `(off, len)` (a signature window match, the reference row-match method), then aggregate
 //! per `dir`.
 //!
 //! A row's content kind drives the test: `.x` records must carry the `ADX0`
